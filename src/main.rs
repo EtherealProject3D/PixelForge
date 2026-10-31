@@ -120,6 +120,13 @@ impl Controls {
 
 struct PixelForge {
     texture: Option<TextureHandle>,
+    processed_texture: Option<TextureHandle>,
+    original_pixels: Option<image::RgbaImage>,
+    brightness: f32,
+    contrast: f32,
+    comparison_enabled: bool,
+    comparison_position: f32,
+    divider_dragging: bool,
     image_path: Option<PathBuf>,
     image_size: [usize; 2],
     file_size: u64,
@@ -137,6 +144,13 @@ impl Default for PixelForge {
     fn default() -> Self {
         Self {
             texture: None,
+            processed_texture: None,
+            original_pixels: None,
+            brightness: 0.0,
+            contrast: 0.0,
+            comparison_enabled: true,
+            comparison_position: 0.5,
+            divider_dragging: false,
             image_path: None,
             image_size: [0, 0],
             file_size: 0,
@@ -188,6 +202,13 @@ impl PixelForge {
                     .map(|m| m.len())
                     .unwrap_or(0);
 
+                self.original_pixels = Some(rgba);
+                self.processed_texture = None;
+                self.brightness = 0.0;
+                self.contrast = 0.0;
+                self.comparison_position = 0.5;
+                self.comparison_enabled = true;
+                self.divider_dragging = false;
                 self.image_size = size;
                 self.image_path = Some(path);
                 self.fit_pending = true;
@@ -340,6 +361,105 @@ impl PixelForge {
         }
     }
 
+    fn update_processed_image(&mut self, ctx: &egui::Context) {
+        let Some(original) = &self.original_pixels else {
+            return;
+        };
+
+        let mut adjusted = original.clone();
+
+        let brightness = self.brightness * 2.55;
+        let contrast = 1.0 + self.contrast / 100.0;
+
+        for pixel in adjusted.pixels_mut() {
+            for channel in 0..3 {
+                let value = pixel[channel] as f32;
+                let result =
+                    (value - 127.5) * contrast + 127.5 + brightness;
+
+                pixel[channel] = result.clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        let size = [
+            adjusted.width() as usize,
+            adjusted.height() as usize,
+        ];
+
+        let color_image =
+            ColorImage::from_rgba_unmultiplied(
+                size,
+                adjusted.as_raw(),
+            );
+
+        if let Some(texture) = &mut self.processed_texture {
+            texture.set(color_image, TextureOptions::LINEAR);
+        } else {
+            self.processed_texture = Some(ctx.load_texture(
+                "processed_image",
+                color_image,
+                TextureOptions::LINEAR,
+            ));
+        }
+
+        self.status = "Preview updated".into();
+    }
+
+    fn show_adjustments(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Image Adjustments");
+        ui.separator();
+
+        let mut changed = false;
+
+        ui.label("Brightness");
+        changed |= ui.add(
+            egui::Slider::new(
+                &mut self.brightness,
+                -100.0..=100.0,
+            )
+        ).changed();
+
+        ui.label("Contrast");
+        changed |= ui.add(
+            egui::Slider::new(
+                &mut self.contrast,
+                -100.0..=100.0,
+            )
+        ).changed();
+
+        if ui.button("Reset Adjustments").clicked() {
+            self.brightness = 0.0;
+            self.contrast = 0.0;
+            changed = true;
+        }
+
+        if changed {
+            self.update_processed_image(ui.ctx());
+        }
+
+        ui.separator();
+        ui.heading("Comparison");
+
+        ui.checkbox(
+            &mut self.comparison_enabled,
+            "Enable Before / After",
+        );
+
+        if self.comparison_enabled {
+            ui.label("Divider Position");
+            ui.add(
+                egui::Slider::new(
+                    &mut self.comparison_position,
+                    0.0..=1.0,
+                )
+                .show_value(false),
+            );
+
+            ui.label("Drag the divider on the image.");
+            ui.label("Left: Original");
+            ui.label("Right: Adjusted");
+        }
+    }
     fn show_viewer(&mut self, ui: &mut egui::Ui) {
         if self.texture.is_none() {
             ui.centered_and_justified(|ui| {
@@ -430,6 +550,48 @@ impl PixelForge {
             )
         });
 
+        let image_width = self.image_size[0] as f32 * self.zoom;
+        let image_height = self.image_size[1] as f32 * self.zoom;
+        let image_rect = Rect::from_center_size(
+            center + self.offset,
+            Vec2::new(image_width, image_height),
+        );
+
+        let divider_x = image_rect.left()
+            + image_rect.width() * self.comparison_position;
+
+        let (primary_down, primary_pressed) = ui.ctx().input(|i| {
+            (
+                i.pointer.button_down(egui::PointerButton::Primary),
+                i.pointer.button_pressed(egui::PointerButton::Primary),
+            )
+        });
+
+        if !primary_down {
+            self.divider_dragging = false;
+        }
+
+        if self.comparison_enabled && primary_pressed {
+            if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                if canvas.contains(pos)
+                    && image_rect.contains(pos)
+                    && (pos.x - divider_x).abs() <= 12.0
+                {
+                    self.divider_dragging = true;
+                    self.panning = false;
+                }
+            }
+        }
+
+        if self.divider_dragging && primary_down {
+            if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
+                if image_rect.width() > 0.0 {
+                    self.comparison_position = (
+                        (pos.x - image_rect.left()) / image_rect.width()
+                    ).clamp(0.0, 1.0);
+                }
+            }
+        }
         let pointer_inside = pointer_position
             .map(|pos| canvas.contains(pos))
             .unwrap_or(false);
@@ -439,7 +601,7 @@ impl PixelForge {
             _ => true,
         };
 
-        if button_pressed && pointer_inside && modifier_ok {
+        if button_pressed && pointer_inside && modifier_ok && !self.divider_dragging {
             self.panning = true;
         }
 
@@ -475,24 +637,68 @@ impl PixelForge {
             }
         }
 
-        if let Some(texture) = &self.texture {
-            let size = Vec2::new(
-                self.image_size[0] as f32 * self.zoom,
-                self.image_size[1] as f32 * self.zoom,
+        if let Some(original) = &self.texture {
+            let uv = Rect::from_min_max(
+                Pos2::new(0.0, 0.0),
+                Pos2::new(1.0, 1.0),
             );
 
-            let image_rect =
-                Rect::from_center_size(center + self.offset, size);
+            if let Some(processed) = &self.processed_texture {
+                painter.image(
+                    processed.id(),
+                    image_rect,
+                    uv,
+                    Color32::WHITE,
+                );
 
-            painter.image(
-                texture.id(),
-                image_rect,
-                Rect::from_min_max(
-                    Pos2::new(0.0, 0.0),
-                    Pos2::new(1.0, 1.0),
-                ),
-                Color32::WHITE,
-            );
+                if self.comparison_enabled {
+                    let split = image_rect.left()
+                        + image_rect.width() * self.comparison_position;
+
+                    let left_clip = Rect::from_min_max(
+                        canvas.min,
+                        Pos2::new(
+                            split.clamp(canvas.left(), canvas.right()),
+                            canvas.bottom(),
+                        ),
+                    );
+
+                    painter.with_clip_rect(left_clip).image(
+                        original.id(),
+                        image_rect,
+                        uv,
+                        Color32::WHITE,
+                    );
+
+                    if split >= canvas.left()
+                        && split <= canvas.right()
+                        && image_rect.intersects(canvas)
+                    {
+                        let top = image_rect.top().max(canvas.top());
+                        let bottom = image_rect.bottom().min(canvas.bottom());
+
+                        if top < bottom {
+                            painter.line_segment(
+                                [
+                                    Pos2::new(split, top),
+                                    Pos2::new(split, bottom),
+                                ],
+                                egui::Stroke::new(
+                                    2.0,
+                                    Color32::WHITE,
+                                ),
+                            );
+                        }
+                    }
+                }
+            } else {
+                painter.image(
+                    original.id(),
+                    image_rect,
+                    uv,
+                    Color32::WHITE,
+                );
+            }
         }
 
         if response.hovered() {
@@ -546,6 +752,11 @@ impl eframe::App for PixelForge {
             .default_width(240.0)
             .resizable(true)
             .show(ctx, |ui| {
+                if self.texture.is_some() {
+                    self.show_adjustments(ui);
+                    ui.add_space(12.0);
+                }
+
                 ui.heading("Image Tools");
                 ui.separator();
 
@@ -623,7 +834,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.1.4")
+            .with_title("PixelForge v0.1.5")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
@@ -638,4 +849,5 @@ fn main() -> eframe::Result {
         }),
     )
 }
+
 
