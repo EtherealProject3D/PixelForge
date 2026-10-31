@@ -180,6 +180,8 @@ struct PixelForge {
     project_path: Option<PathBuf>,
     project_dirty: bool,
     pending_open: Option<PendingOpen>,
+    exit_confirmation: bool,
+    exit_allowed: bool,
 }
 
 impl Default for PixelForge {
@@ -213,6 +215,8 @@ impl Default for PixelForge {
             project_path: None,
             project_dirty: false,
             pending_open: None,
+            exit_confirmation: false,
+            exit_allowed: false,
         }
     }
 }
@@ -313,6 +317,46 @@ impl PixelForge {
         self.export_result = None;
 
         self.status = "Ready - open an image or project".into();
+    }
+    fn show_exit_confirmation(&mut self, ctx: &egui::Context) {
+        if !self.exit_confirmation {
+            return;
+        }
+
+        egui::Window::new("Unsaved Changes - Exit PixelForge")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("Your current image or project has unsaved changes.");
+                ui.label("What would you like to do before exiting?");
+
+                ui.add_space(10.0);
+
+                if ui.button("Save Project & Exit").clicked() {
+                    self.save_project(false);
+
+                    // Only exit after a successful save.
+                    // Canceled or failed saves leave the app open.
+                    if !self.project_dirty {
+                        self.exit_confirmation = false;
+                        self.exit_allowed = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.exit_confirmation = false;
+                    }
+
+                    if ui.button("Discard Changes & Exit").clicked() {
+                        self.exit_confirmation = false;
+                        self.exit_allowed = true;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                });
+            });
     }
     fn show_unsaved_prompt(&mut self, ctx: &egui::Context) {
         let Some(action) = self.pending_open else {
@@ -1221,6 +1265,15 @@ impl PixelForge {
 
 impl eframe::App for PixelForge {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Intercept the native window X button before the
+        // operating system closes the application.
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.project_dirty && !self.exit_allowed {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.exit_confirmation = true;
+            }
+        }
+
         self.poll_export(ctx);
 
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
@@ -1387,13 +1440,14 @@ impl eframe::App for PixelForge {
 
         self.show_controls_settings(ctx);
         self.show_unsaved_prompt(ctx);
+        self.show_exit_confirmation(ctx);
     }
 }
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.1.8")
+            .with_title("PixelForge v0.1.9")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
