@@ -1,4 +1,6 @@
-﻿use eframe::egui;
+mod project;
+
+use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 use std::path::PathBuf;
 
@@ -142,6 +144,13 @@ enum ExportEvent {
     },
     Finished(Result<PathBuf, String>),
 }
+#[derive(Clone, Copy)]
+enum PendingOpen {
+    Image,
+    Project,
+    Close,
+}
+
 struct PixelForge {
     texture: Option<TextureHandle>,
     processed_texture: Option<TextureHandle>,
@@ -168,6 +177,9 @@ struct PixelForge {
     show_settings: bool,
     controls: Controls,
     status: String,
+    project_path: Option<PathBuf>,
+    project_dirty: bool,
+    pending_open: Option<PendingOpen>,
 }
 
 impl Default for PixelForge {
@@ -198,6 +210,9 @@ impl Default for PixelForge {
             show_settings: false,
             controls: Controls::load(),
             status: "Ready".into(),
+            project_path: None,
+            project_dirty: false,
+            pending_open: None,
         }
     }
 }
@@ -224,6 +239,8 @@ impl PixelForge {
                 self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
                 self.original_pixels = Some(rgba);
+                self.project_path = None;
+                self.project_dirty = true;
                 self.export_result = None;
                 self.export_progress = 0.0;
                 self.processed_texture = None;
@@ -245,6 +262,209 @@ impl PixelForge {
         }
     }
 
+    fn request_open(&mut self, action: PendingOpen, ctx: &egui::Context) {
+        if self.project_dirty {
+            self.pending_open = Some(action);
+        } else {
+            self.perform_open(action, ctx);
+        }
+    }
+
+    fn perform_open(&mut self, action: PendingOpen, ctx: &egui::Context) {
+        match action {
+            PendingOpen::Image => self.open_image(ctx),
+            PendingOpen::Project => self.open_project(ctx),
+            PendingOpen::Close => self.close_image(),
+        }
+    }
+
+    fn close_image(&mut self) {
+        // Release image textures and original image data.
+        self.texture = None;
+        self.processed_texture = None;
+        self.original_pixels = None;
+
+        // Clear image and project references.
+        self.image_path = None;
+        self.project_path = None;
+        self.project_dirty = false;
+        self.pending_open = None;
+
+        // Reset adjustments and comparison.
+        self.brightness = 0.0;
+        self.contrast = 0.0;
+        self.comparison_enabled = true;
+        self.comparison_position = 0.5;
+        self.divider_dragging = false;
+
+        // Reset viewer state.
+        self.image_size = [0, 0];
+        self.file_size = 0;
+        self.zoom = 1.0;
+        self.offset = Vec2::ZERO;
+        self.fit_pending = false;
+        self.panning = false;
+
+        // Clear completed export information.
+        self.export_rx = None;
+        self.export_progress = 0.0;
+        self.export_stage.clear();
+        self.export_encoding = false;
+        self.export_result = None;
+
+        self.status = "Ready - open an image or project".into();
+    }
+    fn show_unsaved_prompt(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_open else {
+            return;
+        };
+
+        egui::Window::new("Unsaved Project Changes")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ctx, |ui| {
+                ui.label("This image has unsaved project changes.");
+                match action {
+                    PendingOpen::Close => {
+                        ui.label("Closing this image will discard those changes.");
+                    }
+                    _ => {
+                        ui.label("Opening another file will discard those changes.");
+                    }
+                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Cancel").clicked() {
+                        self.pending_open = None;
+                    }
+
+                    if ui.button("Discard Changes").clicked() {
+                        self.pending_open = None;
+                        self.perform_open(action, ctx);
+                    }
+                });
+            });
+    }
+
+    fn save_project(&mut self, save_as: bool) {
+        let Some(original) = &self.original_pixels else {
+            self.status = "Open an image first".into();
+            return;
+        };
+
+        let path = if save_as {
+            None
+        } else {
+            self.project_path.clone()
+        };
+
+        let path = match path {
+            Some(path) => path,
+            None => {
+                let stem = self
+                    .image_path
+                    .as_ref()
+                    .and_then(|p| p.file_stem())
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "Untitled".into());
+
+                let suggested = format!("{stem}.pxf");
+
+                let Some(mut path) = rfd::FileDialog::new()
+                    .add_filter("PixelForge Project", &["pxf"])
+                    .set_file_name(&suggested)
+                    .save_file()
+                else {
+                    return;
+                };
+
+                path.set_extension("pxf");
+                path
+            }
+        };
+
+        let image_name = self
+            .image_path
+            .as_ref()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image.png".into());
+
+        let data = project::Project {
+            pixels: original.clone(),
+            image_name,
+            brightness: self.brightness,
+            contrast: self.contrast,
+            comparison_enabled: self.comparison_enabled,
+            comparison_position: self.comparison_position,
+        };
+
+        match project::save(&path, &data) {
+            Ok(()) => {
+                self.project_path = Some(path.clone());
+                self.project_dirty = false;
+                self.status = format!("Project saved: {}", path.display());
+            }
+            Err(err) => {
+                self.status = format!("Project save failed: {err}");
+            }
+        }
+    }
+
+    fn open_project(&mut self, ctx: &egui::Context) {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PixelForge Project", &["pxf"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        // Load and validate before changing the current image.
+        let data = match project::load(&path) {
+            Ok(data) => data,
+            Err(err) => {
+                self.status = format!("Project open failed: {err}");
+                return;
+            }
+        };
+
+        let size = [data.pixels.width() as usize, data.pixels.height() as usize];
+
+        let color = ColorImage::from_rgba_unmultiplied(size, data.pixels.as_raw());
+
+        self.texture = Some(ctx.load_texture("current_image", color, TextureOptions::LINEAR));
+
+        self.original_pixels = Some(data.pixels);
+        self.processed_texture = None;
+
+        self.brightness = data.brightness;
+        self.contrast = data.contrast;
+        self.comparison_enabled = data.comparison_enabled;
+        self.comparison_position = data.comparison_position;
+
+        self.image_size = size;
+        self.image_path = Some(PathBuf::from(data.image_name));
+        self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+        self.project_path = Some(path.clone());
+        self.project_dirty = false;
+
+        self.fit_pending = true;
+        self.offset = Vec2::ZERO;
+        self.panning = false;
+        self.divider_dragging = false;
+
+        self.export_result = None;
+        self.export_progress = 0.0;
+        self.export_stage.clear();
+
+        if self.brightness != 0.0 || self.contrast != 0.0 {
+            self.update_processed_image(ctx);
+        }
+
+        self.status = format!("Project opened: {}", path.display());
+    }
     fn fit_image(&mut self, available: Vec2) {
         let w = self.image_size[0] as f32;
         let h = self.image_size[1] as f32;
@@ -686,6 +906,12 @@ impl PixelForge {
         }
     }
     fn show_adjustments(&mut self, ui: &mut egui::Ui) {
+        let before = (
+            self.brightness,
+            self.contrast,
+            self.comparison_enabled,
+            self.comparison_position,
+        );
         ui.horizontal(|ui| {
             ui.heading("Image Adjustments");
 
@@ -756,6 +982,16 @@ impl PixelForge {
             ui.label("Drag the divider on the image.");
             ui.label("Left: Original");
             ui.label("Right: Adjusted");
+        }
+        if before
+            != (
+                self.brightness,
+                self.contrast,
+                self.comparison_enabled,
+                self.comparison_position,
+            )
+        {
+            self.project_dirty = true;
         }
     }
     fn show_viewer(&mut self, ui: &mut egui::Ui) {
@@ -875,6 +1111,7 @@ impl PixelForge {
         if self.divider_dragging && primary_down {
             if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
                 if image_rect.width() > 0.0 {
+                    self.project_dirty = true;
                     self.comparison_position =
                         ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
                 }
@@ -992,7 +1229,35 @@ impl eframe::App for PixelForge {
                 ui.separator();
 
                 if ui.button("Open Image").clicked() {
-                    self.open_image(ctx);
+                    self.request_open(PendingOpen::Image, ctx);
+                }
+
+                if ui.button("Open Project").clicked() {
+                    self.request_open(PendingOpen::Project, ctx);
+                }
+
+                if ui
+                    .add_enabled(
+                        self.original_pixels.is_some() && !self.exporting,
+                        egui::Button::new("Close Image / Project"),
+                    )
+                    .clicked()
+                {
+                    self.request_open(PendingOpen::Close, ctx);
+                }
+
+                ui.add_enabled_ui(self.original_pixels.is_some() && !self.exporting, |ui| {
+                    if ui.button("Save Project").clicked() {
+                        self.save_project(false);
+                    }
+
+                    if ui.button("Save As").clicked() {
+                        self.save_project(true);
+                    }
+                });
+
+                if self.project_dirty {
+                    ui.colored_label(egui::Color32::YELLOW, "* Unsaved changes");
                 }
 
                 ui.add_enabled_ui(self.original_pixels.is_some() && !self.exporting, |ui| {
@@ -1121,13 +1386,14 @@ impl eframe::App for PixelForge {
         });
 
         self.show_controls_settings(ctx);
+        self.show_unsaved_prompt(ctx);
     }
 }
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.1.7")
+            .with_title("PixelForge v0.1.8")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
@@ -1142,4 +1408,3 @@ fn main() -> eframe::Result {
         }),
     )
 }
-
