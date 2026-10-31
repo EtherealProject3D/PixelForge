@@ -1,4 +1,4 @@
-use eframe::egui;
+﻿use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 use std::path::PathBuf;
 
@@ -949,7 +949,7 @@ impl PixelForge {
                         if top < bottom {
                             painter.line_segment(
                                 [Pos2::new(split, top), Pos2::new(split, bottom)],
-                                egui::Stroke::new(2.0, Color32::WHITE),
+                                egui::Stroke::new(2.0_f32, Color32::WHITE),
                             );
                         }
                     }
@@ -1142,3 +1142,4 @@ fn main() -> eframe::Result {
         }),
     )
 }
+
