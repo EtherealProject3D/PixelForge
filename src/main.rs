@@ -123,6 +123,7 @@ struct PixelForge {
     processed_texture: Option<TextureHandle>,
     original_pixels: Option<image::RgbaImage>,
     brightness: f32,
+    jpeg_quality: u8,
     contrast: f32,
     comparison_enabled: bool,
     comparison_position: f32,
@@ -147,6 +148,7 @@ impl Default for PixelForge {
             processed_texture: None,
             original_pixels: None,
             brightness: 0.0,
+            jpeg_quality: 95,
             contrast: 0.0,
             comparison_enabled: true,
             comparison_position: 0.5,
@@ -405,8 +407,157 @@ impl PixelForge {
         self.status = "Preview updated".into();
     }
 
+    fn export_image(&mut self) {
+        let Some(original) = &self.original_pixels else {
+            self.status = "Open an image before exporting".into();
+            return;
+        };
+
+        let stem = self.image_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".to_string());
+
+        let suggested = format!("{stem}_edited.png");
+
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PNG Image", &["png"])
+            .add_filter("JPEG Image", &["jpg", "jpeg"])
+            .add_filter("WebP Image", &["webp"])
+            .set_file_name(&suggested)
+            .save_file()
+        else {
+            return;
+        };
+
+        // Never overwrite an existing file, including the source.
+        if path.exists() {
+            self.status = format!(
+                "Export cancelled: file already exists: {}",
+                path.display()
+            );
+            return;
+        }
+
+        let extension = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if !matches!(
+            extension.as_str(),
+            "png" | "jpg" | "jpeg" | "webp"
+        ) {
+            self.status =
+                "Export failed: select PNG, JPEG, or WebP".into();
+            return;
+        }
+
+        // Recreate the adjustment at full source resolution.
+        let mut adjusted = original.clone();
+        let brightness = self.brightness * 2.55;
+        let contrast = 1.0 + self.contrast / 100.0;
+
+        for pixel in adjusted.pixels_mut() {
+            for channel in 0..3 {
+                let value = pixel[channel] as f32;
+                let result =
+                    (value - 127.5) * contrast + 127.5 + brightness;
+
+                pixel[channel] = result.clamp(0.0, 255.0) as u8;
+            }
+        }
+
+        let result: Result<(), String> = match extension.as_str() {
+            "jpg" | "jpeg" => {
+                let rgb = image::DynamicImage::ImageRgba8(adjusted)
+                    .to_rgb8();
+
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path);
+
+                match file {
+                    Ok(file) => {
+                        let mut encoder =
+                            image::codecs::jpeg::JpegEncoder::new_with_quality(
+                                file,
+                                self.jpeg_quality,
+                            );
+
+                        encoder.encode(
+                            rgb.as_raw(),
+                            rgb.width(),
+                            rgb.height(),
+                            image::ExtendedColorType::Rgb8,
+                        ).map_err(|e| e.to_string())
+                    }
+                    Err(err) => Err(err.to_string()),
+                }
+            }
+            "png" | "webp" => {
+                // Encode in memory, then create the destination
+                // exclusively to prevent accidental overwrites.
+                let format = if extension == "png" {
+                    image::ImageFormat::Png
+                } else {
+                    image::ImageFormat::WebP
+                };
+
+                let mut buffer = std::io::Cursor::new(Vec::new());
+                let image = image::DynamicImage::ImageRgba8(adjusted);
+
+                match image.write_to(&mut buffer, format) {
+                    Ok(()) => {
+                        use std::io::Write;
+
+                        std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                            .and_then(|mut file| {
+                                file.write_all(buffer.get_ref())
+                            })
+                            .map_err(|e| e.to_string())
+                    }
+                    Err(err) => Err(err.to_string()),
+                }
+            }
+            _ => unreachable!(),
+        };
+
+        match result {
+            Ok(()) => {
+                self.status = format!(
+                    "Exported: {}",
+                    path.display()
+                );
+            }
+            Err(err) => {
+                // An incomplete output may exist if encoding or
+                // writing failed. Do not delete it automatically.
+                self.status = format!("Export failed: {err}");
+            }
+        }
+    }
     fn show_adjustments(&mut self, ui: &mut egui::Ui) {
         ui.heading("Image Adjustments");
+        ui.separator();
+
+        ui.collapsing("Export Options", |ui| {
+            ui.label("JPEG Quality");
+            ui.add(
+                egui::Slider::new(
+                    &mut self.jpeg_quality,
+                    1..=100,
+                ).suffix("%"),
+            );
+            ui.label("PNG and WebP use lossless export.");
+        });
+
         ui.separator();
 
         let mut changed = false;
@@ -575,6 +726,7 @@ impl PixelForge {
             if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
                 if canvas.contains(pos)
                     && image_rect.contains(pos)
+                    && self.processed_texture.is_some()
                     && (pos.x - divider_x).abs() <= 12.0
                 {
                     self.divider_dragging = true;
@@ -701,13 +853,31 @@ impl PixelForge {
             }
         }
 
-        if response.hovered() {
+        let over_divider = self.comparison_enabled
+            && self.processed_texture.is_some()
+            && pointer_position
+                .map(|pos| {
+                    canvas.contains(pos)
+                        && image_rect.contains(pos)
+                        && (pos.x - (
+                            image_rect.left()
+                            + image_rect.width()
+                                * self.comparison_position
+                        )).abs() <= 12.0
+                })
+                .unwrap_or(false);
+
+        if self.divider_dragging || over_divider {
             ui.ctx().set_cursor_icon(
-                if self.panning {
-                    egui::CursorIcon::Grabbing
-                } else {
-                    egui::CursorIcon::Default
-                },
+                egui::CursorIcon::ResizeHorizontal
+            );
+        } else if self.panning {
+            ui.ctx().set_cursor_icon(
+                egui::CursorIcon::Grabbing
+            );
+        } else if response.hovered() {
+            ui.ctx().set_cursor_icon(
+                egui::CursorIcon::Default
             );
         }
     }
@@ -726,6 +896,13 @@ impl eframe::App for PixelForge {
 
                 if ui.button("Open Image").clicked() {
                     self.open_image(ctx);
+                }
+
+                if ui.add_enabled(
+                    self.original_pixels.is_some(),
+                    egui::Button::new("Export Image"),
+                ).clicked() {
+                    self.export_image();
                 }
 
                 if ui.button("Settings").clicked() {
@@ -834,7 +1011,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.1.5")
+            .with_title("PixelForge v0.1.6")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
@@ -849,5 +1026,6 @@ fn main() -> eframe::Result {
         }),
     )
 }
+
 
 
