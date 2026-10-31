@@ -1276,73 +1276,172 @@ impl eframe::App for PixelForge {
 
         self.poll_export(ctx);
 
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.heading("PixelForge");
-                ui.separator();
+        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+            egui::MenuBar::new().ui(ui, |ui| {
+                ui.menu_button("File", |ui| {
+                    if ui.button("Open Image...").clicked() {
+                        ui.close();
+                        self.request_open(PendingOpen::Image, ctx);
+                    }
 
-                if ui.button("Open Image").clicked() {
-                    self.request_open(PendingOpen::Image, ctx);
-                }
+                    if ui.button("Open Project...").clicked() {
+                        ui.close();
+                        self.request_open(PendingOpen::Project, ctx);
+                    }
 
-                if ui.button("Open Project").clicked() {
-                    self.request_open(PendingOpen::Project, ctx);
-                }
+                    ui.separator();
 
-                if ui
-                    .add_enabled(
-                        self.original_pixels.is_some() && !self.exporting,
-                        egui::Button::new("Close Image / Project"),
-                    )
-                    .clicked()
-                {
-                    self.request_open(PendingOpen::Close, ctx);
-                }
+                    let can_save = self.original_pixels.is_some() && !self.exporting;
 
-                ui.add_enabled_ui(self.original_pixels.is_some() && !self.exporting, |ui| {
-                    if ui.button("Save Project").clicked() {
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Save Project"))
+                        .clicked()
+                    {
+                        ui.close();
                         self.save_project(false);
                     }
 
-                    if ui.button("Save As").clicked() {
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Save Project As..."))
+                        .clicked()
+                    {
+                        ui.close();
                         self.save_project(true);
                     }
+
+                    ui.separator();
+
+                    if ui
+                        .add_enabled(can_save, egui::Button::new("Close Image / Project"))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.request_open(PendingOpen::Close, ctx);
+                    }
+
+                    ui.separator();
+
+                    if ui.button("Exit").clicked() {
+                        ui.close();
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 });
+
+                ui.menu_button("Edit", |ui| {
+                    let can_edit = self.original_pixels.is_some() && !self.exporting;
+
+                    if ui
+                        .add_enabled(
+                            can_edit && self.brightness != 0.0,
+                            egui::Button::new("Reset Brightness"),
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.brightness = 0.0;
+                        self.project_dirty = true;
+                        self.update_processed_image(ctx);
+                    }
+
+                    if ui
+                        .add_enabled(
+                            can_edit && self.contrast != 0.0,
+                            egui::Button::new("Reset Contrast"),
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.contrast = 0.0;
+                        self.project_dirty = true;
+                        self.update_processed_image(ctx);
+                    }
+
+                    if ui
+                        .add_enabled(
+                            can_edit && (self.brightness != 0.0 || self.contrast != 0.0),
+                            egui::Button::new("Reset All Adjustments"),
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.brightness = 0.0;
+                        self.contrast = 0.0;
+                        self.project_dirty = true;
+                        self.update_processed_image(ctx);
+                    }
+
+                    ui.separator();
+
+                    if ui.button("Settings...").clicked() {
+                        ui.close();
+                        self.show_settings = true;
+                    }
+                });
+
+                ui.menu_button("Export", |ui| {
+                    let can_export = self.original_pixels.is_some() && !self.exporting;
+
+                    if ui
+                        .add_enabled(can_export, egui::Button::new("Export as PNG..."))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.start_export(ExportFormat::Png);
+                    }
+
+                    if ui
+                        .add_enabled(can_export, egui::Button::new("Export as JPEG..."))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.start_export(ExportFormat::Jpeg);
+                    }
+
+                    if ui
+                        .add_enabled(can_export, egui::Button::new("Export as WebP..."))
+                        .clicked()
+                    {
+                        ui.close();
+                        self.start_export(ExportFormat::WebP);
+                    }
+                });
+
+                ui.menu_button("View", |ui| {
+                    if ui
+                        .add_enabled(
+                            self.original_pixels.is_some(),
+                            egui::Button::new("Fit Image to Window"),
+                        )
+                        .clicked()
+                    {
+                        ui.close();
+                        self.fit_pending = true;
+                    }
+
+                    ui.separator();
+
+                    if ui.selectable_label(!self.advanced, "Simple Mode").clicked() {
+                        self.advanced = false;
+                        ui.close();
+                    }
+
+                    if ui
+                        .selectable_label(self.advanced, "Advanced Mode")
+                        .clicked()
+                    {
+                        self.advanced = true;
+                        ui.close();
+                    }
+                });
+
+                ui.separator();
+                ui.strong("PixelForge");
 
                 if self.project_dirty {
                     ui.colored_label(egui::Color32::YELLOW, "* Unsaved changes");
                 }
-
-                ui.add_enabled_ui(self.original_pixels.is_some() && !self.exporting, |ui| {
-                    ui.menu_button("Export Image", |ui| {
-                        if ui.button("PNG Image (.png)").clicked() {
-                            ui.close();
-                            self.start_export(ExportFormat::Png);
-                        }
-
-                        if ui.button("JPEG Image (.jpg)").clicked() {
-                            ui.close();
-                            self.start_export(ExportFormat::Jpeg);
-                        }
-
-                        if ui.button("WebP Image (.webp)").clicked() {
-                            ui.close();
-                            self.start_export(ExportFormat::WebP);
-                        }
-                    });
-                });
-                if ui.button("Settings").clicked() {
-                    self.show_settings = !self.show_settings;
-                }
-
-                ui.separator();
-
-                ui.selectable_value(&mut self.advanced, false, "Simple");
-
-                ui.selectable_value(&mut self.advanced, true, "Advanced");
             });
         });
-
         egui::SidePanel::right("tools")
             .default_width(240.0)
             .resizable(true)
