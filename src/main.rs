@@ -1071,31 +1071,37 @@ impl eframe::App for PixelForge {
             });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
-            if self.exporting || self.export_result.is_some() {
-                ui.horizontal(|ui| {
-                    if self.exporting && self.export_encoding {
-                        ui.spinner();
-                        ui.label(&self.export_stage);
-                    } else if self.export_result == Some(false) {
-                        ui.colored_label(egui::Color32::LIGHT_RED, "Export failed");
-                    } else {
-                        ui.label(&self.export_stage);
-                        ui.label(format!("{:.0}%", self.export_progress * 100.0));
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 76.0),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_height(76.0);
+                    if self.exporting || self.export_result.is_some() {
+                        ui.horizontal(|ui| {
+                            if self.exporting && self.export_encoding {
+                                ui.spinner();
+                                ui.label(&self.export_stage);
+                            } else if self.export_result == Some(false) {
+                                ui.colored_label(egui::Color32::LIGHT_RED, "Export failed");
+                            } else {
+                                ui.label(&self.export_stage);
+                                ui.label(format!("{:.0}%", self.export_progress * 100.0));
+                            }
+                        });
+
+                        if self.export_result != Some(false) {
+                            ui.add(
+                                egui::ProgressBar::new(self.export_progress)
+                                    .desired_width(ui.available_width()),
+                            );
+                        }
+
+                        if self.export_result == Some(true) {
+                            ui.label("Image saved successfully");
+                        }
                     }
-                });
-
-                if self.export_result != Some(false) {
-                    ui.add(
-                        egui::ProgressBar::new(self.export_progress)
-                            .desired_width(ui.available_width()),
-                    );
-                }
-
-                if self.export_result == Some(true) {
-                    ui.label("Image saved successfully");
-                }
-            }
-
+                },
+            );
             ui.horizontal(|ui| {
                 ui.label(&self.status);
 
