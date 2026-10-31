@@ -1,8 +1,5 @@
-﻿use eframe::egui;
-use egui::{
-    Color32, ColorImage, Pos2, Rect, Sense,
-    TextureHandle, TextureOptions, Vec2,
-};
+use eframe::egui;
+use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -37,11 +34,7 @@ impl Default for Controls {
 impl Controls {
     fn config_path() -> Option<PathBuf> {
         let base = std::env::var_os("APPDATA")?;
-        Some(
-            PathBuf::from(base)
-                .join("PixelForge")
-                .join("controls.cfg"),
-        )
+        Some(PathBuf::from(base).join("PixelForge").join("controls.cfg"))
     }
 
     fn load() -> Self {
@@ -77,8 +70,7 @@ impl Controls {
                 "zoom_sensitivity" => {
                     if let Ok(value) = value.trim().parse::<f32>() {
                         if value.is_finite() {
-                            settings.zoom_sensitivity =
-                                value.clamp(0.25, 3.0);
+                            settings.zoom_sensitivity = value.clamp(0.25, 3.0);
                         }
                     }
                 }
@@ -90,9 +82,8 @@ impl Controls {
     }
 
     fn save(&self) -> std::io::Result<()> {
-        let path = Self::config_path().ok_or_else(|| {
-            std::io::Error::other("APPDATA is unavailable")
-        })?;
+        let path =
+            Self::config_path().ok_or_else(|| std::io::Error::other("APPDATA is unavailable"))?;
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -118,12 +109,50 @@ impl Controls {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ExportFormat {
+    Png,
+    Jpeg,
+    WebP,
+}
+
+impl ExportFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::WebP => "webp",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Png => "PNG Image",
+            Self::Jpeg => "JPEG Image",
+            Self::WebP => "WebP Image",
+        }
+    }
+}
+
+enum ExportEvent {
+    Progress {
+        fraction: f32,
+        stage: &'static str,
+        encoding: bool,
+    },
+    Finished(Result<PathBuf, String>),
+}
 struct PixelForge {
     texture: Option<TextureHandle>,
     processed_texture: Option<TextureHandle>,
     original_pixels: Option<image::RgbaImage>,
     brightness: f32,
-    jpeg_quality: u8,
+    export_rx: Option<std::sync::mpsc::Receiver<ExportEvent>>,
+    export_progress: f32,
+    export_stage: String,
+    export_encoding: bool,
+    exporting: bool,
+    export_result: Option<bool>,
     contrast: f32,
     comparison_enabled: bool,
     comparison_position: f32,
@@ -148,7 +177,12 @@ impl Default for PixelForge {
             processed_texture: None,
             original_pixels: None,
             brightness: 0.0,
-            jpeg_quality: 95,
+            export_rx: None,
+            export_progress: 0.0,
+            export_stage: String::new(),
+            export_encoding: false,
+            exporting: false,
+            export_result: None,
             contrast: 0.0,
             comparison_enabled: true,
             comparison_position: 0.5,
@@ -171,10 +205,7 @@ impl Default for PixelForge {
 impl PixelForge {
     fn open_image(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
-            .add_filter(
-                "Images",
-                &["png", "jpg", "jpeg", "webp", "bmp", "tiff"],
-            )
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
             .pick_file()
         else {
             return;
@@ -183,28 +214,18 @@ impl PixelForge {
         match image::open(&path) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
-                let size = [
-                    rgba.width() as usize,
-                    rgba.height() as usize,
-                ];
+                let size = [rgba.width() as usize, rgba.height() as usize];
 
-                let color_image =
-                    ColorImage::from_rgba_unmultiplied(
-                        size,
-                        rgba.as_raw(),
-                    );
+                let color_image = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
 
-                self.texture = Some(ctx.load_texture(
-                    "current_image",
-                    color_image,
-                    TextureOptions::LINEAR,
-                ));
+                self.texture =
+                    Some(ctx.load_texture("current_image", color_image, TextureOptions::LINEAR));
 
-                self.file_size = std::fs::metadata(&path)
-                    .map(|m| m.len())
-                    .unwrap_or(0);
+                self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
                 self.original_pixels = Some(rgba);
+                self.export_result = None;
+                self.export_progress = 0.0;
                 self.processed_texture = None;
                 self.brightness = 0.0;
                 self.contrast = 0.0;
@@ -232,9 +253,7 @@ impl PixelForge {
             return;
         }
 
-        self.zoom = (available.x / w)
-            .min(available.y / h)
-            .clamp(0.001, 16.0);
+        self.zoom = (available.x / w).min(available.y / h).clamp(0.001, 16.0);
 
         self.offset = Vec2::ZERO;
         self.fit_pending = false;
@@ -251,8 +270,7 @@ impl PixelForge {
         let anchor_offset = anchor - center;
         let ratio = new_zoom / old_zoom;
 
-        self.offset =
-            anchor_offset - (anchor_offset - self.offset) * ratio;
+        self.offset = anchor_offset - (anchor_offset - self.offset) * ratio;
 
         self.zoom = new_zoom;
     }
@@ -295,11 +313,7 @@ impl PixelForge {
                     .changed();
 
                 changed |= ui
-                    .radio_value(
-                        &mut self.controls.pan,
-                        PanButton::Left,
-                        "Left-click + drag",
-                    )
+                    .radio_value(&mut self.controls.pan, PanButton::Left, "Left-click + drag")
                     .changed();
 
                 changed |= ui
@@ -334,13 +348,8 @@ impl PixelForge {
 
                 changed |= ui
                     .add(
-                        egui::Slider::new(
-                            &mut self.controls.zoom_sensitivity,
-                            0.25..=3.0,
-                        )
-                        .custom_formatter(|value, _| {
-                            format!("{:.0}%", value * 100.0)
-                        }),
+                        egui::Slider::new(&mut self.controls.zoom_sensitivity, 0.25..=3.0)
+                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
                     )
                     .changed();
 
@@ -376,186 +385,320 @@ impl PixelForge {
         for pixel in adjusted.pixels_mut() {
             for channel in 0..3 {
                 let value = pixel[channel] as f32;
-                let result =
-                    (value - 127.5) * contrast + 127.5 + brightness;
+                let result = (value - 127.5) * contrast + 127.5 + brightness;
 
                 pixel[channel] = result.clamp(0.0, 255.0) as u8;
             }
         }
 
-        let size = [
-            adjusted.width() as usize,
-            adjusted.height() as usize,
-        ];
+        let size = [adjusted.width() as usize, adjusted.height() as usize];
 
-        let color_image =
-            ColorImage::from_rgba_unmultiplied(
-                size,
-                adjusted.as_raw(),
-            );
+        let color_image = ColorImage::from_rgba_unmultiplied(size, adjusted.as_raw());
 
         if let Some(texture) = &mut self.processed_texture {
             texture.set(color_image, TextureOptions::LINEAR);
         } else {
-            self.processed_texture = Some(ctx.load_texture(
-                "processed_image",
-                color_image,
-                TextureOptions::LINEAR,
-            ));
+            self.processed_texture =
+                Some(ctx.load_texture("processed_image", color_image, TextureOptions::LINEAR));
         }
 
         self.status = "Preview updated".into();
     }
 
-    fn export_image(&mut self) {
+    fn start_export(&mut self, format: ExportFormat) {
+        if self.exporting {
+            self.status = "An export is already running".into();
+            return;
+        }
+
         let Some(original) = &self.original_pixels else {
             self.status = "Open an image before exporting".into();
             return;
         };
 
-        let stem = self.image_path
+        let stem = self
+            .image_path
             .as_ref()
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "image".to_string());
+            .unwrap_or_else(|| "image".to_owned());
 
-        let suggested = format!("{stem}_edited.png");
+        let suggested = format!("{}_edited.{}", stem, format.extension());
 
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG Image", &["png"])
-            .add_filter("JPEG Image", &["jpg", "jpeg"])
-            .add_filter("WebP Image", &["webp"])
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter(format.label(), &[format.extension()])
             .set_file_name(&suggested)
             .save_file()
         else {
             return;
         };
 
-        // Never overwrite an existing file, including the source.
-        if path.exists() {
-            self.status = format!(
-                "Export cancelled: file already exists: {}",
-                path.display()
-            );
-            return;
-        }
+        // The selected menu option determines the output format.
+        // Do not infer the format from a typed filename.
+        path.set_extension(format.extension());
 
-        let extension = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        // Filename collisions are resolved automatically
+        // by the export worker using numbered suffixes.
 
-        if !matches!(
-            extension.as_str(),
-            "png" | "jpg" | "jpeg" | "webp"
-        ) {
-            self.status =
-                "Export failed: select PNG, JPEG, or WebP".into();
-            return;
-        }
+        let original = original.clone();
+        let brightness = self.brightness;
+        let contrast = self.contrast;
 
-        // Recreate the adjustment at full source resolution.
-        let mut adjusted = original.clone();
-        let brightness = self.brightness * 2.55;
-        let contrast = 1.0 + self.contrast / 100.0;
+        let (tx, rx) = std::sync::mpsc::channel();
 
-        for pixel in adjusted.pixels_mut() {
-            for channel in 0..3 {
-                let value = pixel[channel] as f32;
-                let result =
-                    (value - 127.5) * contrast + 127.5 + brightness;
+        self.export_rx = Some(rx);
+        self.export_progress = 0.0;
+        self.export_stage = "Starting export".into();
+        self.export_encoding = false;
+        self.exporting = true;
+        self.export_result = None;
+        self.status = "Export started".into();
 
-                pixel[channel] = result.clamp(0.0, 255.0) as u8;
-            }
-        }
+        std::thread::spawn(move || {
+            let mut created_output = false;
 
-        let result: Result<(), String> = match extension.as_str() {
-            "jpg" | "jpeg" => {
-                let rgb = image::DynamicImage::ImageRgba8(adjusted)
-                    .to_rgb8();
+            let result = (|| -> Result<(), String> {
+                use std::io::{Cursor, Write};
 
-                let file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .open(&path);
+                let mut adjusted = original;
 
-                match file {
-                    Ok(file) => {
-                        let mut encoder =
-                            image::codecs::jpeg::JpegEncoder::new_with_quality(
-                                file,
-                                self.jpeg_quality,
+                let brightness_offset = brightness * 2.55;
+                let contrast_factor = 1.0 + contrast / 100.0;
+
+                let total = adjusted.width() as usize * adjusted.height() as usize;
+
+                // Actual pixel-processing progress: 0-70%.
+                for (index, pixel) in adjusted.pixels_mut().enumerate() {
+                    for channel in 0..3 {
+                        let value = pixel[channel] as f32;
+                        let result = (value - 127.5) * contrast_factor + 127.5 + brightness_offset;
+
+                        pixel[channel] = result.clamp(0.0, 255.0) as u8;
+                    }
+
+                    if index % 250_000 == 0 && total > 0 {
+                        let fraction = 0.70 * index as f32 / total as f32;
+
+                        let _ = tx.send(ExportEvent::Progress {
+                            fraction,
+                            stage: "Applying adjustments",
+                            encoding: false,
+                        });
+                    }
+                }
+
+                // The image crate does not provide an encoder
+                // progress callback. Display an activity indicator
+                // instead of pretending to measure its progress.
+                let _ = tx.send(ExportEvent::Progress {
+                    fraction: 0.70,
+                    stage: "Encoding image",
+                    encoding: true,
+                });
+
+                let bytes = match format {
+                    ExportFormat::Jpeg => {
+                        let rgb = image::DynamicImage::ImageRgba8(adjusted).to_rgb8();
+
+                        let mut output = Vec::new();
+
+                        {
+                            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+                                &mut output,
+                                100,
                             );
 
-                        encoder.encode(
-                            rgb.as_raw(),
-                            rgb.width(),
-                            rgb.height(),
-                            image::ExtendedColorType::Rgb8,
-                        ).map_err(|e| e.to_string())
+                            encoder
+                                .encode(
+                                    rgb.as_raw(),
+                                    rgb.width(),
+                                    rgb.height(),
+                                    image::ExtendedColorType::Rgb8,
+                                )
+                                .map_err(|e| e.to_string())?;
+                        }
+
+                        output
                     }
-                    Err(err) => Err(err.to_string()),
-                }
-            }
-            "png" | "webp" => {
-                // Encode in memory, then create the destination
-                // exclusively to prevent accidental overwrites.
-                let format = if extension == "png" {
-                    image::ImageFormat::Png
-                } else {
-                    image::ImageFormat::WebP
+
+                    ExportFormat::Png | ExportFormat::WebP => {
+                        let image = image::DynamicImage::ImageRgba8(adjusted);
+
+                        let image_format = match format {
+                            ExportFormat::Png => image::ImageFormat::Png,
+                            ExportFormat::WebP => image::ImageFormat::WebP,
+                            ExportFormat::Jpeg => unreachable!(),
+                        };
+
+                        let mut buffer = Cursor::new(Vec::new());
+
+                        image
+                            .write_to(&mut buffer, image_format)
+                            .map_err(|e| e.to_string())?;
+
+                        buffer.into_inner()
+                    }
                 };
 
-                let mut buffer = std::io::Cursor::new(Vec::new());
-                let image = image::DynamicImage::ImageRgba8(adjusted);
+                let _ = tx.send(ExportEvent::Progress {
+                    fraction: 0.80,
+                    stage: "Writing image file",
+                    encoding: false,
+                });
 
-                match image.write_to(&mut buffer, format) {
-                    Ok(()) => {
-                        use std::io::Write;
+                // Create the output exclusively. If its name
+                // exists, try _001, _002, and so on.
+                // No existing file is ever opened for writing.
+                let base_path = path.clone();
 
-                        std::fs::OpenOptions::new()
-                            .write(true)
-                            .create_new(true)
-                            .open(&path)
-                            .and_then(|mut file| {
-                                file.write_all(buffer.get_ref())
-                            })
-                            .map_err(|e| e.to_string())
+                let stem = base_path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "image".to_owned());
+
+                let extension = format.extension();
+
+                let mut suffix = 0u32;
+
+                let mut file = loop {
+                    let candidate = if suffix == 0 {
+                        base_path.clone()
+                    } else {
+                        base_path.with_file_name(format!("{stem}_{suffix:03}.{extension}"))
+                    };
+
+                    match std::fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&candidate)
+                    {
+                        Ok(file) => {
+                            path = candidate;
+                            break file;
+                        }
+
+                        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                            suffix = suffix
+                                .checked_add(1)
+                                .ok_or_else(|| "No available numbered filename".to_owned())?;
+                        }
+
+                        Err(err) => {
+                            return Err(err.to_string());
+                        }
                     }
-                    Err(err) => Err(err.to_string()),
+                };
+
+                created_output = true;
+
+                // Actual file-writing progress: 80-99%.
+                let total_bytes = bytes.len().max(1);
+                let mut written = 0usize;
+
+                for chunk in bytes.chunks(1024 * 1024) {
+                    file.write_all(chunk).map_err(|e| e.to_string())?;
+
+                    written += chunk.len();
+
+                    let fraction = 0.80 + 0.19 * written as f32 / total_bytes as f32;
+
+                    let _ = tx.send(ExportEvent::Progress {
+                        fraction,
+                        stage: "Writing image file",
+                        encoding: false,
+                    });
+                }
+
+                file.sync_all().map_err(|e| e.to_string())?;
+
+                let _ = tx.send(ExportEvent::Progress {
+                    fraction: 1.0,
+                    stage: "Export complete",
+                    encoding: false,
+                });
+
+                Ok(())
+            })();
+
+            // Remove only an incomplete file created by this
+            // export worker. Never remove a pre-existing file.
+            if result.is_err() && created_output {
+                let _ = std::fs::remove_file(&path);
+            }
+
+            let final_result = result.map(|_| path);
+
+            let _ = tx.send(ExportEvent::Finished(final_result));
+        });
+    }
+
+    fn poll_export(&mut self, ctx: &egui::Context) {
+        if !self.exporting {
+            return;
+        }
+
+        let mut finished = false;
+
+        loop {
+            let event = self.export_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+
+            let Some(event) = event else {
+                break;
+            };
+
+            match event {
+                ExportEvent::Progress {
+                    fraction,
+                    stage,
+                    encoding,
+                } => {
+                    self.export_progress = fraction.clamp(0.0, 1.0);
+                    self.export_stage = stage.into();
+                    self.export_encoding = encoding;
+                }
+
+                ExportEvent::Finished(result) => {
+                    self.exporting = false;
+                    self.export_result = Some(result.is_ok());
+                    self.export_encoding = false;
+                    finished = true;
+
+                    match result {
+                        Ok(path) => {
+                            self.export_progress = 1.0;
+                            self.export_stage = "Export complete".into();
+                            self.status = format!("Exported: {}", path.display());
+                        }
+                        Err(err) => {
+                            self.export_stage = "Export failed".into();
+                            self.export_progress = 0.0;
+                            self.status = format!("Export failed: {err}");
+                        }
+                    }
                 }
             }
-            _ => unreachable!(),
-        };
+        }
 
-        match result {
-            Ok(()) => {
-                self.status = format!(
-                    "Exported: {}",
-                    path.display()
-                );
-            }
-            Err(err) => {
-                // An incomplete output may exist if encoding or
-                // writing failed. Do not delete it automatically.
-                self.status = format!("Export failed: {err}");
-            }
+        if finished {
+            self.export_rx = None;
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
     fn show_adjustments(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Image Adjustments");
-        ui.separator();
+        ui.horizontal(|ui| {
+            ui.heading("Image Adjustments");
 
-        ui.collapsing("Export Options", |ui| {
-            ui.label("JPEG Quality");
-            ui.add(
-                egui::Slider::new(
-                    &mut self.jpeg_quality,
-                    1..=100,
-                ).suffix("%"),
-            );
-            ui.label("PNG and WebP use lossless export.");
+            let can_reset = self.brightness != 0.0 || self.contrast != 0.0;
+
+            if ui
+                .add_enabled(can_reset, egui::Button::new("Reset All"))
+                .clicked()
+            {
+                self.brightness = 0.0;
+                self.contrast = 0.0;
+                self.update_processed_image(ui.ctx());
+            }
         });
 
         ui.separator();
@@ -563,26 +706,38 @@ impl PixelForge {
         let mut changed = false;
 
         ui.label("Brightness");
-        changed |= ui.add(
-            egui::Slider::new(
-                &mut self.brightness,
-                -100.0..=100.0,
-            )
-        ).changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.brightness, -100.0..=100.0))
+                .changed();
+
+            if ui
+                .add_enabled(self.brightness != 0.0, egui::Button::new("Reset"))
+                .on_hover_text("Reset brightness only")
+                .clicked()
+            {
+                self.brightness = 0.0;
+                changed = true;
+            }
+        });
+
+        ui.add_space(6.0);
 
         ui.label("Contrast");
-        changed |= ui.add(
-            egui::Slider::new(
-                &mut self.contrast,
-                -100.0..=100.0,
-            )
-        ).changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.contrast, -100.0..=100.0))
+                .changed();
 
-        if ui.button("Reset Adjustments").clicked() {
-            self.brightness = 0.0;
-            self.contrast = 0.0;
-            changed = true;
-        }
+            if ui
+                .add_enabled(self.contrast != 0.0, egui::Button::new("Reset"))
+                .on_hover_text("Reset contrast only")
+                .clicked()
+            {
+                self.contrast = 0.0;
+                changed = true;
+            }
+        });
 
         if changed {
             self.update_processed_image(ui.ctx());
@@ -591,20 +746,12 @@ impl PixelForge {
         ui.separator();
         ui.heading("Comparison");
 
-        ui.checkbox(
-            &mut self.comparison_enabled,
-            "Enable Before / After",
-        );
+        ui.checkbox(&mut self.comparison_enabled, "Enable Before / After");
 
         if self.comparison_enabled {
             ui.label("Divider Position");
-            ui.add(
-                egui::Slider::new(
-                    &mut self.comparison_position,
-                    0.0..=1.0,
-                )
-                .show_value(false),
-            );
+
+            ui.add(egui::Slider::new(&mut self.comparison_position, 0.0..=1.0).show_value(false));
 
             ui.label("Drag the divider on the image.");
             ui.label("Left: Original");
@@ -658,16 +805,11 @@ impl PixelForge {
             self.fit_image(available);
         }
 
-        let (canvas, response) =
-            ui.allocate_exact_size(available, Sense::hover());
+        let (canvas, response) = ui.allocate_exact_size(available, Sense::hover());
 
         let painter = ui.painter().with_clip_rect(canvas);
 
-        painter.rect_filled(
-            canvas,
-            0.0,
-            Color32::from_rgb(24, 24, 28),
-        );
+        painter.rect_filled(canvas, 0.0, Color32::from_rgb(24, 24, 28));
 
         let center = canvas.center();
 
@@ -681,9 +823,7 @@ impl PixelForge {
         ) = ui.ctx().input(|i| {
             let pan_button = match self.controls.pan {
                 PanButton::Middle => egui::PointerButton::Middle,
-                PanButton::Left | PanButton::SpaceLeft => {
-                    egui::PointerButton::Primary
-                }
+                PanButton::Left | PanButton::SpaceLeft => egui::PointerButton::Primary,
             };
 
             let fit_button = match self.controls.fit {
@@ -703,13 +843,10 @@ impl PixelForge {
 
         let image_width = self.image_size[0] as f32 * self.zoom;
         let image_height = self.image_size[1] as f32 * self.zoom;
-        let image_rect = Rect::from_center_size(
-            center + self.offset,
-            Vec2::new(image_width, image_height),
-        );
+        let image_rect =
+            Rect::from_center_size(center + self.offset, Vec2::new(image_width, image_height));
 
-        let divider_x = image_rect.left()
-            + image_rect.width() * self.comparison_position;
+        let divider_x = image_rect.left() + image_rect.width() * self.comparison_position;
 
         let (primary_down, primary_pressed) = ui.ctx().input(|i| {
             (
@@ -738,9 +875,8 @@ impl PixelForge {
         if self.divider_dragging && primary_down {
             if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
                 if image_rect.width() > 0.0 {
-                    self.comparison_position = (
-                        (pos.x - image_rect.left()) / image_rect.width()
-                    ).clamp(0.0, 1.0);
+                    self.comparison_position =
+                        ((pos.x - image_rect.left()) / image_rect.width()).clamp(0.0, 1.0);
                 }
             }
         }
@@ -771,48 +907,29 @@ impl PixelForge {
         }
 
         if response.hovered() {
-            let scroll =
-                ui.ctx().input(|i| i.smooth_scroll_delta.y);
+            let scroll = ui.ctx().input(|i| i.smooth_scroll_delta.y);
 
             if scroll.abs() > 0.01 {
-                let factor = (
-                    scroll
-                        * 0.002
-                        * self.controls.zoom_sensitivity
-                ).exp();
+                let factor = (scroll * 0.002 * self.controls.zoom_sensitivity).exp();
 
-                let anchor = response
-                    .hover_pos()
-                    .unwrap_or(center);
+                let anchor = response.hover_pos().unwrap_or(center);
 
                 self.zoom_at(factor, anchor, center);
             }
         }
 
         if let Some(original) = &self.texture {
-            let uv = Rect::from_min_max(
-                Pos2::new(0.0, 0.0),
-                Pos2::new(1.0, 1.0),
-            );
+            let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
 
             if let Some(processed) = &self.processed_texture {
-                painter.image(
-                    processed.id(),
-                    image_rect,
-                    uv,
-                    Color32::WHITE,
-                );
+                painter.image(processed.id(), image_rect, uv, Color32::WHITE);
 
                 if self.comparison_enabled {
-                    let split = image_rect.left()
-                        + image_rect.width() * self.comparison_position;
+                    let split = image_rect.left() + image_rect.width() * self.comparison_position;
 
                     let left_clip = Rect::from_min_max(
                         canvas.min,
-                        Pos2::new(
-                            split.clamp(canvas.left(), canvas.right()),
-                            canvas.bottom(),
-                        ),
+                        Pos2::new(split.clamp(canvas.left(), canvas.right()), canvas.bottom()),
                     );
 
                     painter.with_clip_rect(left_clip).image(
@@ -831,25 +948,14 @@ impl PixelForge {
 
                         if top < bottom {
                             painter.line_segment(
-                                [
-                                    Pos2::new(split, top),
-                                    Pos2::new(split, bottom),
-                                ],
-                                egui::Stroke::new(
-                                    2.0,
-                                    Color32::WHITE,
-                                ),
+                                [Pos2::new(split, top), Pos2::new(split, bottom)],
+                                egui::Stroke::new(2.0, Color32::WHITE),
                             );
                         }
                     }
                 }
             } else {
-                painter.image(
-                    original.id(),
-                    image_rect,
-                    uv,
-                    Color32::WHITE,
-                );
+                painter.image(original.id(), image_rect, uv, Color32::WHITE);
             }
         }
 
@@ -859,36 +965,27 @@ impl PixelForge {
                 .map(|pos| {
                     canvas.contains(pos)
                         && image_rect.contains(pos)
-                        && (pos.x - (
-                            image_rect.left()
-                            + image_rect.width()
-                                * self.comparison_position
-                        )).abs() <= 12.0
+                        && (pos.x
+                            - (image_rect.left() + image_rect.width() * self.comparison_position))
+                            .abs()
+                            <= 12.0
                 })
                 .unwrap_or(false);
 
         if self.divider_dragging || over_divider {
-            ui.ctx().set_cursor_icon(
-                egui::CursorIcon::ResizeHorizontal
-            );
+            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         } else if self.panning {
-            ui.ctx().set_cursor_icon(
-                egui::CursorIcon::Grabbing
-            );
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         } else if response.hovered() {
-            ui.ctx().set_cursor_icon(
-                egui::CursorIcon::Default
-            );
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
     }
 }
 
 impl eframe::App for PixelForge {
-    fn update(
-        &mut self,
-        ctx: &egui::Context,
-        _frame: &mut eframe::Frame,
-    ) {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_export(ctx);
+
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("PixelForge");
@@ -898,30 +995,33 @@ impl eframe::App for PixelForge {
                     self.open_image(ctx);
                 }
 
-                if ui.add_enabled(
-                    self.original_pixels.is_some(),
-                    egui::Button::new("Export Image"),
-                ).clicked() {
-                    self.export_image();
-                }
+                ui.add_enabled_ui(self.original_pixels.is_some() && !self.exporting, |ui| {
+                    ui.menu_button("Export Image", |ui| {
+                        if ui.button("PNG Image (.png)").clicked() {
+                            ui.close();
+                            self.start_export(ExportFormat::Png);
+                        }
 
+                        if ui.button("JPEG Image (.jpg)").clicked() {
+                            ui.close();
+                            self.start_export(ExportFormat::Jpeg);
+                        }
+
+                        if ui.button("WebP Image (.webp)").clicked() {
+                            ui.close();
+                            self.start_export(ExportFormat::WebP);
+                        }
+                    });
+                });
                 if ui.button("Settings").clicked() {
                     self.show_settings = !self.show_settings;
                 }
 
                 ui.separator();
 
-                ui.selectable_value(
-                    &mut self.advanced,
-                    false,
-                    "Simple",
-                );
+                ui.selectable_value(&mut self.advanced, false, "Simple");
 
-                ui.selectable_value(
-                    &mut self.advanced,
-                    true,
-                    "Advanced",
-                );
+                ui.selectable_value(&mut self.advanced, true, "Advanced");
             });
         });
 
@@ -945,10 +1045,7 @@ impl eframe::App for PixelForge {
                 ui.label("Restoration");
                 ui.add_enabled(false, egui::Button::new("Denoise"));
                 ui.add_enabled(false, egui::Button::new("Deblur"));
-                ui.add_enabled(
-                    false,
-                    egui::Button::new("Restore Faces"),
-                );
+                ui.add_enabled(false, egui::Button::new("Restore Faces"));
 
                 if self.advanced {
                     ui.separator();
@@ -966,40 +1063,53 @@ impl eframe::App for PixelForge {
 
                     ui.label(format!(
                         "{} x {} pixels",
-                        self.image_size[0],
-                        self.image_size[1]
+                        self.image_size[0], self.image_size[1]
                     ));
 
-                    ui.label(format!(
-                        "{:.2} MB",
-                        self.file_size as f64 / 1_048_576.0
-                    ));
+                    ui.label(format!("{:.2} MB", self.file_size as f64 / 1_048_576.0));
                 }
             });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            if self.exporting || self.export_result.is_some() {
+                ui.horizontal(|ui| {
+                    if self.exporting && self.export_encoding {
+                        ui.spinner();
+                        ui.label(&self.export_stage);
+                    } else if self.export_result == Some(false) {
+                        ui.colored_label(egui::Color32::LIGHT_RED, "Export failed");
+                    } else {
+                        ui.label(&self.export_stage);
+                        ui.label(format!("{:.0}%", self.export_progress * 100.0));
+                    }
+                });
+
+                if self.export_result != Some(false) {
+                    ui.add(
+                        egui::ProgressBar::new(self.export_progress)
+                            .desired_width(ui.available_width()),
+                    );
+                }
+
+                if self.export_result == Some(true) {
+                    ui.label("Image saved successfully");
+                }
+            }
+
             ui.horizontal(|ui| {
                 ui.label(&self.status);
 
                 if self.texture.is_some() {
                     ui.separator();
 
-                    ui.label(format!(
-                        "{} x {}",
-                        self.image_size[0],
-                        self.image_size[1]
-                    ));
+                    ui.label(format!("{} x {}", self.image_size[0], self.image_size[1]));
 
                     ui.separator();
 
-                    ui.label(format!(
-                        "Zoom: {:.1}%",
-                        self.zoom * 100.0
-                    ));
+                    ui.label(format!("Zoom: {:.1}%", self.zoom * 100.0));
                 }
             });
         });
-
         egui::CentralPanel::default().show(ctx, |ui| {
             self.show_viewer(ui);
         });
@@ -1011,7 +1121,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.1.6")
+            .with_title("PixelForge v0.1.7")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
@@ -1026,6 +1136,3 @@ fn main() -> eframe::Result {
         }),
     )
 }
-
-
-
