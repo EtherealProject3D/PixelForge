@@ -1059,11 +1059,6 @@ impl PixelForge {
 
         let generation = generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
-        if let Err(error) = ai_upscale::validate_upscale_size(original.width(), original.height(), scale) {
-            self.ai_status = error;
-            return;
-        }
-
         let settings = adjustments::Adjustments {
             brightness: self.brightness,
             contrast: self.contrast,
@@ -1513,6 +1508,11 @@ impl PixelForge {
             self.ai_status = "Open an image first".into();
             return;
         };
+
+        if let Err(error) = ai_upscale::validate_upscale_size(original.width(), original.height(), scale) {
+            self.ai_status = error;
+            return;
+        }
 
         let settings = adjustments::Adjustments {
             brightness: self.brightness,
