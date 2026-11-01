@@ -281,6 +281,74 @@ pub fn blend_images(
     Ok(output)
 }
 
+/// Blend directly into an owned Lanczos image.
+///
+/// Unlike blend_images(), this does not allocate another
+/// full-resolution output buffer.
+pub fn blend_images_owned(
+    ai: &RgbaImage,
+    mut baseline: RgbaImage,
+    strength: f32,
+) -> Result<RgbaImage, String> {
+    if ai.dimensions() != baseline.dimensions() {
+        return Err("AI and Lanczos dimensions differ".into());
+    }
+
+    let strength = strength.clamp(0.0, 1.0);
+
+    if strength <= 0.0 {
+        return Ok(baseline);
+    }
+
+    if strength >= 1.0 {
+        baseline.as_mut().copy_from_slice(ai.as_raw());
+        return Ok(baseline);
+    }
+
+    // Process in bounded pixel batches. The output buffer
+    // is reused rather than duplicated.
+    const BATCH_PIXELS: usize = 65536;
+    const CHANNELS: usize = 4;
+
+    let batch_bytes = BATCH_PIXELS * CHANNELS;
+
+    for (out_batch, ai_batch) in baseline
+        .as_mut()
+        .chunks_mut(batch_bytes)
+        .zip(ai.as_raw().chunks(batch_bytes))
+    {
+        for (out, neural) in out_batch.iter_mut().zip(ai_batch.iter()) {
+            let a = *out as f32;
+            let b = *neural as f32;
+
+            *out = (a + (b - a) * strength).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    Ok(baseline)
+}
+/// Decode a large PNG for full-resolution export.
+///
+/// The default image::open() allocation limit is too small
+/// for some Real-ESRGAN output images.
+fn load_export_png(path: &Path, label: &str) -> Result<RgbaImage, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("Cannot open {label}: {e}"))?;
+
+    let reader = std::io::BufReader::new(file);
+
+    let mut decoder = image::codecs::png::PngDecoder::new(reader)
+        .map_err(|e| format!("Cannot initialize {label} decoder: {e}"))?;
+
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(1024 * 1024 * 1024);
+
+    image::ImageDecoder::set_limits(&mut decoder, limits)
+        .map_err(|e| format!("{label} exceeds decoder memory limit: {e}"))?;
+
+    image::DynamicImage::from_decoder(decoder)
+        .map_err(|e| format!("Cannot decode {label}: {e}"))
+        .map(|image| image.to_rgba8())
+}
 pub fn save_blended(
     ai_path: &Path,
     baseline_path: &Path,
@@ -291,15 +359,11 @@ pub fn save_blended(
         return Err("Destination already exists".into());
     }
 
-    let ai = image::open(ai_path)
-        .map_err(|e| format!("Cannot read AI result: {e}"))?
-        .to_rgba8();
+    let ai = load_export_png(ai_path, "AI result")?;
 
-    let baseline = image::open(baseline_path)
-        .map_err(|e| format!("Cannot read Lanczos result: {e}"))?
-        .to_rgba8();
+    let baseline = load_export_png(baseline_path, "Lanczos result")?;
 
-    let output = blend_images(&ai, &baseline, strength)?;
+    let output = blend_images_owned(&ai, baseline, strength)?;
 
     let filename = destination
         .file_name()
@@ -346,6 +410,35 @@ pub fn save_blended(
 mod tests {
     use super::*;
 
+    #[test]
+    fn owned_blending_matches_existing_blending() {
+        let mut ai = RgbaImage::new(17, 13);
+        let mut baseline = RgbaImage::new(17, 13);
+
+        for (i, pixel) in ai.pixels_mut().enumerate() {
+            *pixel = image::Rgba([(i % 256) as u8, 210, 37, 255]);
+        }
+
+        for (i, pixel) in baseline.pixels_mut().enumerate() {
+            *pixel = image::Rgba([42, (i % 256) as u8, 190, 255]);
+        }
+
+        for strength in [0.0, 0.1, 0.5, 0.85, 1.0] {
+            let expected = blend_images(&ai, &baseline, strength).unwrap();
+
+            let actual = blend_images_owned(&ai, baseline.clone(), strength).unwrap();
+
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn owned_blending_rejects_mismatched_dimensions() {
+        let ai = RgbaImage::new(8, 8);
+        let baseline = RgbaImage::new(7, 8);
+
+        assert!(blend_images_owned(&ai, baseline, 0.5).is_err());
+    }
     #[test]
     fn engine_path_is_predictable() {
         assert!(

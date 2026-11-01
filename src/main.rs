@@ -9,6 +9,26 @@ use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 use std::path::PathBuf;
 
+/// Decode high-resolution PNG files for native AI inspection.
+fn load_inspection_png(path: &std::path::Path, label: &str) -> Result<image::RgbaImage, String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("Cannot open {label}: {e}"))?;
+
+    let reader = std::io::BufReader::new(file);
+
+    let mut decoder = image::codecs::png::PngDecoder::new(reader)
+        .map_err(|e| format!("Cannot initialize {label} decoder: {e}"))?;
+
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(2 * 1024 * 1024 * 1024);
+
+    image::ImageDecoder::set_limits(&mut decoder, limits)
+        .map_err(|e| format!("{label} decoder limit: {e}"))?;
+
+    image::DynamicImage::from_decoder(decoder)
+        .map_err(|e| format!("Cannot decode {label}: {e}"))
+        .map(|img| img.to_rgba8())
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PanButton {
     Middle,
@@ -1660,6 +1680,13 @@ impl PixelForge {
                     "Preview mode"
                 } else if self.ai_detail_rx.is_some() {
                     "Loading native-resolution detail..."
+                } else if self.ai_detail_status.contains("inspection")
+                    || self.ai_detail_status.contains("Cannot")
+                    || self.ai_detail_status.contains("decoder limit")
+                    || self.ai_detail_status.contains("cache lock")
+                    || self.ai_detail_status.contains("worker disconnected")
+                {
+                    self.ai_detail_status.as_str()
                 } else if self.ai_detail_ai_texture.is_some() {
                     "Native-resolution detail ready"
                 } else {
@@ -1839,9 +1866,8 @@ impl PixelForge {
                                     String
                                 > {
                                     // Maximum retained decoded-image cache:
-                                    // 384 MiB for the AI/Lanczos image pair.
-                                    const CACHE_LIMIT: u64 =
-                                        384 * 1024 * 1024;
+                                    // 4 GiB for the AI/Lanczos image pair.
+                                    const CACHE_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
 
                                     let bytes_needed =
                                         retained.dimensions[0] as u64
@@ -1860,19 +1886,11 @@ impl PixelForge {
                                         pair
                                     } else {
                                         let ai = std::sync::Arc::new(
-                                            image::open(&retained.ai_path)
-                                                .map_err(|e| format!(
-                                                    "AI inspection: {e}"
-                                                ))?
-                                                .to_rgba8()
+                                            load_inspection_png(&retained.ai_path, "AI inspection")?
                                         );
 
                                         let baseline = std::sync::Arc::new(
-                                            image::open(&retained.baseline_path)
-                                                .map_err(|e| format!(
-                                                    "Lanczos inspection: {e}"
-                                                ))?
-                                                .to_rgba8()
+                                            load_inspection_png(&retained.baseline_path, "Lanczos inspection")?
                                         );
 
                                         if ai.dimensions() != baseline.dimensions() {
