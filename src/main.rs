@@ -1,5 +1,6 @@
 mod adjustments;
 mod ai_upscale;
+mod ai_denoise;
 mod analysis;
 mod auto_enhance;
 mod histogram;
@@ -190,6 +191,8 @@ enum PendingOpen {
 struct PixelForge {
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
+    ai_denoise_level: u32,
+    ai_is_denoise: bool,
     ai_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ai_model: usize,
     ai_gpu_id: i32,
@@ -310,6 +313,8 @@ impl Default for PixelForge {
         Self {
             ai_rx: None,
             ai_running: false,
+            ai_denoise_level: 2,
+            ai_is_denoise: false,
             ai_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ai_model: 0,
             ai_gpu_id: -1,
@@ -1499,6 +1504,10 @@ impl PixelForge {
     }
 
     fn start_ai_upscale(&mut self, ctx: &egui::Context, scale: u32) {
+        self.start_ai_job(ctx, scale, false);
+    }
+
+    fn start_ai_job(&mut self, ctx: &egui::Context, scale: u32, denoise: bool) {
         if self.ai_running || self.ai_saving || self.exporting {
             self.ai_status = "Another operation is running".into();
             return;
@@ -1509,9 +1518,11 @@ impl PixelForge {
             return;
         };
 
+        if !denoise {
         if let Err(error) = ai_upscale::validate_upscale_size(original.width(), original.height(), scale) {
             self.ai_status = error;
             return;
+        }
         }
 
         let settings = adjustments::Adjustments {
@@ -1545,7 +1556,8 @@ impl PixelForge {
         self.ai_cancel = cancel.clone();
         self.ai_rx = Some(rx);
         self.ai_running = true;
-        self.ai_status = format!("Running Real-ESRGAN {scale}x on GPU...");
+        self.ai_is_denoise = denoise;
+        self.ai_status = if denoise { "Running AI photo denoise...".into() } else { format!("Running Real-ESRGAN {scale}x on GPU...") };
 
         self.ai_detail_rx = None;
         self.ai_detail_key = None;
@@ -1570,8 +1582,13 @@ impl PixelForge {
 
         let ctx = ctx.clone();
 
+        let denoise_level = self.ai_denoise_level;
         std::thread::spawn(move || {
-            let result = ai_upscale::upscale(pixels, settings, scale, options, cancel);
+            let result = if denoise {
+                ai_denoise::denoise(pixels, settings, denoise_level, options.gpu_id, options.tile_size, cancel)
+            } else {
+                ai_upscale::upscale(pixels, settings, scale, options, cancel)
+            };
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -1619,7 +1636,7 @@ impl PixelForge {
                 ];
 
                 self.ai_status = format!(
-                    "AI upscale complete: {} x {}. Not saved.",
+                    if self.ai_is_denoise { "AI denoise complete: {} x {}. Not saved." } else { "AI upscale complete: {} x {}. Not saved." },
                     result.dimensions[0], result.dimensions[1]
                 );
 
@@ -1692,7 +1709,7 @@ impl PixelForge {
             })
             .unwrap_or(4);
 
-        let suggested = format!("{stem}_AI_{scale}x.png");
+        let suggested = if self.ai_is_denoise { format!("{stem}_AI_Denoised.png") } else { format!("{stem}_AI_{scale}x.png") };
 
         let Some(mut destination) = rfd::FileDialog::new()
             .add_filter("PNG Image", &["png"])
@@ -4130,9 +4147,21 @@ impl eframe::App for PixelForge {
                             ui.separator();
 
                             ui.heading("Restoration");
-                            ui.label("Additional AI tools coming later");
-
-                            ui.add_enabled(false, egui::Button::new("Denoise"));
+                            ui.label("Photo denoising (Waifu2x Vulkan)");
+                            ui.add_enabled_ui(!self.ai_running && !self.ai_saving, |ui| {
+                                egui::ComboBox::from_label("Noise reduction")
+                                    .selected_text(match self.ai_denoise_level { 0 => "Very light", 1 => "Light", 2 => "Medium", _ => "Strong" })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.ai_denoise_level, 0, "Very light");
+                                        ui.selectable_value(&mut self.ai_denoise_level, 1, "Light");
+                                        ui.selectable_value(&mut self.ai_denoise_level, 2, "Medium");
+                                        ui.selectable_value(&mut self.ai_denoise_level, 3, "Strong");
+                                    });
+                                if ui.button("AI Denoise (Original Size)").clicked() {
+                                    self.start_ai_job(ctx, 1, true);
+                                }
+                            });
+                            ui.small("Requires waifu2x-ncnn-vulkan and its models-cunet folder in tools/waifu2x.");
 
                             ui.add_enabled(false, egui::Button::new("Deblur"));
 
