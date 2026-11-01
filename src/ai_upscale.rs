@@ -25,6 +25,7 @@ impl Default for UpscaleOptions {
 pub struct VulkanGpu {
     pub id: i32,
     pub name: String,
+    pub discrete: bool,
 }
 
 /// Enumerate Vulkan physical devices in Vulkan's native order.
@@ -45,11 +46,16 @@ pub fn available_vulkan_gpus() -> Result<Vec<VulkanGpu>, String> {
             let properties = unsafe { instance.get_physical_device_properties(*device) };
             let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
                 .to_string_lossy().into_owned();
-            VulkanGpu { id: id as i32, name }
+            VulkanGpu { id: id as i32, name, discrete: properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU }
         }).collect()
     });
     unsafe { instance.destroy_instance(None); }
     result.map_err(|e| format!("Cannot enumerate Vulkan GPUs: {e}"))
+}
+
+/// Prefer a discrete Vulkan GPU; preserve native enumeration order as tie-breaker.
+pub fn preferred_gpu_id(gpus: &[VulkanGpu]) -> Option<i32> {
+    gpus.iter().find(|gpu| gpu.discrete).or_else(|| gpus.first()).map(|gpu| gpu.id)
 }
 
 pub struct UpscaleResult {
