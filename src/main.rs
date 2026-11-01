@@ -2,6 +2,7 @@ mod adjustments;
 mod ai_upscale;
 mod ai_denoise;
 mod ai_restoration;
+mod ai_generation;
 mod analysis;
 mod auto_enhance;
 mod histogram;
@@ -190,6 +191,21 @@ enum PendingOpen {
 }
 
 struct PixelForge {
+    generation_prompt: String,
+    generation_negative: String,
+    generation_checkpoint: String,
+    generation_checkpoints: Vec<String>,
+    generation_width: u32,
+    generation_height: u32,
+    generation_steps: u32,
+    generation_cfg: f32,
+    generation_seed: u64,
+    generation_rx: Option<std::sync::mpsc::Receiver<Result<image::RgbaImage, String>>>,
+    generation_running: bool,
+    generation_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    generation_image: Option<image::RgbaImage>,
+    generation_texture: Option<TextureHandle>,
+    generation_status: String,
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
     ai_denoise_level: u32,
@@ -316,6 +332,21 @@ struct PixelForge {
 impl Default for PixelForge {
     fn default() -> Self {
         Self {
+            generation_prompt: String::new(),
+            generation_negative: String::new(),
+            generation_checkpoint: String::new(),
+            generation_checkpoints: Vec::new(),
+            generation_width: 512,
+            generation_height: 512,
+            generation_steps: 25,
+            generation_cfg: 7.0,
+            generation_seed: 42,
+            generation_rx: None,
+            generation_running: false,
+            generation_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            generation_image: None,
+            generation_texture: None,
+            generation_status: "Connect to local ComfyUI to begin".into(),
             ai_rx: None,
             ai_running: false,
             ai_denoise_level: 2,
@@ -442,6 +473,10 @@ impl PixelForge {
             return;
         };
 
+        self.load_image_path(ctx, path);
+    }
+
+    fn load_image_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         match image::open(&path) {
             Ok(img) => {
                 let rgba = img.to_rgba8();
@@ -511,6 +546,69 @@ impl PixelForge {
             Err(err) => {
                 self.status = format!("Open failed: {err}");
             }
+        }
+    }
+
+    fn start_generation(&mut self, ctx: &egui::Context) {
+        if self.generation_running { return; }
+        let request = ai_generation::Request {
+            checkpoint: self.generation_checkpoint.clone(),
+            prompt: self.generation_prompt.clone(),
+            negative: self.generation_negative.clone(),
+            width: self.generation_width,
+            height: self.generation_height,
+            steps: self.generation_steps,
+            cfg: self.generation_cfg,
+            seed: self.generation_seed,
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.generation_cancel = cancel.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.generation_rx = Some(rx);
+        self.generation_running = true;
+        self.generation_status = "Generating locally with ComfyUI...".into();
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let result = ai_generation::generate(request, cancel);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_generation(&mut self, ctx: &egui::Context) {
+        if !self.generation_running { return; }
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        let result = self.generation_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+        if let Some(result) = result {
+            self.generation_running = false;
+            self.generation_rx = None;
+            match result {
+                Ok(image) => {
+                    let size = [image.width() as usize, image.height() as usize];
+                    let preview = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+                    self.generation_texture = Some(ctx.load_texture("generated_preview", preview, TextureOptions::LINEAR));
+                    self.generation_image = Some(image);
+                    self.generation_status = "Generation complete. Open the result in the editor.".into();
+                }
+                Err(error) => self.generation_status = error,
+            }
+        }
+    }
+
+    fn open_generated_image(&mut self, ctx: &egui::Context) {
+        if self.project_dirty {
+            self.generation_status = "Save or close your current unsaved project before opening the generated image.".into();
+            return;
+        }
+        let Some(image) = self.generation_image.as_ref() else { return; };
+        let path = std::env::temp_dir().join(format!(
+            "pixelforge-generated-{}.png",
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis()
+        ));
+        match image.save(&path) {
+            Ok(()) => self.load_image_path(ctx, path),
+            Err(error) => self.generation_status = format!("Cannot prepare generated image: {error}"),
         }
     }
 
@@ -3772,6 +3870,7 @@ impl eframe::App for PixelForge {
         self.poll_export(ctx);
         self.poll_preview(ctx);
         self.poll_ai_upscale(ctx);
+        self.poll_generation(ctx);
         self.poll_ai_save(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -4126,6 +4225,64 @@ impl eframe::App for PixelForge {
                                                         ui.spacing_mut().slider_width = old_slider_width;
                             
                                                         ui.label("Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
+                            ui.separator();
+                            ui.heading("Image Generation");
+                            ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
+                            if ui.button("Connect / Refresh Models").clicked() {
+                                match ai_generation::checkpoints() {
+                                    Ok(models) => {
+                                        if !models.contains(&self.generation_checkpoint) {
+                                            self.generation_checkpoint = models.first().cloned().unwrap_or_default();
+                                        }
+                                        self.generation_status = format!("Found {} local checkpoints", models.len());
+                                        self.generation_checkpoints = models;
+                                    }
+                                    Err(error) => self.generation_status = error,
+                                }
+                            }
+                            egui::ComboBox::from_label("Checkpoint")
+                                .selected_text(if self.generation_checkpoint.is_empty() { "Select a checkpoint" } else { &self.generation_checkpoint })
+                                .show_ui(ui, |ui| {
+                                    for checkpoint in &self.generation_checkpoints {
+                                        ui.selectable_value(&mut self.generation_checkpoint, checkpoint.clone(), checkpoint);
+                                    }
+                                });
+                            ui.label("Prompt");
+                            ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).desired_rows(3));
+                            ui.label("Negative prompt");
+                            ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
+                            ui.horizontal(|ui| {
+                                ui.label("Width");
+                                ui.add(egui::DragValue::new(&mut self.generation_width).range(256..=2048).speed(64));
+                                ui.label("Height");
+                                ui.add(egui::DragValue::new(&mut self.generation_height).range(256..=2048).speed(64));
+                            });
+                            ui.label("Use dimensions divisible by 64");
+                            ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
+                            ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0).text("CFG"));
+                            ui.horizontal(|ui| {
+                                ui.label("Seed");
+                                ui.add(egui::DragValue::new(&mut self.generation_seed));
+                            });
+                            ui.horizontal(|ui| {
+                                if ui.add_enabled(!self.generation_running && !self.generation_checkpoint.is_empty(),
+                                    egui::Button::new("Generate")).clicked() {
+                                    self.start_generation(ctx);
+                                }
+                                if ui.add_enabled(self.generation_running, egui::Button::new("Cancel")).clicked() {
+                                    self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                    self.generation_status = "Cancelling generation...".into();
+                                }
+                            });
+                            ui.label(&self.generation_status);
+                            if let Some(texture) = &self.generation_texture {
+                                let width = ui.available_width().max(80.0);
+                                let ratio = texture.size()[1] as f32 / texture.size()[0].max(1) as f32;
+                                ui.image((texture.id(), egui::vec2(width, width * ratio)));
+                                if ui.button("Open Generated Image in Editor").clicked() {
+                                    self.open_generated_image(ctx);
+                                }
+                            }
                             ui.separator();
                             ui.heading("AI Upscaling");
                             ui.separator();
