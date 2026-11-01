@@ -435,6 +435,7 @@ impl PixelForge {
                 self.project_path = None;
                 self.saved_selections.clear();
                 self.selected_saved_selection = None;
+                self.active_saved_selection = None;
                 self.selection_name_input.clear();
                 self.selection_mask = None;
                 self.selection_texture = None;
@@ -516,6 +517,7 @@ impl PixelForge {
         self.project_path = None;
         self.saved_selections.clear();
         self.selected_saved_selection = None;
+        self.active_saved_selection = None;
         self.selection_name_input.clear();
         self.selection_mask = None;
         self.selection_texture = None;
@@ -778,6 +780,7 @@ impl PixelForge {
             .unwrap_or_default();
 
         self.selected_saved_selection = None;
+        self.active_saved_selection = None;
         self.selection_name_input.clear();
         self.selection_mask = None;
         self.selection_texture = None;
