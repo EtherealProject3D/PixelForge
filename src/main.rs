@@ -192,6 +192,8 @@ struct PixelForge {
     ai_running: bool,
     ai_model: usize,
     ai_gpu_id: i32,
+    ai_gpus: Vec<ai_upscale::VulkanGpu>,
+    ai_gpu_error: Option<String>,
     ai_tile_size: u32,
     ai_result: Option<std::sync::Arc<ai_upscale::UpscaleResult>>,
     ai_save_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
@@ -309,6 +311,8 @@ impl Default for PixelForge {
             ai_running: false,
             ai_model: 0,
             ai_gpu_id: -1,
+            ai_gpus: Vec::new(),
+            ai_gpu_error: None,
             ai_tile_size: 0,
             ai_result: None,
             ai_save_rx: None,
@@ -1477,6 +1481,21 @@ impl PixelForge {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
+    fn refresh_vulkan_gpus(&mut self) {
+        match ai_upscale::available_vulkan_gpus() {
+            Ok(gpus) => {
+                if !gpus.iter().any(|gpu| gpu.id == self.ai_gpu_id) { self.ai_gpu_id = -1; }
+                self.ai_gpus = gpus;
+                self.ai_gpu_error = None;
+            }
+            Err(error) => {
+                self.ai_gpu_id = -1;
+                self.ai_gpus.clear();
+                self.ai_gpu_error = Some(error);
+            }
+        }
+    }
+
     fn start_ai_upscale(&mut self, ctx: &egui::Context, scale: u32) {
         if self.ai_running || self.ai_saving || self.exporting {
             self.ai_status = "Another operation is running".into();
@@ -3949,6 +3968,7 @@ impl eframe::App for PixelForge {
                             ui.heading("AI Upscaling");
                             ui.separator();
                             ui.label("Real-ESRGAN");
+                            if self.ai_gpus.is_empty() && self.ai_gpu_error.is_none() { self.refresh_vulkan_gpus(); }
                             ui.add_enabled_ui(!self.ai_running, |ui| {
                                 egui::ComboBox::from_label("Upscaling model")
                                     .selected_text(["Photo", "Illustration / Anime", "Anime Video"][self.ai_model.min(2)])
@@ -3957,10 +3977,20 @@ impl eframe::App for PixelForge {
                                         ui.selectable_value(&mut self.ai_model, 1, "Illustration / Anime");
                                         ui.selectable_value(&mut self.ai_model, 2, "Anime Video");
                                     });
-                                ui.horizontal(|ui| {
-                                    ui.label("Vulkan GPU (-1 = automatic)");
-                                    ui.add(egui::DragValue::new(&mut self.ai_gpu_id).range(-1..=32));
-                                });
+                                let gpu_name = self.ai_gpus.iter().find(|gpu| gpu.id == self.ai_gpu_id)
+                                    .map(|gpu| format!("{} (GPU {})", gpu.name, gpu.id))
+                                    .unwrap_or_else(|| "Automatic (Recommended)".to_owned());
+                                egui::ComboBox::from_label("Vulkan GPU").selected_text(gpu_name)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.ai_gpu_id, -1, "Automatic (Recommended)");
+                                        for gpu in &self.ai_gpus {
+                                            ui.selectable_value(&mut self.ai_gpu_id, gpu.id, format!("{} (GPU {})", gpu.name, gpu.id));
+                                        }
+                                    });
+                                if self.ai_gpus.is_empty() {
+                                    ui.small(self.ai_gpu_error.as_deref().unwrap_or("No Vulkan GPUs detected"));
+                                }
+                                if ui.small_button("Refresh GPU list").clicked() { self.refresh_vulkan_gpus(); }
                                 egui::ComboBox::from_label("Tile size")
                                     .selected_text(if self.ai_tile_size == 0 { "Auto".to_owned() } else { self.ai_tile_size.to_string() })
                                     .show_ui(ui, |ui| {
