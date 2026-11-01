@@ -4104,10 +4104,10 @@ impl eframe::App for PixelForge {
                             if self.ai_running {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
-                                    ui.label("GPU inference running...");
-                                    if ui.button("Cancel Upscale").clicked() {
+                                    ui.label(if self.ai_is_denoise { "AI denoising running..." } else { "GPU inference running..." });
+                                    if ui.button(if self.ai_is_denoise { "Cancel Denoise" } else { "Cancel Upscale" }).clicked() {
                                         self.ai_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                        self.ai_status = "Cancelling AI upscale...".into();
+                                        self.ai_status = if self.ai_is_denoise { "Cancelling AI denoise..." } else { "Cancelling AI upscale..." }.into();
                                     }
                                 });
                             }
