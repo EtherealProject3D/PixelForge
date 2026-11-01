@@ -17,6 +17,37 @@ impl Default for UpscaleOptions {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct VulkanGpu {
+    pub id: i32,
+    pub name: String,
+}
+
+/// Enumerate Vulkan physical devices in Vulkan's native order.
+/// This matches the GPU indices used by Real-ESRGAN ncnn-vulkan.
+pub fn available_vulkan_gpus() -> Result<Vec<VulkanGpu>, String> {
+    use ash::vk;
+    use std::ffi::CStr;
+
+    let entry = unsafe { ash::Entry::load() }
+        .map_err(|e| format!("Vulkan loader unavailable: {e}"))?;
+    let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_0);
+    let create_info = vk::InstanceCreateInfo::default().application_info(&app);
+    let instance = unsafe { entry.create_instance(&create_info, None) }
+        .map_err(|e| format!("Cannot initialize Vulkan: {e}"))?;
+    let devices = unsafe { instance.enumerate_physical_devices() };
+    let result = devices.map(|devices| {
+        devices.iter().enumerate().map(|(id, device)| {
+            let properties = unsafe { instance.get_physical_device_properties(*device) };
+            let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
+                .to_string_lossy().into_owned();
+            VulkanGpu { id: id as i32, name }
+        }).collect()
+    });
+    unsafe { instance.destroy_instance(None); }
+    result.map_err(|e| format!("Cannot enumerate Vulkan GPUs: {e}"))
+}
+
 pub struct UpscaleResult {
     pub work_dir: PathBuf,
     pub ai_path: PathBuf,
