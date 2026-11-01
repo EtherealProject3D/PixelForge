@@ -4093,6 +4093,40 @@ impl eframe::App for PixelForge {
                                 ui.label("Layers and masks coming soon.");
                             }
                         } else {
+                            ui.heading("AI Tools");
+                            ui.horizontal(|ui| {
+                                                            ui.label("AI Result Strength");
+                            
+                                                            ui.with_layout(
+                                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                                |ui| {
+                                                                    ui.label(format!("{:.0}%", self.ai_strength * 100.0));
+                                                                },
+                                                            );
+                                                        });
+                            
+                                                        // egui Slider has its own internal width.
+                                                        // Set that width explicitly rather than
+                                                        // just enlarging its allocated rectangle.
+                                                        let old_slider_width = ui.spacing().slider_width;
+                            
+                                                        ui.spacing_mut().slider_width = (ui.available_width() - 20.0).max(80.0);
+                            
+                                                        if ui
+                                                            .add(
+                                                                egui::Slider::new(&mut self.ai_strength, 0.0..=1.0)
+                                                                    .step_by(0.05)
+                                                                    .show_value(false),
+                                                            )
+                                                            .changed()
+                                                        {
+                                                            self.refresh_ai_preview(ctx);
+                                                        }
+                            
+                                                        ui.spacing_mut().slider_width = old_slider_width;
+                            
+                                                        ui.small("Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
+                            ui.separator();
                             ui.heading("AI Upscaling");
                             ui.separator();
                             ui.label("Real-ESRGAN");
@@ -4133,39 +4167,6 @@ impl eframe::App for PixelForge {
                             });
 
                             ui.add_space(8.0);
-
-                            ui.horizontal(|ui| {
-                                ui.label("AI Strength");
-
-                                ui.with_layout(
-                                    egui::Layout::right_to_left(egui::Align::Center),
-                                    |ui| {
-                                        ui.label(format!("{:.0}%", self.ai_strength * 100.0));
-                                    },
-                                );
-                            });
-
-                            // egui Slider has its own internal width.
-                            // Set that width explicitly rather than
-                            // just enlarging its allocated rectangle.
-                            let old_slider_width = ui.spacing().slider_width;
-
-                            ui.spacing_mut().slider_width = (ui.available_width() - 20.0).max(80.0);
-
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut self.ai_strength, 0.0..=1.0)
-                                        .step_by(0.05)
-                                        .show_value(false),
-                                )
-                                .changed()
-                            {
-                                self.refresh_ai_preview(ctx);
-                            }
-
-                            ui.spacing_mut().slider_width = old_slider_width;
-
-                            ui.label("Blend conventional resizing with AI");
 
                             ui.add_space(8.0);
 
