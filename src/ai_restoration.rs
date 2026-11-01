@@ -20,6 +20,50 @@ pub fn engine_path(operation: Operation) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
+/// Neural detail enhancement: Real-ESRGAN inference followed by same-size reconstruction.
+/// This is not a separately trained sharpening model.
+pub fn sharpen(
+    original: RgbaImage,
+    settings: crate::adjustments::Adjustments,
+    gpu_id: i32,
+    tile_size: u32,
+    cancel: Arc<AtomicBool>,
+) -> Result<crate::ai_upscale::UpscaleResult, String> {
+    let width = original.width();
+    let height = original.height();
+    let mut baseline = original.clone();
+    for pixel in baseline.pixels_mut() { settings.apply_pixel(pixel); }
+    let mut result = crate::ai_upscale::upscale(
+        original, settings, 2,
+        crate::ai_upscale::UpscaleOptions {
+            model: "realesrgan-x4plus".into(), gpu_id, tile_size
+        }, cancel.clone()
+    )?;
+    if cancel.load(Ordering::Relaxed) { return Err("AI sharpen cancelled".into()); }
+    let enhanced = image::open(&result.ai_path)
+        .map_err(|e| format!("Cannot decode enhanced image: {e}"))?.to_rgba8();
+    let restored = image::imageops::resize(
+        &enhanced, width, height, image::imageops::FilterType::Lanczos3
+    );
+    if cancel.load(Ordering::Relaxed) { return Err("AI sharpen cancelled".into()); }
+    let ai_path = result.work_dir.join("sharpened.png");
+    let baseline_path = result.work_dir.join("sharpen_original.png");
+    restored.save(&ai_path).map_err(|e| format!("Cannot retain sharpened result: {e}"))?;
+    baseline.save(&baseline_path).map_err(|e| format!("Cannot retain original comparison: {e}"))?;
+    let longest = width.max(height);
+    let preview_size = if longest > 2048 {
+        let ratio = 2048.0 / longest as f64;
+        [((width as f64 * ratio).round() as u32).max(1),
+         ((height as f64 * ratio).round() as u32).max(1)]
+    } else { [width, height] };
+    result.preview = image::imageops::resize(&restored, preview_size[0], preview_size[1], image::imageops::FilterType::Triangle);
+    result.baseline_preview = image::imageops::resize(&baseline, preview_size[0], preview_size[1], image::imageops::FilterType::Triangle);
+    result.dimensions = [width, height];
+    result.ai_path = ai_path;
+    result.baseline_path = baseline_path;
+    Ok(result)
+}
+
 pub fn run(
     mut original: RgbaImage,
     settings: crate::adjustments::Adjustments,
