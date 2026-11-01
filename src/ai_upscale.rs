@@ -239,7 +239,7 @@ fn upscale_inner(
             }
         }
     }
-    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into());
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
 
     if !output.is_file() {
         return Err("Real-ESRGAN did not produce an output image".into());
