@@ -4447,15 +4447,51 @@ impl eframe::App for PixelForge {
                                         ui.selectable_value(&mut self.generation_checkpoint, checkpoint.clone(), checkpoint);
                                     }
                                 });
+                            egui::ComboBox::from_label("Style preset")
+                                .selected_text(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0)
+                                .show_ui(ui, |ui| {
+                                    for (i, (name, _)) in GENERATION_STYLES.iter().enumerate() {
+                                        ui.selectable_value(&mut self.generation_style, i, *name);
+                                    }
+                                });
+                            ui.horizontal(|ui| {
+                                ui.label("Aspect ratio");
+                                egui::ComboBox::from_id_salt("generation_ratio")
+                                    .selected_text(GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)].0)
+                                    .show_ui(ui, |ui| {
+                                        for (i, (name, _, _)) in GENERATION_SIZES.iter().enumerate() {
+                                            ui.selectable_value(&mut self.generation_size, i, *name);
+                                        }
+                                    });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut self.generation_portrait, false, "Landscape");
+                                ui.selectable_value(&mut self.generation_portrait, true, "Portrait");
+                            });
+                            ui.checkbox(&mut self.generation_custom_size, "Custom dimensions");
+                            if !self.generation_custom_size {
+                                let (_, w, h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
+                                (self.generation_width, self.generation_height) =
+                                    if self.generation_portrait { (*h, *w) } else { (*w, *h) };
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("Batch");
+                                for count in [1, 2, 4, 8] {
+                                    ui.selectable_value(&mut self.generation_batch_count, count, count.to_string());
+                                }
+                            });
+                            ui.checkbox(&mut self.generation_random_seeds, "Random seeds per image");
+                            ui.label("When disabled, seeds increment from the starting seed.");
                             ui.label("Prompt");
                             ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).desired_rows(3));
                             ui.label("Negative prompt");
                             ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
-                            ui.horizontal(|ui| {
+                            ui.add_enabled_ui(self.generation_custom_size, |ui| { ui.horizontal(|ui| {
                                 ui.label("Width");
                                 ui.add(egui::DragValue::new(&mut self.generation_width).range(256..=2048).speed(64));
                                 ui.label("Height");
                                 ui.add(egui::DragValue::new(&mut self.generation_height).range(256..=2048).speed(64));
+                            });
                             });
                             ui.label("Use dimensions divisible by 64");
                             ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
@@ -4474,6 +4510,9 @@ impl eframe::App for PixelForge {
                                     self.generation_status = "Cancelling generation...".into();
                                 }
                             });
+                            if !self.generation_gallery.is_empty() && ui.button("Open Generation Gallery").clicked() {
+                                self.generation_workspace = true;
+                            }
                             if let Some(started) = self.generation_started {
                                 let step = self.generation_progress.load(std::sync::atomic::Ordering::Relaxed);
                                 if step > 0 {
@@ -4708,7 +4747,9 @@ impl eframe::App for PixelForge {
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.ai_show_result {
+            if self.generation_workspace {
+                self.show_generation_workspace(ui);
+            } else if self.ai_show_result {
                 self.show_ai_result(ctx, ui);
             } else {
                 self.show_viewer(ui);
