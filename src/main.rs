@@ -372,6 +372,7 @@ struct PixelForge {
     advanced: bool,
     show_settings: bool,
     ai_tools_tab: bool,
+    generation_tools_tab: bool,
     selection_tools_tab: bool,
     controls: Controls,
     status: String,
@@ -515,6 +516,7 @@ impl Default for PixelForge {
             advanced: false,
             show_settings: false,
             selection_tools_tab: false,
+            generation_tools_tab: false,
             ai_tools_tab: std::env::var_os("APPDATA")
                 .map(|base| {
                     std::path::PathBuf::from(base)
@@ -726,6 +728,139 @@ impl PixelForge {
             }
             _ => {}
         }
+    }
+
+    fn show_generation_sidebar(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        ui.heading("Image Generation");
+        ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
+        if ui.button("Connect / Refresh Models").clicked() {
+            if self.generation_models_rx.is_none() {
+                let (tx, rx) = std::sync::mpsc::channel();
+                self.generation_models_rx = Some(rx);
+                self.generation_status = "Connecting to local ComfyUI (starting backend if needed)...".into();
+                let ctx = ctx.clone();
+                std::thread::spawn(move || {
+                    let result = ai_generation::checkpoints();
+                    let _ = tx.send(result);
+                    ctx.request_repaint();
+                });
+            }
+        }
+        egui::ComboBox::from_label("Checkpoint")
+            .selected_text(if self.generation_checkpoint.is_empty() { "Select a checkpoint" } else { &self.generation_checkpoint })
+            .show_ui(ui, |ui| {
+                for checkpoint in &self.generation_checkpoints {
+                    ui.selectable_value(&mut self.generation_checkpoint, checkpoint.clone(), checkpoint);
+                }
+            });
+        egui::ComboBox::from_label("Style preset")
+            .selected_text(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0)
+            .show_ui(ui, |ui| {
+                for (i, (name, _)) in GENERATION_STYLES.iter().enumerate() {
+                    ui.selectable_value(&mut self.generation_style, i, *name);
+                }
+            });
+        ui.horizontal(|ui| {
+            ui.label("Aspect ratio");
+            egui::ComboBox::from_id_salt("generation_ratio")
+                .selected_text(GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)].0)
+                .show_ui(ui, |ui| {
+                    for (i, (name, _, _)) in GENERATION_SIZES.iter().enumerate() {
+                        ui.selectable_value(&mut self.generation_size, i, *name);
+                    }
+                });
+        });
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.generation_portrait, false, "Landscape");
+            ui.selectable_value(&mut self.generation_portrait, true, "Portrait");
+        });
+        egui::ComboBox::from_label("Resolution")
+            .selected_text(["Small", "Standard (SDXL)", "Large"][self.generation_resolution.min(2)])
+            .show_ui(ui, |ui| {
+                for (i, name) in ["Small", "Standard (SDXL)", "Large"].iter().enumerate() {
+                    ui.selectable_value(&mut self.generation_resolution, i, *name);
+                }
+            });
+        ui.checkbox(&mut self.generation_custom_size, "Custom proportional resolution");
+        let (_, base_w, base_h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
+        let (base_w, base_h) = if self.generation_portrait { (base_h, base_w) } else { (base_w, base_h) };
+        let scale = [0.75_f32, 1.0, 1.25][self.generation_resolution.min(2)];
+        let snap = |n: f32| ((n / 64.0).round() as u32 * 64).clamp(256, 2048);
+        if !self.generation_custom_size {
+            self.generation_width = snap(base_w as f32 * scale);
+            self.generation_height = snap(base_h as f32 * scale);
+        } else {
+            ui.label("Editing either dimension adjusts the other to the selected aspect ratio.");
+            ui.horizontal(|ui| {
+                ui.label("Width");
+                let width_changed = ui.add(egui::DragValue::new(&mut self.generation_width)
+                    .range(256..=2048).speed(64)).changed();
+                ui.label("Height");
+                let height_changed = ui.add(egui::DragValue::new(&mut self.generation_height)
+                    .range(256..=2048).speed(64)).changed();
+                if width_changed {
+                    self.generation_width = snap(self.generation_width as f32);
+                    self.generation_height = snap(self.generation_width as f32 * base_h as f32 / base_w as f32);
+                } else if height_changed {
+                    self.generation_height = snap(self.generation_height as f32);
+                    self.generation_width = snap(self.generation_height as f32 * base_w as f32 / base_h as f32);
+                }
+            });
+        }
+        ui.label(format!("Output: {} × {} (multiples of 64)", self.generation_width, self.generation_height));
+        ui.horizontal(|ui| {
+            ui.label("Batch");
+            for count in [1, 2, 4, 8] {
+                ui.selectable_value(&mut self.generation_batch_count, count, count.to_string());
+            }
+        });
+        ui.checkbox(&mut self.generation_random_seeds, "Random seeds per image");
+        ui.label("When disabled, seeds increment from the starting seed.");
+        ui.label("Prompt");
+        ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).desired_rows(3));
+        ui.label("Negative prompt");
+        ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
+         ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
+        ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0).text("CFG"));
+        ui.horizontal(|ui| {
+            ui.label("Seed");
+            ui.add(egui::DragValue::new(&mut self.generation_seed));
+        });
+        ui.horizontal(|ui| {
+            if ui.add_enabled(!self.generation_running && !self.generation_checkpoint.is_empty(),
+                egui::Button::new("Generate")).clicked() {
+                self.start_generation(ctx);
+            }
+            if ui.add_enabled(self.generation_running, egui::Button::new("Cancel")).clicked() {
+                self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                self.generation_status = "Cancelling generation...".into();
+            }
+        });
+        if !self.generation_gallery.is_empty() && ui.button("Open Generation Gallery").clicked() {
+            self.generation_workspace = true;
+        }
+        if let Some(started) = self.generation_started {
+            let step = self.generation_progress.load(std::sync::atomic::Ordering::Relaxed);
+            if step > 0 {
+                ui.add(egui::ProgressBar::new((step as f32 / self.generation_steps.max(1) as f32).clamp(0.0, 1.0))
+                    .text(format!("Sampling step {}/{} ({:.0}%)", step, self.generation_steps, 100.0 * step as f32 / self.generation_steps.max(1) as f32)));
+            } else {
+                ui.spinner();
+                ui.label("Waiting for sampling progress...");
+            }
+            ui.label(format!("Generation elapsed: {:.1}s", started.elapsed().as_secs_f32()));
+        }
+        ui.label(&self.generation_status);
+        if let Some(texture) = &self.generation_texture {
+            let width = ui.available_width().max(80.0);
+            let ratio = texture.size()[1] as f32 / texture.size()[0].max(1) as f32;
+            ui.image((texture.id(), egui::vec2(width, width * ratio)));
+            if ui.button("Open Generated Image in Editor").clicked() {
+                self.open_generated_image(ctx);
+            }
+        }
+        ui.separator();
     }
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
@@ -4303,23 +4438,27 @@ impl eframe::App for PixelForge {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let edit_clicked = ui
-                        .selectable_label(!self.ai_tools_tab && !self.selection_tools_tab, "Edit")
+                        .selectable_label(!self.ai_tools_tab && !self.selection_tools_tab && !self.generation_tools_tab, "Edit")
                         .clicked();
 
                     let ai_clicked = ui
                         .selectable_label(
-                            self.ai_tools_tab && !self.selection_tools_tab,
+                            self.ai_tools_tab && !self.selection_tools_tab && !self.generation_tools_tab,
                             "AI Tools",
                         )
                         .clicked();
+
+                    let generation_clicked = ui.selectable_label(self.generation_tools_tab, "Generate").clicked();
 
                     let selection_clicked = ui
                         .selectable_label(self.selection_tools_tab, "Selection")
                         .clicked();
 
-                    if edit_clicked || ai_clicked || selection_clicked {
+                    if edit_clicked || ai_clicked || selection_clicked || generation_clicked {
                         self.selection_tools_tab = selection_clicked;
                         self.ai_tools_tab = ai_clicked;
+                        self.generation_tools_tab = generation_clicked;
+                        if generation_clicked { self.generation_workspace = true; }
 
                         // Reveal the entire selected region on the adjusted (right) side
                         // when returning from Selection to Edit.
@@ -4355,6 +4494,8 @@ impl eframe::App for PixelForge {
                                     "selection"
                                 } else if ai_clicked {
                                     "ai"
+                                } else if generation_clicked {
+                                    "generation"
                                 } else {
                                     "edit"
                                 };
@@ -4390,7 +4531,9 @@ impl eframe::App for PixelForge {
                     .id_salt("pixelforge_tools_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.selection_tools_tab {
+                        if self.generation_tools_tab {
+                            self.show_generation_sidebar(ui);
+                        } else if self.selection_tools_tab {
                             self.show_selection_sidebar(ui);
                         } else if !self.ai_tools_tab {
                             if self.texture.is_some() {
@@ -4459,136 +4602,6 @@ impl eframe::App for PixelForge {
                                                         ui.spacing_mut().slider_width = old_slider_width;
                             
                                                         ui.label("Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
-                            ui.separator();
-                            ui.heading("Image Generation");
-                            ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
-                            if ui.button("Connect / Refresh Models").clicked() {
-                                if self.generation_models_rx.is_none() {
-                                    let (tx, rx) = std::sync::mpsc::channel();
-                                    self.generation_models_rx = Some(rx);
-                                    self.generation_status = "Connecting to local ComfyUI (starting backend if needed)...".into();
-                                    let ctx = ctx.clone();
-                                    std::thread::spawn(move || {
-                                        let result = ai_generation::checkpoints();
-                                        let _ = tx.send(result);
-                                        ctx.request_repaint();
-                                    });
-                                }
-                            }
-                            egui::ComboBox::from_label("Checkpoint")
-                                .selected_text(if self.generation_checkpoint.is_empty() { "Select a checkpoint" } else { &self.generation_checkpoint })
-                                .show_ui(ui, |ui| {
-                                    for checkpoint in &self.generation_checkpoints {
-                                        ui.selectable_value(&mut self.generation_checkpoint, checkpoint.clone(), checkpoint);
-                                    }
-                                });
-                            egui::ComboBox::from_label("Style preset")
-                                .selected_text(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0)
-                                .show_ui(ui, |ui| {
-                                    for (i, (name, _)) in GENERATION_STYLES.iter().enumerate() {
-                                        ui.selectable_value(&mut self.generation_style, i, *name);
-                                    }
-                                });
-                            ui.horizontal(|ui| {
-                                ui.label("Aspect ratio");
-                                egui::ComboBox::from_id_salt("generation_ratio")
-                                    .selected_text(GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)].0)
-                                    .show_ui(ui, |ui| {
-                                        for (i, (name, _, _)) in GENERATION_SIZES.iter().enumerate() {
-                                            ui.selectable_value(&mut self.generation_size, i, *name);
-                                        }
-                                    });
-                            });
-                            ui.horizontal(|ui| {
-                                ui.selectable_value(&mut self.generation_portrait, false, "Landscape");
-                                ui.selectable_value(&mut self.generation_portrait, true, "Portrait");
-                            });
-                            egui::ComboBox::from_label("Resolution")
-                                .selected_text(["Small", "Standard (SDXL)", "Large"][self.generation_resolution.min(2)])
-                                .show_ui(ui, |ui| {
-                                    for (i, name) in ["Small", "Standard (SDXL)", "Large"].iter().enumerate() {
-                                        ui.selectable_value(&mut self.generation_resolution, i, *name);
-                                    }
-                                });
-                            ui.checkbox(&mut self.generation_custom_size, "Custom proportional resolution");
-                            let (_, base_w, base_h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
-                            let (base_w, base_h) = if self.generation_portrait { (base_h, base_w) } else { (base_w, base_h) };
-                            let scale = [0.75_f32, 1.0, 1.25][self.generation_resolution.min(2)];
-                            let snap = |n: f32| ((n / 64.0).round() as u32 * 64).clamp(256, 2048);
-                            if !self.generation_custom_size {
-                                self.generation_width = snap(base_w as f32 * scale);
-                                self.generation_height = snap(base_h as f32 * scale);
-                            } else {
-                                ui.label("Editing either dimension adjusts the other to the selected aspect ratio.");
-                                ui.horizontal(|ui| {
-                                    ui.label("Width");
-                                    let width_changed = ui.add(egui::DragValue::new(&mut self.generation_width)
-                                        .range(256..=2048).speed(64)).changed();
-                                    ui.label("Height");
-                                    let height_changed = ui.add(egui::DragValue::new(&mut self.generation_height)
-                                        .range(256..=2048).speed(64)).changed();
-                                    if width_changed {
-                                        self.generation_width = snap(self.generation_width as f32);
-                                        self.generation_height = snap(self.generation_width as f32 * base_h as f32 / base_w as f32);
-                                    } else if height_changed {
-                                        self.generation_height = snap(self.generation_height as f32);
-                                        self.generation_width = snap(self.generation_height as f32 * base_w as f32 / base_h as f32);
-                                    }
-                                });
-                            }
-                            ui.label(format!("Output: {} × {} (multiples of 64)", self.generation_width, self.generation_height));
-                            ui.horizontal(|ui| {
-                                ui.label("Batch");
-                                for count in [1, 2, 4, 8] {
-                                    ui.selectable_value(&mut self.generation_batch_count, count, count.to_string());
-                                }
-                            });
-                            ui.checkbox(&mut self.generation_random_seeds, "Random seeds per image");
-                            ui.label("When disabled, seeds increment from the starting seed.");
-                            ui.label("Prompt");
-                            ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).desired_rows(3));
-                            ui.label("Negative prompt");
-                            ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
-
-                            ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
-                            ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0).text("CFG"));
-                            ui.horizontal(|ui| {
-                                ui.label("Seed");
-                                ui.add(egui::DragValue::new(&mut self.generation_seed));
-                            });
-                            ui.horizontal(|ui| {
-                                if ui.add_enabled(!self.generation_running && !self.generation_checkpoint.is_empty(),
-                                    egui::Button::new("Generate")).clicked() {
-                                    self.start_generation(ctx);
-                                }
-                                if ui.add_enabled(self.generation_running, egui::Button::new("Cancel")).clicked() {
-                                    self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                    self.generation_status = "Cancelling generation...".into();
-                                }
-                            });
-                            if !self.generation_gallery.is_empty() && ui.button("Open Generation Gallery").clicked() {
-                                self.generation_workspace = true;
-                            }
-                            if let Some(started) = self.generation_started {
-                                let step = self.generation_progress.load(std::sync::atomic::Ordering::Relaxed);
-                                if step > 0 {
-                                    ui.add(egui::ProgressBar::new((step as f32 / self.generation_steps.max(1) as f32).clamp(0.0, 1.0))
-                                        .text(format!("Sampling step {}/{} ({:.0}%)", step, self.generation_steps, 100.0 * step as f32 / self.generation_steps.max(1) as f32)));
-                                } else {
-                                    ui.spinner();
-                                    ui.label("Waiting for sampling progress...");
-                                }
-                                ui.label(format!("Generation elapsed: {:.1}s", started.elapsed().as_secs_f32()));
-                            }
-                            ui.label(&self.generation_status);
-                            if let Some(texture) = &self.generation_texture {
-                                let width = ui.available_width().max(80.0);
-                                let ratio = texture.size()[1] as f32 / texture.size()[0].max(1) as f32;
-                                ui.image((texture.id(), egui::vec2(width, width * ratio)));
-                                if ui.button("Open Generated Image in Editor").clicked() {
-                                    self.open_generated_image(ctx);
-                                }
-                            }
                             ui.separator();
                             ui.heading("AI Upscaling");
                             ui.separator();
