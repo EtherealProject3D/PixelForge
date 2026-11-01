@@ -230,6 +230,9 @@ struct PixelForge {
     generation_size: usize,
     generation_portrait: bool,
     generation_custom_size: bool,
+    generation_resolution: usize,
+    generation_zoom: f32,
+    generation_pan: Vec2,
     generation_batch_count: usize,
     generation_batch_done: usize,
     generation_random_seeds: bool,
@@ -386,6 +389,9 @@ impl Default for PixelForge {
             generation_size: 0,
             generation_portrait: false,
             generation_custom_size: false,
+            generation_resolution: 1,
+            generation_zoom: 1.0,
+            generation_pan: Vec2::ZERO,
             generation_batch_count: 1,
             generation_batch_done: 0,
             generation_random_seeds: true,
@@ -4468,12 +4474,40 @@ impl eframe::App for PixelForge {
                                 ui.selectable_value(&mut self.generation_portrait, false, "Landscape");
                                 ui.selectable_value(&mut self.generation_portrait, true, "Portrait");
                             });
-                            ui.checkbox(&mut self.generation_custom_size, "Custom dimensions");
+                            egui::ComboBox::from_label("Resolution")
+                                .selected_text(["Small", "Standard (SDXL)", "Large"][self.generation_resolution.min(2)])
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in ["Small", "Standard (SDXL)", "Large"].iter().enumerate() {
+                                        ui.selectable_value(&mut self.generation_resolution, i, *name);
+                                    }
+                                });
+                            ui.checkbox(&mut self.generation_custom_size, "Custom proportional resolution");
+                            let (_, base_w, base_h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
+                            let (base_w, base_h) = if self.generation_portrait { (base_h, base_w) } else { (base_w, base_h) };
+                            let scale = [0.75_f32, 1.0, 1.25][self.generation_resolution.min(2)];
+                            let snap = |n: f32| ((n / 64.0).round() as u32 * 64).clamp(256, 2048);
                             if !self.generation_custom_size {
-                                let (_, w, h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
-                                (self.generation_width, self.generation_height) =
-                                    if self.generation_portrait { (h, w) } else { (w, h) };
+                                self.generation_width = snap(base_w as f32 * scale);
+                                self.generation_height = snap(base_h as f32 * scale);
+                            } else {
+                                ui.label("Editing either dimension adjusts the other to the selected aspect ratio.");
+                                ui.horizontal(|ui| {
+                                    ui.label("Width");
+                                    let width_changed = ui.add(egui::DragValue::new(&mut self.generation_width)
+                                        .range(256..=2048).speed(64)).changed();
+                                    ui.label("Height");
+                                    let height_changed = ui.add(egui::DragValue::new(&mut self.generation_height)
+                                        .range(256..=2048).speed(64)).changed();
+                                    if width_changed {
+                                        self.generation_width = snap(self.generation_width as f32);
+                                        self.generation_height = snap(self.generation_width as f32 * base_h as f32 / base_w as f32);
+                                    } else if height_changed {
+                                        self.generation_height = snap(self.generation_height as f32);
+                                        self.generation_width = snap(self.generation_height as f32 * base_w as f32 / base_h as f32);
+                                    }
+                                });
                             }
+                            ui.label(format!("Output: {} × {} (multiples of 64)", self.generation_width, self.generation_height));
                             ui.horizontal(|ui| {
                                 ui.label("Batch");
                                 for count in [1, 2, 4, 8] {
@@ -4486,14 +4520,7 @@ impl eframe::App for PixelForge {
                             ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).desired_rows(3));
                             ui.label("Negative prompt");
                             ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
-                            ui.add_enabled_ui(self.generation_custom_size, |ui| { ui.horizontal(|ui| {
-                                ui.label("Width");
-                                ui.add(egui::DragValue::new(&mut self.generation_width).range(256..=2048).speed(64));
-                                ui.label("Height");
-                                ui.add(egui::DragValue::new(&mut self.generation_height).range(256..=2048).speed(64));
-                            });
-                            });
-                            ui.label("Use dimensions divisible by 64");
+
                             ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
                             ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0).text("CFG"));
                             ui.horizontal(|ui| {
