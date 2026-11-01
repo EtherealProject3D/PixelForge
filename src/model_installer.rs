@@ -61,3 +61,44 @@ pub fn install(index: usize, folder: PathBuf, progress: Arc<AtomicU64>,
     fs::rename(&partial, &destination).map_err(|e| format!("Cannot finalize checkpoint: {e}"))?;
     Ok(destination)
 }
+
+/// Find an existing checkpoint folder, preferring the directory that already
+/// contains a known installed SDXL checkpoint. Never guess if ambiguous.
+pub fn detect_checkpoint_folder(known: &[String]) -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let root = PathBuf::from(local).join("Comfy-Desktop/ComfyUI-Installs");
+        if let Ok(installs) = fs::read_dir(root) {
+            for install in installs.flatten() {
+                roots.push(install.path().join("ComfyUI/models/checkpoints"));
+                roots.push(install.path().join("ComfyUI/user/default/models/checkpoints"));
+            }
+        }
+    }
+    if let Some(roaming) = std::env::var_os("APPDATA") {
+        let root = PathBuf::from(roaming).join("Comfy Desktop");
+        roots.push(root.join("models/checkpoints"));
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE") {
+        let home = PathBuf::from(home);
+        roots.push(home.join("Documents/ComfyUI/models/checkpoints"));
+        roots.push(home.join("ComfyUI/models/checkpoints"));
+    }
+    let mut matched = Vec::new();
+    for root in roots {
+        if !root.is_dir() { continue; }
+        if let Ok(files) = fs::read_dir(&root) {
+            let found = files.flatten().any(|entry| {
+                let filename = entry.file_name().to_string_lossy().to_lowercase();
+                known.iter().any(|model| {
+                    let name = Path::new(model).file_name()
+                        .map(|name| name.to_string_lossy().to_lowercase())
+                        .unwrap_or_default();
+                    !name.is_empty() && filename == name
+                })
+            });
+            if found && !matched.contains(&root) { matched.push(root); }
+        }
+    }
+    if matched.len() == 1 { matched.pop() } else { None }
+}
