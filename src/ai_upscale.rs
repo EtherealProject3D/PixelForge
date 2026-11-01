@@ -193,25 +193,21 @@ fn upscale_inner(
     if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     // Drain stderr concurrently so Real-ESRGAN cannot block on a full pipe.
     // Keep a bounded diagnostic tail for reporting engine failures.
-    let mut process = Command::new(engine)
-        .current_dir(engine_dir)
-        .arg("-i")
-        .arg(&input)
-        .arg("-o")
-        .arg(&output)
-        .arg("-n")
-        .arg(&options.model)
-        .arg("-m")
-        .arg(engine_dir.join("models"))
-        .arg("-s")
-        // Always run the model at its native scale.
-        .arg("4")
-        .arg("-t")
-        .arg(options.tile_size.to_string())
-        .arg("-g")
-        .arg(options.gpu_id.to_string())
-        .arg("-f")
-        .arg("png")
+    let mut command = Command::new(engine);
+    command.current_dir(engine_dir)
+        .arg("-i").arg(&input)
+        .arg("-o").arg(&output)
+        .arg("-n").arg(&options.model)
+        .arg("-m").arg(engine_dir.join("models"))
+        .arg("-s").arg("4")
+        .arg("-t").arg(options.tile_size.to_string());
+    // ncnn's default GPU selection is used when no -g argument is supplied.
+    // Passing -g -1 is not supported by all Real-ESRGAN builds.
+    if options.gpu_id >= 0 {
+        command.arg("-g").arg(options.gpu_id.to_string());
+    }
+    let mut process = command
+        .arg("-f").arg("png")
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
