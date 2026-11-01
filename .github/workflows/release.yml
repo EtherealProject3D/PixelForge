@@ -18,9 +18,9 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
       - name: Run tests
-        run: cargo test --locked
+        run: cargo test
       - name: Build release
-        run: cargo build --release --locked
+        run: cargo build --release
       - name: Package Windows executable
         shell: pwsh
         run: |
