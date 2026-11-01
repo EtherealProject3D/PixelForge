@@ -4125,7 +4125,7 @@ impl eframe::App for PixelForge {
                             
                                                         ui.spacing_mut().slider_width = old_slider_width;
                             
-                                                        ui.small("Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
+                                                        ui.label("Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
                             ui.separator();
                             ui.heading("AI Upscaling");
                             ui.separator();
@@ -4154,7 +4154,7 @@ impl eframe::App for PixelForge {
                                         }
                                     });
                                 if self.ai_gpus.is_empty() {
-                                    ui.small(self.ai_gpu_error.as_deref().unwrap_or("No Vulkan GPUs detected"));
+                                    ui.label(self.ai_gpu_error.as_deref().unwrap_or("No Vulkan GPUs detected"));
                                 }
                                 if ui.small_button("Refresh GPU list").clicked() { self.refresh_vulkan_gpus(); }
                                 egui::ComboBox::from_label("Tile size")
@@ -4259,10 +4259,10 @@ impl eframe::App for PixelForge {
                                     self.start_ai_job(ctx, 1, true);
                                 }
                             });
-                            ui.small("Requires waifu2x-ncnn-vulkan and its models-cunet folder in tools/waifu2x.");
+                            ui.label("Requires waifu2x-ncnn-vulkan and its models-cunet folder in tools/waifu2x.");
 
                             ui.separator();
-                            ui.label("Neural Sharpen / Deblur (external model runner)");
+                            ui.label("AI Sharpen / Deblur");
                             ui.add_enabled_ui(!self.ai_running && !self.ai_saving, |ui| {
                                 if ui.button("AI Sharpen").clicked() {
                                     self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Sharpen));
@@ -4271,7 +4271,7 @@ impl eframe::App for PixelForge {
                                     self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Deblur));
                                 }
                             });
-                            ui.small("Sharpen uses Real-ESRGAN. Deblur uses NAFNet ONNX (Python/OpenCV); see AI_RESTORATION_RUNNERS.md.");
+                            ui.label("Sharpen uses Real-ESRGAN. Deblur uses NAFNet ONNX (Python/OpenCV); see AI_RESTORATION_RUNNERS.md.");
 
                             ui.add_enabled(false, egui::Button::new("Restore Faces"));
                         }
