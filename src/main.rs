@@ -202,6 +202,9 @@ struct PixelForge {
     ai_gpu_error: Option<String>,
     ai_tile_size: u32,
     ai_result: Option<std::sync::Arc<ai_upscale::UpscaleResult>>,
+    ai_variations: Vec<(String, std::sync::Arc<ai_upscale::UpscaleResult>)>,
+    ai_compare_a: usize,
+    ai_compare_b: usize,
     ai_save_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     ai_saving: bool,
     ai_strength: f32,
@@ -325,6 +328,9 @@ impl Default for PixelForge {
             ai_gpu_error: None,
             ai_tile_size: 0,
             ai_result: None,
+            ai_variations: Vec::new(),
+            ai_compare_a: 0,
+            ai_compare_b: 0,
             ai_save_rx: None,
             ai_saving: false,
             ai_strength: 1.0,
@@ -449,6 +455,9 @@ impl PixelForge {
                 self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
                 self.ai_result = None;
+                self.ai_variations.clear();
+                self.ai_compare_a = 0;
+                self.ai_compare_b = 0;
                 self.ai_show_result = false;
                 self.ai_result_texture = None;
                 self.ai_baseline_texture = None;
@@ -1654,7 +1663,11 @@ impl PixelForge {
                 self.ai_status = format!("{operation} complete: {} x {}. Not saved.", result.dimensions[0], result.dimensions[1]);
 
                 self.status = self.ai_status.clone();
-                self.ai_result = Some(std::sync::Arc::new(result));
+                let saved = std::sync::Arc::new(result);
+                self.ai_variations.push((format!("{} #{}", operation, self.ai_variations.len() + 1), saved.clone()));
+                self.ai_compare_b = self.ai_variations.len() - 1;
+                self.ai_compare_a = self.ai_compare_b.saturating_sub(1);
+                self.ai_result = Some(saved);
                 self.refresh_ai_preview(ctx);
                 self.ai_show_result = true;
             }
@@ -1663,6 +1676,53 @@ impl PixelForge {
                 self.status = self.ai_status.clone();
             }
         }
+    }
+
+    fn compare_ai_variations(&mut self, ctx: &egui::Context) {
+        let Some((_, a)) = self.ai_variations.get(self.ai_compare_a) else { return; };
+        let Some((_, b)) = self.ai_variations.get(self.ai_compare_b) else { return; };
+        if a.dimensions != b.dimensions {
+            self.ai_status = "Cannot compare variations of different dimensions. Compare equal-size results.".into();
+            self.status = self.ai_status.clone();
+            return;
+        }
+        let (a, b) = (a.clone(), b.clone());
+        let folder = std::env::temp_dir().join(format!(
+            "pixelforge_compare_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos()).unwrap_or(0)
+        ));
+        if let Err(e) = std::fs::create_dir_all(&folder) {
+            self.ai_status = format!("Cannot prepare comparison: {e}");
+            return;
+        }
+        let result = ai_upscale::UpscaleResult {
+            work_dir: folder,
+            ai_path: b.ai_path.clone(),
+            baseline_path: a.ai_path.clone(),
+            preview: b.preview.clone(),
+            baseline_preview: a.preview.clone(),
+            dimensions: b.dimensions,
+        };
+        self.ai_result_size = result.dimensions;
+        let color = ColorImage::from_rgba_unmultiplied(
+            [result.baseline_preview.width() as usize, result.baseline_preview.height() as usize],
+            result.baseline_preview.as_raw()
+        );
+        self.ai_baseline_texture = Some(ctx.load_texture("variation_a", color, TextureOptions::LINEAR));
+        self.ai_result = Some(std::sync::Arc::new(result));
+        self.ai_comparison = true;
+        self.ai_result_path = None;
+        self.ai_detail_rx = None;
+        self.ai_detail_key = None;
+        self.ai_detail_rect = None;
+        self.ai_detail_ai_texture = None;
+        self.ai_detail_lanczos_texture = None;
+        self.ai_decode_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
+        self.refresh_ai_preview(ctx);
+        self.ai_show_result = true;
+        self.ai_status = "Comparing saved AI variations".into();
     }
 
     fn refresh_ai_preview(&mut self, ctx: &egui::Context) {
@@ -1807,7 +1867,7 @@ impl PixelForge {
             || self.ai_inspect_size[1] as u32 != self.ai_result_size[1];
 
         ui.horizontal(|ui| {
-            ui.heading("AI Upscale Result");
+            ui.heading("AI Result / Variations");
 
             if ui
                 .add_enabled(
@@ -1831,6 +1891,30 @@ impl PixelForge {
         });
 
         ui.separator();
+        if !self.ai_variations.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Compare AI variations:");
+                egui::ComboBox::from_id_salt("ai_variation_a")
+                    .selected_text(self.ai_variations.get(self.ai_compare_a).map(|v| v.0.as_str()).unwrap_or("A"))
+                    .show_ui(ui, |ui| {
+                        for (i, (name, _)) in self.ai_variations.iter().enumerate() {
+                            ui.selectable_value(&mut self.ai_compare_a, i, name);
+                        }
+                    });
+                ui.label("vs");
+                egui::ComboBox::from_id_salt("ai_variation_b")
+                    .selected_text(self.ai_variations.get(self.ai_compare_b).map(|v| v.0.as_str()).unwrap_or("B"))
+                    .show_ui(ui, |ui| {
+                        for (i, (name, _)) in self.ai_variations.iter().enumerate() {
+                            ui.selectable_value(&mut self.ai_compare_b, i, name);
+                        }
+                    });
+                if ui.button("Compare Selected").clicked() {
+                    self.compare_ai_variations(ctx);
+                }
+            });
+            ui.small("AI results are retained in memory for this image until you open another image or close PixelForge.");
+        }
 
         {
             ui.horizontal_wrapped(|ui| {
