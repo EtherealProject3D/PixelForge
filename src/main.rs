@@ -3,6 +3,8 @@ mod ai_upscale;
 mod analysis;
 mod auto_enhance;
 mod histogram;
+#[allow(dead_code)]
+mod masking;
 mod project;
 
 use eframe::egui;
@@ -229,6 +231,22 @@ struct PixelForge {
             )>,
         >,
     >,
+    selection_mask: Option<masking::SelectionMask>,
+    saved_selections: Vec<(String, masking::SelectionMask)>,
+    selected_saved_selection: Option<usize>,
+    active_saved_selection: Option<usize>,
+    selection_name_input: String,
+    selection_texture: Option<TextureHandle>,
+    selection_brush_enabled: bool,
+    selection_show_mask: bool,
+    selection_undo: Vec<Option<masking::SelectionMask>>,
+    selection_redo: Vec<Option<masking::SelectionMask>>,
+    selection_stroke_active: bool,
+    selection_erase: bool,
+    selection_size: f32,
+    selection_hardness: f32,
+    selection_opacity: f32,
+    selection_last_point: Option<Pos2>,
     texture: Option<TextureHandle>,
     processed_texture: Option<TextureHandle>,
     histogram: histogram::Histogram,
@@ -269,6 +287,7 @@ struct PixelForge {
     advanced: bool,
     show_settings: bool,
     ai_tools_tab: bool,
+    selection_tools_tab: bool,
     controls: Controls,
     status: String,
     project_path: Option<PathBuf>,
@@ -308,6 +327,22 @@ impl Default for PixelForge {
             ai_detail_lanczos_texture: None,
             ai_detail_status: String::new(),
             ai_decode_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            selection_mask: None,
+            saved_selections: Vec::new(),
+            selected_saved_selection: None,
+            active_saved_selection: None,
+            selection_name_input: String::new(),
+            selection_texture: None,
+            selection_brush_enabled: false,
+            selection_show_mask: true,
+            selection_undo: Vec::new(),
+            selection_redo: Vec::new(),
+            selection_stroke_active: false,
+            selection_erase: false,
+            selection_size: 50.0,
+            selection_hardness: 0.7,
+            selection_opacity: 1.0,
+            selection_last_point: None,
             texture: None,
             processed_texture: None,
             histogram: histogram::Histogram::default(),
@@ -347,6 +382,7 @@ impl Default for PixelForge {
             panning: false,
             advanced: false,
             show_settings: false,
+            selection_tools_tab: false,
             ai_tools_tab: std::env::var_os("APPDATA")
                 .map(|base| {
                     std::path::PathBuf::from(base)
@@ -397,6 +433,14 @@ impl PixelForge {
                 self.original_pixels = Some(rgba);
                 self.prepare_preview_source();
                 self.project_path = None;
+                self.saved_selections.clear();
+                self.selected_saved_selection = None;
+                self.active_saved_selection = None;
+                self.selection_name_input.clear();
+                self.selection_mask = None;
+                self.selection_texture = None;
+                self.selection_undo.clear();
+                self.selection_redo.clear();
                 self.project_dirty = true;
                 self.export_result = None;
                 self.export_progress = 0.0;
@@ -416,6 +460,12 @@ impl PixelForge {
                 self.comparison_position = 0.5;
                 self.comparison_enabled = true;
                 self.divider_dragging = false;
+                self.selection_mask = None;
+                self.selection_texture = None;
+                self.selection_last_point = None;
+                self.selection_undo.clear();
+                self.selection_redo.clear();
+                self.selection_stroke_active = false;
                 self.image_size = size;
                 self.image_path = Some(path);
                 self.fit_pending = true;
@@ -465,6 +515,14 @@ impl PixelForge {
         // Clear image and project references.
         self.image_path = None;
         self.project_path = None;
+        self.saved_selections.clear();
+        self.selected_saved_selection = None;
+        self.active_saved_selection = None;
+        self.selection_name_input.clear();
+        self.selection_mask = None;
+        self.selection_texture = None;
+        self.selection_undo.clear();
+        self.selection_redo.clear();
         self.project_dirty = false;
         self.pending_open = None;
 
@@ -486,6 +544,12 @@ impl PixelForge {
         self.divider_dragging = false;
 
         // Reset viewer state.
+        self.selection_mask = None;
+        self.selection_texture = None;
+        self.selection_last_point = None;
+        self.selection_undo.clear();
+        self.selection_redo.clear();
+        self.selection_stroke_active = false;
         self.image_size = [0, 0];
         self.file_size = 0;
         self.zoom = 1.0;
@@ -636,6 +700,11 @@ impl PixelForge {
             gamma: self.gamma,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
+            saved_selections: self
+                .saved_selections
+                .iter()
+                .map(|(name, mask)| (name.clone(), mask.pixels().to_vec()))
+                .collect(),
         };
 
         match project::save(&path, &data) {
@@ -692,6 +761,38 @@ impl PixelForge {
         self.comparison_enabled = data.comparison_enabled;
         self.comparison_position = data.comparison_position;
 
+        let selection_dimensions = self
+            .original_pixels
+            .as_ref()
+            .map(|pixels| pixels.dimensions());
+
+        self.saved_selections = selection_dimensions
+            .map(|(width, height)| {
+                data.saved_selections
+                    .into_iter()
+                    .filter_map(|(name, pixels)| {
+                        masking::SelectionMask::from_pixels(width, height, pixels)
+                            .ok()
+                            .map(|mask| (name, mask))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        self.selected_saved_selection = None;
+        self.active_saved_selection = None;
+        self.selection_name_input.clear();
+        self.selection_mask = None;
+        self.selection_texture = None;
+        self.selection_undo.clear();
+        self.selection_redo.clear();
+
+        self.selection_mask = None;
+        self.selection_texture = None;
+        self.selection_last_point = None;
+        self.selection_undo.clear();
+        self.selection_redo.clear();
+        self.selection_stroke_active = false;
         self.image_size = size;
         self.image_path = Some(PathBuf::from(data.image_name));
         self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -2607,6 +2708,419 @@ impl PixelForge {
             self.project_dirty = true;
         }
     }
+    fn selection_checkpoint(&mut self) {
+        const MAX_HISTORY: usize = 20;
+
+        if self.selection_undo.len() >= MAX_HISTORY {
+            self.selection_undo.remove(0);
+        }
+
+        self.selection_undo.push(self.selection_mask.clone());
+        self.selection_redo.clear();
+    }
+
+    fn selection_undo_action(&mut self, ctx: &egui::Context) {
+        if let Some(previous) = self.selection_undo.pop() {
+            self.selection_redo.push(self.selection_mask.clone());
+            self.selection_mask = previous;
+            self.selection_last_point = None;
+            self.selection_stroke_active = false;
+            self.refresh_selection_overlay(ctx);
+        }
+    }
+
+    fn selection_redo_action(&mut self, ctx: &egui::Context) {
+        if let Some(next) = self.selection_redo.pop() {
+            self.selection_undo.push(self.selection_mask.clone());
+            self.selection_mask = next;
+            self.selection_last_point = None;
+            self.selection_stroke_active = false;
+            self.refresh_selection_overlay(ctx);
+        }
+    }
+    fn refresh_selection_overlay(&mut self, ctx: &egui::Context) {
+        let Some(mask) = self.selection_mask.as_ref() else {
+            self.selection_texture = None;
+            return;
+        };
+
+        let (width, height) = mask.dimensions();
+
+        if width == 0 || height == 0 {
+            self.selection_texture = None;
+            return;
+        }
+
+        let scale = (1024.0 / width.max(height) as f64).min(1.0);
+        let out_w = ((width as f64 * scale).round() as usize).max(1);
+        let out_h = ((height as f64 * scale).round() as usize).max(1);
+
+        let mut rgba = vec![0u8; out_w * out_h * 4];
+
+        for y in 0..out_h {
+            for x in 0..out_w {
+                let sx = ((x as u64 * width as u64) / out_w as u64).min(width as u64 - 1) as u32;
+
+                let sy = ((y as u64 * height as u64) / out_h as u64).min(height as u64 - 1) as u32;
+
+                let alpha = mask.get(sx, sy).unwrap_or(0);
+                let index = (y * out_w + x) * 4;
+
+                rgba[index] = 255;
+                rgba[index + 1] = 45;
+                rgba[index + 2] = 55;
+                rgba[index + 3] = ((alpha as u16 * 110) / 255) as u8;
+            }
+        }
+
+        let image = ColorImage::from_rgba_unmultiplied([out_w, out_h], &rgba);
+
+        self.selection_texture =
+            Some(ctx.load_texture("selection_mask_overlay", image, TextureOptions::LINEAR));
+    }
+    fn show_selection_sidebar(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Selection Tools");
+        ui.separator();
+
+        if self.texture.is_none() {
+            ui.label("Open a photograph to begin selecting.");
+            return;
+        }
+
+        // Keep a separate Context handle so column
+        // closures do not borrow the parent Ui.
+        let ctx = ui.ctx().clone();
+        ui.heading("Saved Selections");
+
+        if self.saved_selections.is_empty() {
+            ui.small("No saved selections yet.");
+        } else {
+            let mut selected = self.selected_saved_selection;
+            let mut activate = None;
+
+            egui::ScrollArea::vertical()
+                .id_salt("saved_selections")
+                .max_height(130.0)
+                .show(ui, |ui| {
+                    for (index, (name, _)) in self.saved_selections.iter().enumerate() {
+                        let response = ui.selectable_label(
+                            self.active_saved_selection == Some(index),
+                            name,
+                        );
+                        if response.double_clicked() {
+                            selected = Some(index);
+                            activate = Some(index);
+                        } else if response.clicked() {
+                            selected = Some(index);
+                        }
+                    }
+                });
+
+            if selected != self.selected_saved_selection {
+                self.selected_saved_selection = selected;
+                if let Some(index) = selected {
+                    self.selection_name_input = self.saved_selections[index].0.clone();
+                }
+            }
+
+            if let Some(index) = activate {
+                self.selection_checkpoint();
+                self.selection_mask = Some(self.saved_selections[index].1.clone());
+                self.active_saved_selection = Some(index);
+                self.selection_last_point = None;
+                self.refresh_selection_overlay(&ctx);
+            }
+        }
+
+        ui.label("Selection name");
+        ui.text_edit_singleline(&mut self.selection_name_input);
+
+        let name = self.selection_name_input.trim().to_owned();
+        let valid_name = !name.is_empty() && name.len() <= 256;
+        let has_mask = self.selection_mask.is_some();
+
+        let name_available = !self
+            .saved_selections
+            .iter()
+            .any(|(existing, _)| existing == &name);
+
+        let has_saved = self
+            .selected_saved_selection
+            .is_some_and(|i| i < self.saved_selections.len());
+
+        let ctx_for_library = ctx.clone();
+
+        ui.columns(2, |columns| {
+            let left = columns[0].available_width();
+            let right = columns[1].available_width();
+
+            if columns[0]
+                .add_enabled(
+                    valid_name && name_available && has_mask && self.saved_selections.len() < 128,
+                    egui::Button::new("Save New").min_size(egui::vec2(left, 28.0)),
+                )
+                .clicked()
+            {
+                if let Some(mask) = self.selection_mask.clone() {
+                    self.saved_selections.push((name.clone(), mask));
+                    self.selected_saved_selection = None;
+                    self.selection_name_input.clear();
+                    self.active_saved_selection = None;
+                    self.project_dirty = true;
+                }
+            }
+
+            if columns[1]
+                .add_enabled(
+                    has_saved,
+                    egui::Button::new("Load").min_size(egui::vec2(right, 28.0)),
+                )
+                .clicked()
+            {
+                if let Some(index) = self.selected_saved_selection {
+                    self.selection_checkpoint();
+                    self.selection_mask = Some(self.saved_selections[index].1.clone());
+                    self.active_saved_selection = Some(index);
+                    self.selection_last_point = None;
+                    self.refresh_selection_overlay(&ctx_for_library);
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+
+        ui.columns(2, |columns| {
+            let left = columns[0].available_width();
+            let right = columns[1].available_width();
+
+            if columns[0]
+                .add_enabled(
+                    has_saved && has_mask,
+                    egui::Button::new("Update").min_size(egui::vec2(left, 28.0)),
+                )
+                .clicked()
+            {
+                if let (Some(index), Some(mask)) =
+                    (self.selected_saved_selection, self.selection_mask.clone())
+                {
+                    self.saved_selections[index].1 = mask;
+                    self.project_dirty = true;
+                }
+            }
+
+            let rename_available =
+                self.saved_selections
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (existing, _))| {
+                        Some(index) == self.selected_saved_selection || existing != &name
+                    });
+
+            if columns[1]
+                .add_enabled(
+                    has_saved && valid_name && rename_available,
+                    egui::Button::new("Rename").min_size(egui::vec2(right, 28.0)),
+                )
+                .clicked()
+            {
+                if let Some(index) = self.selected_saved_selection {
+                    self.saved_selections[index].0 = name.clone();
+                    self.project_dirty = true;
+                }
+            }
+        });
+
+        if ui
+            .add_enabled(has_saved, egui::Button::new("Delete Saved Selection"))
+            .clicked()
+        {
+            if let Some(index) = self.selected_saved_selection {
+                self.saved_selections.remove(index);
+                if let Some(active) = self.active_saved_selection {
+                    self.active_saved_selection = if active == index {
+                        None
+                    } else if active > index {
+                        Some(active - 1)
+                    } else {
+                        Some(active)
+                    };
+                }
+                self.selected_saved_selection = None;
+                self.selection_name_input.clear();
+                self.project_dirty = true;
+            }
+        }
+
+        ui.small(
+            "Save New copies the working mask. \
+             Double-click a name to load it. \
+             Only the active selection is highlighted.",
+        );
+
+        ui.add_space(12.0);
+        ui.separator();
+
+        // ========================================
+        // Brush / Erase
+        // ========================================
+
+        ui.label("Tool");
+
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.selection_erase, false, "Brush");
+
+            ui.selectable_value(&mut self.selection_erase, true, "Erase");
+        });
+
+        ui.add_space(12.0);
+
+        // ========================================
+        // Brush settings
+        // ========================================
+
+        ui.label("Brush Size");
+
+        ui.add(egui::Slider::new(&mut self.selection_size, 2.0..=500.0).suffix(" px"));
+
+        ui.add_space(8.0);
+
+        ui.label("Hardness");
+
+        ui.add(egui::Slider::new(&mut self.selection_hardness, 0.0..=1.0).show_value(true));
+
+        ui.add_space(8.0);
+
+        ui.label("Opacity");
+
+        ui.add(egui::Slider::new(&mut self.selection_opacity, 0.0..=1.0).show_value(true));
+
+        ui.add_space(12.0);
+        ui.separator();
+
+        // ========================================
+        // Mask visibility
+        // ========================================
+
+        ui.checkbox(&mut self.selection_show_mask, "Show Selection Mask");
+
+        ui.add_space(10.0);
+
+        // ========================================
+        // Undo / Redo
+        // ========================================
+
+        let can_undo = !self.selection_undo.is_empty();
+        let can_redo = !self.selection_redo.is_empty();
+
+        ui.columns(2, |columns| {
+            let left_width = columns[0].available_width();
+            let right_width = columns[1].available_width();
+
+            if columns[0]
+                .add_enabled_ui(can_undo, |ui| {
+                    ui.add_sized([left_width, 28.0], egui::Button::new("Undo"))
+                })
+                .inner
+                .clicked()
+            {
+                self.selection_undo_action(&ctx);
+            }
+
+            if columns[1]
+                .add_enabled_ui(can_redo, |ui| {
+                    ui.add_sized([right_width, 28.0], egui::Button::new("Redo"))
+                })
+                .inner
+                .clicked()
+            {
+                self.selection_redo_action(&ctx);
+            }
+        });
+
+        ui.add_space(6.0);
+
+        // ========================================
+        // Clear / Invert
+        // ========================================
+
+        ui.columns(2, |columns| {
+            let left_width = columns[0].available_width();
+            let right_width = columns[1].available_width();
+
+            if columns[0]
+                .add_sized([left_width, 28.0], egui::Button::new("Clear Mask"))
+                .clicked()
+            {
+                if self.selection_mask.is_some() {
+                    self.selection_checkpoint();
+
+                    if let Some(mask) = self.selection_mask.as_mut() {
+                        mask.clear();
+                    }
+                    self.active_saved_selection = None;
+                    self.selected_saved_selection = None;
+                    self.selection_name_input.clear();
+
+                    self.refresh_selection_overlay(&ctx);
+                }
+            }
+
+            if columns[1]
+                .add_sized([right_width, 28.0], egui::Button::new("Invert Mask"))
+                .clicked()
+            {
+                if self.selection_mask.is_none() {
+                    if let Ok(mask) = masking::SelectionMask::new(
+                        self.image_size[0] as u32,
+                        self.image_size[1] as u32,
+                    ) {
+                        self.selection_mask = Some(mask);
+                    }
+                }
+
+                if self.selection_mask.is_some() {
+                    self.selection_checkpoint();
+
+                    if let Some(mask) = self.selection_mask.as_mut() {
+                        mask.invert();
+                    }
+
+                    self.refresh_selection_overlay(&ctx);
+                }
+            }
+        });
+
+        ui.add_space(16.0);
+        ui.separator();
+
+        // ========================================
+        // Smart Selection
+        // ========================================
+
+        ui.heading("Smart Selection");
+
+        ui.add_enabled_ui(false, |ui| {
+            ui.add_sized(
+                [ui.available_width(), 30.0],
+                egui::Button::new("AI Select Object (Coming Soon)"),
+            );
+        });
+
+        ui.add_space(6.0);
+
+        ui.small(
+            "Future AI tools will identify objects, \
+             clothing, and people automatically.",
+        );
+
+        ui.add_space(14.0);
+        ui.separator();
+
+        ui.small(
+            "Left-drag: paint or erase\n\
+             Space + left-drag / middle-drag: pan",
+        );
+    }
     fn show_viewer(&mut self, ui: &mut egui::Ui) {
         if self.texture.is_none() {
             ui.centered_and_justified(|ui| {
@@ -2708,7 +3222,7 @@ impl PixelForge {
             self.divider_dragging = false;
         }
 
-        if self.comparison_enabled && primary_pressed {
+        if self.comparison_enabled && primary_pressed && !self.selection_brush_enabled {
             if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
                 if canvas.contains(pos)
                     && image_rect.contains(pos)
@@ -2739,7 +3253,16 @@ impl PixelForge {
             _ => true,
         };
 
-        if button_pressed && pointer_inside && modifier_ok && !self.divider_dragging {
+        let brush_takes_primary = self.selection_brush_enabled
+            && !space_down
+            && matches!(self.controls.pan, PanButton::Left | PanButton::SpaceLeft);
+
+        if button_pressed
+            && pointer_inside
+            && modifier_ok
+            && !self.divider_dragging
+            && !brush_takes_primary
+        {
             self.panning = true;
         }
 
@@ -2765,6 +3288,97 @@ impl PixelForge {
                 let anchor = response.hover_pos().unwrap_or(center);
 
                 self.zoom_at(factor, anchor, center);
+            }
+        }
+
+        let (brush_down, brush_pressed) = ui.ctx().input(|i| {
+            (
+                i.pointer.button_down(egui::PointerButton::Primary),
+                i.pointer.button_pressed(egui::PointerButton::Primary),
+            )
+        });
+
+        let brush_active =
+            self.selection_brush_enabled && !space_down && !self.divider_dragging && !self.panning;
+
+        if !brush_down || !brush_active {
+            self.selection_last_point = None;
+            self.selection_stroke_active = false;
+        }
+
+        if brush_active && brush_down {
+            if let Some(pos) = pointer_position {
+                if canvas.contains(pos) && image_rect.contains(pos) {
+                    if self.selection_mask.is_none() {
+                        if let Ok(mask) = masking::SelectionMask::new(
+                            self.image_size[0] as u32,
+                            self.image_size[1] as u32,
+                        ) {
+                            self.selection_mask = Some(mask);
+                        }
+                    }
+
+                    let current = Pos2::new(
+                        (pos.x - image_rect.left()) / self.zoom,
+                        (pos.y - image_rect.top()) / self.zoom,
+                    );
+
+                    if !self.selection_stroke_active {
+                        self.selection_checkpoint();
+                        self.selection_stroke_active = true;
+                        self.selection_last_point = None;
+                    }
+
+                    let changed = brush_pressed || self.selection_last_point != Some(current);
+
+                    if changed {
+                        let previous = if brush_pressed {
+                            current
+                        } else {
+                            self.selection_last_point.unwrap_or(current)
+                        };
+
+                        let dx = current.x - previous.x;
+                        let dy = current.y - previous.y;
+                        let distance = (dx * dx + dy * dy).sqrt();
+
+                        let radius = self.selection_size * 0.5;
+                        let spacing = (radius * 0.3).max(1.0);
+
+                        let steps = (distance / spacing).ceil().max(1.0).min(4096.0) as usize;
+
+                        if let Some(mask) = self.selection_mask.as_mut() {
+                            let mode = if self.selection_erase {
+                                masking::BrushMode::Erase
+                            } else {
+                                masking::BrushMode::Paint
+                            };
+
+                            for step in 0..=steps {
+                                let t = step as f32 / steps as f32;
+
+                                mask.dab(
+                                    previous.x + dx * t,
+                                    previous.y + dy * t,
+                                    radius,
+                                    self.selection_hardness,
+                                    self.selection_opacity,
+                                    mode,
+                                );
+                            }
+                        }
+
+                        self.selection_last_point = Some(current);
+                        self.refresh_selection_overlay(ui.ctx());
+                        ui.ctx().request_repaint();
+                    }
+                } else {
+                    self.selection_last_point = None;
+                    self.selection_stroke_active = false;
+                }
+            } else {
+                self.selection_last_point = None;
+                self.selection_stroke_active = false;
             }
         }
 
@@ -2809,6 +3423,29 @@ impl PixelForge {
             }
         }
 
+        if self.selection_brush_enabled {
+            if self.selection_show_mask {
+                if let Some(selection) = &self.selection_texture {
+                    painter.image(
+                        selection.id(),
+                        image_rect,
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+            }
+
+            if let Some(pos) = pointer_position {
+                if canvas.contains(pos) && image_rect.contains(pos) {
+                    painter.circle_stroke(
+                        pos,
+                        (self.selection_size * self.zoom * 0.5).max(1.0),
+                        egui::Stroke::new(1.5, Color32::WHITE),
+                    );
+                }
+            }
+        }
+
         let over_divider = self.comparison_enabled
             && self.processed_texture.is_some()
             && pointer_position
@@ -2822,7 +3459,7 @@ impl PixelForge {
                 })
                 .unwrap_or(false);
 
-        if self.divider_dragging || over_divider {
+        if !self.selection_brush_enabled && (self.divider_dragging || over_divider) {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
         } else if self.panning {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -3037,31 +3674,55 @@ impl eframe::App for PixelForge {
             });
         });
         egui::SidePanel::right("tools")
-            .default_width(310.0)
-            .min_width(260.0)
-            .max_width(400.0)
+            .default_width(360.0)
+            .min_width(340.0)
+            .max_width(480.0)
             .resizable(true)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let edit_clicked = ui.selectable_label(!self.ai_tools_tab, "Edit").clicked();
+                    let edit_clicked = ui
+                        .selectable_label(!self.ai_tools_tab && !self.selection_tools_tab, "Edit")
+                        .clicked();
 
-                    let ai_clicked = ui.selectable_label(self.ai_tools_tab, "AI Tools").clicked();
+                    let ai_clicked = ui
+                        .selectable_label(
+                            self.ai_tools_tab && !self.selection_tools_tab,
+                            "AI Tools",
+                        )
+                        .clicked();
 
-                    if edit_clicked || ai_clicked {
+                    let selection_clicked = ui
+                        .selectable_label(self.selection_tools_tab, "Selection")
+                        .clicked();
+
+                    if edit_clicked || ai_clicked || selection_clicked {
+                        self.selection_tools_tab = selection_clicked;
                         self.ai_tools_tab = ai_clicked;
+
+                        // Enable painting only in Selection tab.
+                        // Do not clear the existing selection.
+                        self.selection_brush_enabled = selection_clicked;
+                        self.selection_last_point = None;
+                        self.selection_stroke_active = false;
+                        self.panning = false;
 
                         if let Some(base) = std::env::var_os("APPDATA") {
                             let folder = std::path::PathBuf::from(base).join("PixelForge");
 
                             if std::fs::create_dir_all(&folder).is_ok() {
-                                let selected = if self.ai_tools_tab { "ai" } else { "edit" };
+                                let selected = if selection_clicked {
+                                    "selection"
+                                } else if ai_clicked {
+                                    "ai"
+                                } else {
+                                    "edit"
+                                };
 
                                 let _ = std::fs::write(folder.join("sidebar_tab.txt"), selected);
                             }
                         }
                     }
                 });
-
                 ui.separator();
 
                 // Image information remains visible in both tabs.
@@ -3088,7 +3749,9 @@ impl eframe::App for PixelForge {
                     .id_salt("pixelforge_tools_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if !self.ai_tools_tab {
+                        if self.selection_tools_tab {
+                            self.show_selection_sidebar(ui);
+                        } else if !self.ai_tools_tab {
                             if self.texture.is_some() {
                                 ui.heading("Auto Enhance");
 
