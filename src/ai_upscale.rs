@@ -4,6 +4,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::RgbaImage;
 
+#[derive(Clone, Debug)]
+pub struct UpscaleOptions {
+    pub model: String,
+    pub gpu_id: i32,
+    pub tile_size: u32,
+}
+
+impl Default for UpscaleOptions {
+    fn default() -> Self {
+        Self { model: "realesrgan-x4plus".into(), gpu_id: -1, tile_size: 0 }
+    }
+}
+
 pub struct UpscaleResult {
     pub work_dir: PathBuf,
     pub ai_path: PathBuf,
@@ -58,8 +71,12 @@ pub fn upscale(
     mut original: RgbaImage,
     settings: crate::adjustments::Adjustments,
     scale: u32,
+    options: UpscaleOptions,
 ) -> Result<UpscaleResult, String> {
     let expected = expected_dimensions(original.width(), original.height(), scale)?;
+    if !matches!(options.model.as_str(), "realesrgan-x4plus" | "realesrgan-x4plus-anime" | "realesr-animevideov3") { return Err("Unsupported upscale model".into()); }
+    if options.gpu_id < -1 || options.gpu_id > 32 { return Err("Invalid GPU ID".into()); }
+    if options.tile_size != 0 && !(32..=1024).contains(&options.tile_size) { return Err("Invalid tile size".into()); }
 
     // Validate the native 4x intermediate dimensions too.
     let _native_dimensions = expected_dimensions(original.width(), original.height(), 4)?;
@@ -82,7 +99,7 @@ pub fn upscale(
 
     std::fs::create_dir_all(&work).map_err(|e| format!("Cannot create AI work folder: {e}"))?;
 
-    let result = upscale_inner(&mut original, &settings, scale, expected, &engine, &work);
+    let result = upscale_inner(&mut original, &settings, scale, expected, &engine, &work, &options);
 
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&work);
@@ -98,6 +115,7 @@ fn upscale_inner(
     expected: [u32; 2],
     engine: &Path,
     work: &Path,
+    options: &UpscaleOptions,
 ) -> Result<UpscaleResult, String> {
     // Apply the existing PixelForge adjustments to the
     // full-resolution image before neural-network inference.
@@ -121,14 +139,16 @@ fn upscale_inner(
         .arg("-o")
         .arg(&output)
         .arg("-n")
-        .arg("realesrgan-x4plus")
+        .arg(&options.model)
         .arg("-m")
         .arg(engine_dir.join("models"))
         .arg("-s")
         // Always run the model at its native scale.
         .arg("4")
         .arg("-t")
-        .arg("0")
+        .arg(options.tile_size.to_string())
+        .arg("-g")
+        .arg(options.gpu_id.to_string())
         .arg("-f")
         .arg("png")
         .output()
