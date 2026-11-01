@@ -150,7 +150,24 @@ fn upscale_inner(
         return Err("Real-ESRGAN did not produce an output image".into());
     }
 
-    let native = image::open(&output)
+    // Allow large AI output PNGs while retaining a bounded
+    // decoder allocation limit.
+    let file = std::fs::File::open(&output).map_err(|e| format!("Cannot open AI output: {e}"))?;
+
+    let reader = std::io::BufReader::new(file);
+
+    let decoder = image::codecs::png::PngDecoder::new(reader)
+        .map_err(|e| format!("Cannot initialize AI PNG decoder: {e}"))?;
+
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(1024 * 1024 * 1024);
+
+    let mut decoder = decoder;
+
+    image::ImageDecoder::set_limits(&mut decoder, limits)
+        .map_err(|e| format!("AI PNG exceeds memory limit: {e}"))?;
+
+    let native = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| format!("Cannot decode AI output: {e}"))?
         .to_rgba8();
 

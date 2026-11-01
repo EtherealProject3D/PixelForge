@@ -198,6 +198,17 @@ struct PixelForge {
     ai_detail_ai_texture: Option<TextureHandle>,
     ai_detail_lanczos_texture: Option<TextureHandle>,
     ai_detail_status: String,
+
+    // Cache decoded full-resolution images only when the pair
+    // fits within the memory budget.
+    ai_decode_cache: std::sync::Arc<
+        std::sync::Mutex<
+            Option<(
+                std::sync::Arc<image::RgbaImage>,
+                std::sync::Arc<image::RgbaImage>,
+            )>,
+        >,
+    >,
     texture: Option<TextureHandle>,
     processed_texture: Option<TextureHandle>,
     histogram: histogram::Histogram,
@@ -276,6 +287,7 @@ impl Default for PixelForge {
             ai_detail_ai_texture: None,
             ai_detail_lanczos_texture: None,
             ai_detail_status: String::new(),
+            ai_decode_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
             texture: None,
             processed_texture: None,
             histogram: histogram::Histogram::default(),
@@ -1326,6 +1338,10 @@ impl PixelForge {
         self.ai_detail_ai_texture = None;
         self.ai_detail_lanczos_texture = None;
         self.ai_detail_status.clear();
+
+        // Each inference receives its own cache, preventing older
+        // background workers from populating the new result's cache.
+        self.ai_decode_cache = std::sync::Arc::new(std::sync::Mutex::new(None));
         self.ai_result = None;
         self.ai_result_texture = None;
         self.ai_baseline_texture = None;
@@ -1629,7 +1645,7 @@ impl PixelForge {
 
             if limited {
                 ui.small(
-                    "Native-resolution inspection activates at 75% zoom. \
+                    "Adaptive-resolution inspection works at every zoom level. \
                      The visible detail region loads in the background; \
                      the fast preview remains underneath.",
                 );
@@ -1640,7 +1656,7 @@ impl PixelForge {
             ui.horizontal(|ui| {
                 ui.set_min_height(20.0);
 
-                let message = if self.ai_inspect_zoom < 0.75 {
+                let message = if self.ai_result.is_none() {
                     "Preview mode"
                 } else if self.ai_detail_rx.is_some() {
                     "Loading native-resolution detail..."
@@ -1761,7 +1777,7 @@ impl PixelForge {
 
             // Request a native-resolution crop for the visible image region.
             // The ordinary preview remains available while it loads.
-            if self.ai_inspect_zoom >= 0.75 {
+            if self.ai_inspect_zoom > 0.0 {
                 if let Some(result) = self.ai_result.as_ref() {
                     let visible = rect.intersect(image_rect);
 
@@ -1783,9 +1799,9 @@ impl PixelForge {
 
                         // A bounded 2048 x 2048 native crop limits GPU memory.
                         // Center it on the visible area, with some extra margin.
-                        let crop_w = source_w.saturating_add(256).min(2048).min(image_w).max(1);
+                        let crop_w = source_w.saturating_add(256).min(image_w).max(1);
 
-                        let crop_h = source_h.saturating_add(256).min(2048).min(image_h).max(1);
+                        let crop_h = source_h.saturating_add(256).min(image_h).max(1);
 
                         let center_x = source_x.saturating_add(source_w / 2);
                         let center_y = source_y.saturating_add(source_h / 2);
@@ -1793,8 +1809,11 @@ impl PixelForge {
                         let max_x = image_w.saturating_sub(crop_w);
                         let max_y = image_h.saturating_sub(crop_h);
 
-                        let crop_x = center_x.saturating_sub(crop_w / 2).min(max_x);
-                        let crop_y = center_y.saturating_sub(crop_h / 2).min(max_y);
+                        // Align crop origins to a 64-pixel grid.
+                        // Small movements reuse the same inspection crop.
+                        let crop_x = (center_x.saturating_sub(crop_w / 2) / 64 * 64).min(max_x);
+
+                        let crop_y = (center_y.saturating_sub(crop_h / 2) / 64 * 64).min(max_y);
 
                         let crop = [crop_x, crop_y, crop_w, crop_h];
                         let strength_key =
@@ -1804,6 +1823,8 @@ impl PixelForge {
 
                         if self.ai_detail_rx.is_none() && self.ai_detail_key != Some(key) {
                             let retained = std::sync::Arc::clone(result);
+                            let decode_cache = std::sync::Arc::clone(&self.ai_decode_cache);
+
                             let (tx, rx) = std::sync::mpsc::channel();
 
                             self.ai_detail_rx = Some(rx);
@@ -1817,24 +1838,74 @@ impl PixelForge {
                                     ([u32; 4], u32, image::RgbaImage, image::RgbaImage),
                                     String
                                 > {
-                                    let ai = image::open(&retained.ai_path)
-                                        .map_err(|e| format!("AI inspection: {e}"))?
-                                        .to_rgba8();
+                                    // Maximum retained decoded-image cache:
+                                    // 384 MiB for the AI/Lanczos image pair.
+                                    const CACHE_LIMIT: u64 =
+                                        384 * 1024 * 1024;
 
-                                    let baseline = image::open(&retained.baseline_path)
-                                        .map_err(|e| format!("Lanczos inspection: {e}"))?
-                                        .to_rgba8();
+                                    let bytes_needed =
+                                        retained.dimensions[0] as u64
+                                            * retained.dimensions[1] as u64
+                                            * 8;
 
-                                    if ai.dimensions() != baseline.dimensions() {
-                                        return Err("Inspection image sizes differ".into());
-                                    }
+                                    let cached = {
+                                        let guard = decode_cache
+                                            .lock()
+                                            .map_err(|_| "Inspection cache lock failed")?;
+
+                                        guard.clone()
+                                    };
+
+                                    let (ai, baseline) = if let Some(pair) = cached {
+                                        pair
+                                    } else {
+                                        let ai = std::sync::Arc::new(
+                                            image::open(&retained.ai_path)
+                                                .map_err(|e| format!(
+                                                    "AI inspection: {e}"
+                                                ))?
+                                                .to_rgba8()
+                                        );
+
+                                        let baseline = std::sync::Arc::new(
+                                            image::open(&retained.baseline_path)
+                                                .map_err(|e| format!(
+                                                    "Lanczos inspection: {e}"
+                                                ))?
+                                                .to_rgba8()
+                                        );
+
+                                        if ai.dimensions() != baseline.dimensions() {
+                                            return Err(
+                                                "Inspection image sizes differ".into()
+                                            );
+                                        }
+
+                                        if bytes_needed <= CACHE_LIMIT {
+                                            let mut guard = decode_cache
+                                                .lock()
+                                                .map_err(|_| {
+                                                    "Inspection cache lock failed"
+                                                })?;
+
+                                            *guard = Some((
+                                                std::sync::Arc::clone(&ai),
+                                                std::sync::Arc::clone(&baseline),
+                                            ));
+                                        }
+
+                                        (ai, baseline)
+                                    };
+
+                                    // crop_imm requires GenericImageView.
+                                    // Dereference Arc to the underlying image.
 
                                     let ai_crop = image::imageops::crop_imm(
-                                        &ai, crop[0], crop[1], crop[2], crop[3]
+                                        ai.as_ref(), crop[0], crop[1], crop[2], crop[3]
                                     ).to_image();
 
                                     let baseline_crop = image::imageops::crop_imm(
-                                        &baseline, crop[0], crop[1], crop[2], crop[3]
+                                        baseline.as_ref(), crop[0], crop[1], crop[2], crop[3]
                                     ).to_image();
 
                                     let blended = ai_upscale::blend_images(
@@ -1843,7 +1914,44 @@ impl PixelForge {
                                         strength_key as f32 / 1000.0,
                                     )?;
 
-                                    Ok((crop, strength_key, blended, baseline_crop))
+                                    // Downsample full-resolution source pixels
+                                    // into a bounded display texture.
+                                    let max_side = crop[2].max(crop[3]);
+
+                                    let (display_ai, display_lanczos) =
+                                        if max_side > 2048 {
+                                            let factor = 2048.0 / max_side as f64;
+
+                                            let width =
+                                                ((crop[2] as f64 * factor).round() as u32).max(1);
+
+                                            let height =
+                                                ((crop[3] as f64 * factor).round() as u32).max(1);
+
+                                            (
+                                                image::imageops::resize(
+                                                    &blended,
+                                                    width,
+                                                    height,
+                                                    image::imageops::FilterType::Lanczos3,
+                                                ),
+                                                image::imageops::resize(
+                                                    &baseline_crop,
+                                                    width,
+                                                    height,
+                                                    image::imageops::FilterType::Lanczos3,
+                                                ),
+                                            )
+                                        } else {
+                                            (blended, baseline_crop)
+                                        };
+
+                                    Ok((
+                                        crop,
+                                        strength_key,
+                                        display_ai,
+                                        display_lanczos,
+                                    ))
                                 })();
 
                                 let _ = tx.send(loaded);
@@ -1924,7 +2032,7 @@ impl PixelForge {
             );
 
             // Overlay native AI pixels over the fast preview.
-            if self.ai_inspect_zoom >= 0.75 {
+            if self.ai_inspect_zoom > 0.0 {
                 if let (Some(crop), Some(detail)) =
                     (self.ai_detail_rect, &self.ai_detail_ai_texture)
                 {
@@ -1966,7 +2074,7 @@ impl PixelForge {
                     );
 
                     // Use the same crop coordinates on the Lanczos side.
-                    if self.ai_inspect_zoom >= 0.75 {
+                    if self.ai_inspect_zoom > 0.0 {
                         if let (Some(crop), Some(detail)) =
                             (self.ai_detail_rect, &self.ai_detail_lanczos_texture)
                         {
