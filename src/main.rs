@@ -704,6 +704,9 @@ impl PixelForge {
             gamma: self.gamma,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
+            selection_adjustments: [self.selection_adjustments.brightness, self.selection_adjustments.contrast, self.selection_adjustments.exposure, self.selection_adjustments.saturation, self.selection_adjustments.temperature, self.selection_adjustments.tint, self.selection_adjustments.highlights, self.selection_adjustments.shadows, self.selection_adjustments.whites, self.selection_adjustments.blacks, self.selection_adjustments.vibrance, self.selection_adjustments.gamma],
+            active_mask: self.selection_mask.as_ref().map(|mask| mask.pixels().to_vec()),
+            selection_target: self.selection_adjustment_target,
             saved_selections: self
                 .saved_selections
                 .iter()
@@ -764,6 +767,22 @@ impl PixelForge {
         self.gamma = data.gamma;
         self.comparison_enabled = data.comparison_enabled;
         self.comparison_position = data.comparison_position;
+        self.selection_adjustment_target = data.selection_target;
+        self.selection_adjustments = adjustments::Adjustments {
+            brightness: data.selection_adjustments[0],
+            contrast: data.selection_adjustments[1],
+            exposure: data.selection_adjustments[2],
+            saturation: data.selection_adjustments[3],
+            temperature: data.selection_adjustments[4],
+            tint: data.selection_adjustments[5],
+            highlights: data.selection_adjustments[6],
+            shadows: data.selection_adjustments[7],
+            whites: data.selection_adjustments[8],
+            blacks: data.selection_adjustments[9],
+            vibrance: data.selection_adjustments[10],
+            gamma: data.selection_adjustments[11],
+        };
+        let restored_active_mask = data.active_mask;
 
         let selection_dimensions = self
             .original_pixels
@@ -786,12 +805,14 @@ impl PixelForge {
         self.selected_saved_selection = None;
         self.active_saved_selection = None;
         self.selection_name_input.clear();
-        self.selection_mask = None;
+        self.selection_mask = selection_dimensions.and_then(|(width, height)| {
+            restored_active_mask.and_then(|pixels| masking::SelectionMask::from_pixels(width, height, pixels).ok())
+        });
         self.selection_texture = None;
         self.selection_undo.clear();
         self.selection_redo.clear();
 
-        self.selection_mask = None;
+        // Keep the restored working mask for selection-targeted edits.
         self.selection_texture = None;
         self.selection_last_point = None;
         self.selection_undo.clear();
@@ -828,6 +849,9 @@ impl PixelForge {
         {
             self.update_processed_image(ctx);
         }
+
+        self.refresh_selection_overlay(ctx);
+        self.update_processed_image(ctx);
 
         self.status = format!("Project opened: {}", path.display());
     }
@@ -2859,6 +2883,10 @@ impl PixelForge {
         }
     }
     fn refresh_selection_overlay(&mut self, ctx: &egui::Context) {
+        // Any mask change invalidates the adjustment preview, including undo/redo and brush strokes.
+        if self.preview_source.is_some() {
+            self.update_processed_image(ctx);
+        }
         let Some(mask) = self.selection_mask.as_ref() else {
             self.selection_texture = None;
             return;
