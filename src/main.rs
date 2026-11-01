@@ -2522,8 +2522,28 @@ impl PixelForge {
             ui.selectable_value(&mut self.selection_adjustment_target, false, "Global");
             ui.selectable_value(&mut self.selection_adjustment_target, true, "Selection");
         });
-        if self.selection_adjustment_target && self.selection_mask.is_none() {
-            ui.colored_label(egui::Color32::YELLOW, "Paint or load a selection mask first.");
+        if let Some(mask) = &self.selection_mask {
+            let active_pixels = mask.pixels().iter().filter(|&&alpha| alpha > 0).count();
+            if active_pixels > 0 {
+                let label = self.active_saved_selection
+                    .and_then(|index| self.saved_selections.get(index))
+                    .map(|(name, _)| name.as_str())
+                    .unwrap_or("Unsaved selection");
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, "● Selection active");
+                    ui.label(label);
+                });
+                if self.selection_adjustment_target {
+                    ui.small("Adjustments affect the active mask. Drag the before/after divider to compare.");
+                }
+            } else {
+                ui.label("Selection mask is empty.");
+            }
+        } else {
+            ui.label("No active selection mask.");
+            if self.selection_adjustment_target {
+                ui.colored_label(egui::Color32::YELLOW, "Paint or load a selection mask first.");
+            }
         }
 
         ui.separator();
@@ -3785,6 +3805,25 @@ impl eframe::App for PixelForge {
                     if edit_clicked || ai_clicked || selection_clicked {
                         self.selection_tools_tab = selection_clicked;
                         self.ai_tools_tab = ai_clicked;
+
+                        // Reveal the entire selected region on the adjusted (right) side
+                        // when returning from Selection to Edit.
+                        if edit_clicked {
+                            if let Some(mask) = &self.selection_mask {
+                                let (width, _) = mask.dimensions();
+                                if width > 0 {
+                                    if let Some(first_x) = mask.pixels().iter().enumerate()
+                                        .filter(|(_, alpha)| **alpha > 0)
+                                        .map(|(index, _)| (index % width as usize) as u32)
+                                        .min()
+                                    {
+                                        self.comparison_position =
+                                            (first_x as f32 / width as f32 - 0.015).max(0.0);
+                                        self.comparison_enabled = true;
+                                    }
+                                }
+                            }
+                        }
 
                         // Enable painting only in Selection tab.
                         // Do not clear the existing selection.
