@@ -1,4 +1,6 @@
 mod adjustments;
+mod analysis;
+mod auto_enhance;
 mod histogram;
 mod project;
 
@@ -1166,6 +1168,132 @@ impl PixelForge {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
+    fn run_auto_enhance(&mut self, ctx: &egui::Context) {
+        let Some(source) = &self.preview_source else {
+            self.status = "Open an image before Auto Enhance".into();
+            return;
+        };
+
+        // Analyze the unmodified preview, not the histogram of
+        // previously applied adjustments.
+        let hist = histogram::Histogram::from_image(source);
+
+        let Some(plan) = auto_enhance::EnhancePlan::from_histogram(&hist) else {
+            self.status = "No image data to enhance".into();
+            return;
+        };
+
+        let old = (
+            self.exposure,
+            self.shadows,
+            self.highlights,
+            self.temperature,
+            self.tint,
+            self.vibrance,
+        );
+
+        self.exposure = plan.exposure;
+        self.shadows = plan.shadows;
+        self.highlights = plan.highlights;
+        self.temperature = plan.temperature;
+        self.tint = plan.tint;
+        self.vibrance = plan.vibrance;
+
+        let new = (
+            self.exposure,
+            self.shadows,
+            self.highlights,
+            self.temperature,
+            self.tint,
+            self.vibrance,
+        );
+
+        if old != new {
+            self.project_dirty = true;
+            self.update_processed_image(ctx);
+            self.status = "Auto Enhance applied - adjustments remain editable".into();
+        } else if plan.has_changes() {
+            self.status = "Auto Enhance settings already applied".into();
+        } else {
+            self.status = "Image is already within conservative enhancement targets".into();
+        }
+    }
+    fn show_image_analysis(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Image Analysis")
+            .id_salt("pixelforge_image_analysis")
+            .default_open(true)
+            .show(ui, |ui| {
+                let Some(report) = analysis::Analysis::from_histogram(&self.histogram) else {
+                    ui.label("No image data available.");
+                    return;
+                };
+
+                ui.label("Exposure");
+                ui.strong(report.exposure);
+
+                ui.add_space(6.0);
+
+                ui.label(format!(
+                    "Average brightness: {:.0} / 255",
+                    report.mean_luminance
+                ));
+
+                ui.separator();
+
+                ui.label("Clipping");
+
+                ui.label(format!("Near-black pixels: {:.2}%", report.shadow_clipping));
+
+                ui.label(format!(
+                    "Near-white pixels: {:.2}%",
+                    report.highlight_clipping
+                ));
+
+                ui.separator();
+
+                ui.label("Tonal Distribution");
+
+                ui.label(format!("Shadows: {:.1}%", report.shadows));
+
+                ui.label(format!("Midtones: {:.1}%", report.midtones));
+
+                ui.label(format!("Highlights: {:.1}%", report.highlights));
+
+                ui.separator();
+
+                ui.label("Color Balance");
+                ui.strong(report.color_balance);
+
+                ui.small(format!(
+                    "Average RGB: {:.0} / {:.0} / {:.0}",
+                    report.red_mean, report.green_mean, report.blue_mean
+                ));
+
+                ui.separator();
+
+                ui.label("Recommendations");
+
+                egui::ScrollArea::vertical()
+                    .id_salt("pixelforge_recommendations_scroll")
+                    .max_height(110.0)
+                    .min_scrolled_height(110.0)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.set_min_height(110.0);
+
+                        for recommendation in &report.recommendations {
+                            ui.add_space(4.0);
+                            ui.label(format!("• {recommendation}"));
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.small(
+                    "Analysis uses the current processed preview. \
+                     Results are guidance, not definitive image-quality judgments.",
+                );
+            });
+    }
     fn show_histogram(&mut self, ui: &mut egui::Ui) {
         egui::CollapsingHeader::new("Histogram")
             .id_salt("pixelforge_histogram")
@@ -1931,50 +2059,76 @@ impl eframe::App for PixelForge {
             });
         });
         egui::SidePanel::right("tools")
-            .default_width(240.0)
+            .default_width(280.0)
+            .min_width(240.0)
             .resizable(true)
             .show(ctx, |ui| {
-                if self.texture.is_some() {
-                    self.show_histogram(ui);
-                    ui.add_space(8.0);
-                    self.show_adjustments(ui);
-                    ui.add_space(12.0);
-                }
+                egui::ScrollArea::vertical()
+                    .id_salt("pixelforge_tools_scroll")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.texture.is_some() {
+                            ui.heading("Auto Enhance");
 
-                ui.heading("Image Tools");
-                ui.separator();
+                            if ui
+                                .add_enabled(
+                                    !self.exporting,
+                                    egui::Button::new("Auto Enhance Image"),
+                                )
+                                .clicked()
+                            {
+                                self.run_auto_enhance(ctx);
+                            }
 
-                ui.label("Upscaling");
-                ui.add_enabled(false, egui::Button::new("2x Upscale"));
-                ui.add_enabled(false, egui::Button::new("4x Upscale"));
+                            ui.small(
+                                "Automatic exposure, tonal and color correction. \
+                         Fine-tune the results with the sliders below.",
+                            );
 
-                ui.separator();
-                ui.label("Restoration");
-                ui.add_enabled(false, egui::Button::new("Denoise"));
-                ui.add_enabled(false, egui::Button::new("Deblur"));
-                ui.add_enabled(false, egui::Button::new("Restore Faces"));
+                            ui.add_space(10.0);
+                            self.show_histogram(ui);
+                            ui.add_space(8.0);
+                            self.show_image_analysis(ui);
+                            ui.add_space(8.0);
+                            self.show_adjustments(ui);
+                            ui.add_space(12.0);
+                        }
 
-                if self.advanced {
-                    ui.separator();
-                    ui.heading("Advanced");
-                    ui.label("Layers and masks coming soon.");
-                }
+                        ui.heading("Image Tools");
+                        ui.separator();
 
-                if let Some(path) = &self.image_path {
-                    ui.separator();
-                    ui.heading("Image Information");
+                        ui.label("Upscaling");
+                        ui.add_enabled(false, egui::Button::new("2x Upscale"));
+                        ui.add_enabled(false, egui::Button::new("4x Upscale"));
 
-                    if let Some(name) = path.file_name() {
-                        ui.label(name.to_string_lossy());
-                    }
+                        ui.separator();
+                        ui.label("Restoration");
+                        ui.add_enabled(false, egui::Button::new("Denoise"));
+                        ui.add_enabled(false, egui::Button::new("Deblur"));
+                        ui.add_enabled(false, egui::Button::new("Restore Faces"));
 
-                    ui.label(format!(
-                        "{} x {} pixels",
-                        self.image_size[0], self.image_size[1]
-                    ));
+                        if self.advanced {
+                            ui.separator();
+                            ui.heading("Advanced");
+                            ui.label("Layers and masks coming soon.");
+                        }
 
-                    ui.label(format!("{:.2} MB", self.file_size as f64 / 1_048_576.0));
-                }
+                        if let Some(path) = &self.image_path {
+                            ui.separator();
+                            ui.heading("Image Information");
+
+                            if let Some(name) = path.file_name() {
+                                ui.label(name.to_string_lossy());
+                            }
+
+                            ui.label(format!(
+                                "{} x {} pixels",
+                                self.image_size[0], self.image_size[1]
+                            ));
+
+                            ui.label(format!("{:.2} MB", self.file_size as f64 / 1_048_576.0));
+                        }
+                    });
             });
 
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -2052,7 +2206,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.3.0")
+            .with_title("PixelForge v0.3.2")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
