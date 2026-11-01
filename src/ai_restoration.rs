@@ -20,8 +20,39 @@ pub fn engine_path(operation: Operation) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(relative)
 }
 
-/// Neural detail enhancement: Real-ESRGAN inference followed by same-size reconstruction.
-/// This is not a separately trained sharpening model.
+/// Luminance-only detail transfer. The adjusted original supplies the colors and
+/// base structure; Real-ESRGAN contributes only a limited high-frequency signal.
+/// Keeping original detail prevents a smooth neural output from softening edges.
+fn preserve_color_sharpen(original: &RgbaImage, neural: &RgbaImage) -> RgbaImage {
+    let original_blur = image::imageops::blur(original, 1.15);
+    let neural_blur = image::imageops::blur(neural, 1.15);
+    let mut output = original.clone();
+    for (x, y, pixel) in output.enumerate_pixels_mut() {
+        let base = original.get_pixel(x, y);
+        let ai = neural.get_pixel(x, y);
+        let ob = original_blur.get_pixel(x, y);
+        let nb = neural_blur.get_pixel(x, y);
+        let luma = |p: &image::Rgba<u8>| -> f32 {
+            0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32
+        };
+        let original_detail = luma(base) - luma(ob);
+        let neural_detail = luma(ai) - luma(nb);
+        // Reject tiny differences (mostly flat-area noise); protect against halos.
+        let detail = if original_detail.abs() < 1.5 && neural_detail.abs() < 1.5 {
+            0.0
+        } else {
+            (0.85 * original_detail + 0.30 * neural_detail).clamp(-24.0, 24.0)
+        };
+        for channel in 0..3 {
+            pixel[channel] = (base[channel] as f32 + detail).round().clamp(0.0, 255.0) as u8;
+        }
+        pixel[3] = base[3];
+    }
+    output
+}
+
+/// Neural-assisted luminance sharpening using Real-ESRGAN detail only.
+/// Original RGB colors, alpha, and base structure are preserved.
 pub fn sharpen(
     original: RgbaImage,
     settings: crate::adjustments::Adjustments,
@@ -42,9 +73,10 @@ pub fn sharpen(
     if cancel.load(Ordering::Relaxed) { return Err("AI sharpen cancelled".into()); }
     let enhanced = image::open(&result.ai_path)
         .map_err(|e| format!("Cannot decode enhanced image: {e}"))?.to_rgba8();
-    let restored = image::imageops::resize(
+    let resized_neural = image::imageops::resize(
         &enhanced, width, height, image::imageops::FilterType::Lanczos3
     );
+    let restored = preserve_color_sharpen(&baseline, &resized_neural);
     if cancel.load(Ordering::Relaxed) { return Err("AI sharpen cancelled".into()); }
     let ai_path = result.work_dir.join("sharpened.png");
     let baseline_path = result.work_dir.join("sharpen_original.png");
