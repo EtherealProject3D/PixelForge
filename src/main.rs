@@ -1593,7 +1593,12 @@ impl PixelForge {
         let denoise_level = self.ai_denoise_level;
         std::thread::spawn(move || {
             let result = if let Some(operation) = restoration {
-                ai_restoration::run(pixels, settings, operation, cancel)
+                match operation {
+                    ai_restoration::Operation::Sharpen =>
+                        ai_restoration::sharpen(pixels, settings, options.gpu_id, options.tile_size, cancel),
+                    ai_restoration::Operation::Deblur =>
+                        ai_restoration::run(pixels, settings, operation, cancel),
+                }
             } else if denoise {
                 ai_denoise::denoise(pixels, settings, denoise_level, options.gpu_id, options.tile_size, cancel)
             } else {
@@ -4114,10 +4119,10 @@ impl eframe::App for PixelForge {
                             if self.ai_running {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
-                                    ui.label(if self.ai_is_denoise { "AI denoising running..." } else { "GPU inference running..." });
-                                    if ui.button(if self.ai_is_denoise { "Cancel Denoise" } else { "Cancel Upscale" }).clicked() {
+                                    ui.label(if let Some(operation) = self.ai_restoration { if operation == ai_restoration::Operation::Sharpen { "AI sharpening running..." } else { "NAFNet deblurring running..." } } else if self.ai_is_denoise { "AI denoising running..." } else { "GPU inference running..." });
+                                    if ui.button(if self.ai_restoration.is_some() { "Cancel Restoration" } else if self.ai_is_denoise { "Cancel Denoise" } else { "Cancel Upscale" }).clicked() {
                                         self.ai_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                                        self.ai_status = if self.ai_is_denoise { "Cancelling AI denoise..." } else { "Cancelling AI upscale..." }.into();
+                                        self.ai_status = if self.ai_restoration.is_some() { "Cancelling AI restoration..." } else if self.ai_is_denoise { "Cancelling AI denoise..." } else { "Cancelling AI upscale..." }.into();
                                     }
                                 });
                             }
@@ -4181,7 +4186,7 @@ impl eframe::App for PixelForge {
                                     self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Deblur));
                                 }
                             });
-                            ui.small("Requires compatible neural runners at tools/restoration/sharpen.exe and deblur.exe. Models not bundled.");
+                            ui.small("Sharpen uses Real-ESRGAN. Deblur uses NAFNet ONNX (Python/OpenCV); see AI_RESTORATION_RUNNERS.md.");
 
                             ui.add_enabled(false, egui::Button::new("Restore Faces"));
                         }
