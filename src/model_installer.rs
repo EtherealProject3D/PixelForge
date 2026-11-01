@@ -77,9 +77,9 @@ pub fn detect_checkpoint_folder(known: &[String]) -> Option<PathBuf> {
                         if let Some(sections) = config.as_mapping() {
                             for section in sections.values() {
                                 let Some(mapping) = section.as_mapping() else { continue };
-                                let base = mapping.get(serde_yaml::Value::String("base_path".into()))
+                                let base = mapping.get(&serde_yaml::Value::String("base_path".into()))
                                     .and_then(|v| v.as_str()).map(PathBuf::from);
-                                let checkpoints = mapping.get(serde_yaml::Value::String("checkpoints".into()))
+                                let checkpoints = mapping.get(&serde_yaml::Value::String("checkpoints".into()))
                                     .and_then(|v| v.as_str());
                                 if let Some(checkpoints) = checkpoints {
                                     for line in checkpoints.lines().map(str::trim).filter(|x| !x.is_empty()) {
