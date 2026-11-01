@@ -4465,6 +4465,7 @@ impl eframe::App for PixelForge {
                         self.ai_tools_tab = ai_clicked;
                         self.generation_tools_tab = generation_clicked;
                         if generation_clicked { self.generation_workspace = true; }
+                        if edit_clicked { self.generation_workspace = false; }
 
                         // Reveal the entire selected region on the adjusted (right) side
                         // when returning from Selection to Edit.
