@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::RgbaImage;
@@ -102,12 +105,30 @@ fn validate_dimensions(image: &RgbaImage, expected: [u32; 2], label: &str) -> Re
     Ok(())
 }
 
+/// Conservative preflight: the engine always creates a native 4x RGBA output.
+/// Limit the decoded 4x frame to 512 MiB to avoid excessive simultaneous buffers.
+pub fn validate_upscale_size(width: u32, height: u32, scale: u32) -> Result<(), String> {
+    expected_dimensions(width, height, scale)?;
+    let native = expected_dimensions(width, height, 4)?;
+    let bytes = u64::from(native[0]) * u64::from(native[1]) * 4;
+    const LIMIT: u64 = 512 * 1024 * 1024;
+    if bytes > LIMIT {
+        return Err(format!(
+            "Image too large for safe AI upscaling: native 4x output would require {:.1} MiB per RGBA buffer (limit 512 MiB). Try a smaller source image.",
+            bytes as f64 / (1024.0 * 1024.0)
+        ));
+    }
+    Ok(())
+}
+
 pub fn upscale(
     mut original: RgbaImage,
     settings: crate::adjustments::Adjustments,
     scale: u32,
     options: UpscaleOptions,
+    cancel: Arc<AtomicBool>,
 ) -> Result<UpscaleResult, String> {
+    validate_upscale_size(original.width(), original.height(), scale)?;
     let expected = expected_dimensions(original.width(), original.height(), scale)?;
     if !matches!(options.model.as_str(), "realesrgan-x4plus" | "realesrgan-x4plus-anime") { return Err("Unsupported upscale model".into()); }
     if options.gpu_id < -1 || options.gpu_id > 32 { return Err("Invalid GPU ID".into()); }
@@ -140,7 +161,7 @@ pub fn upscale(
 
     std::fs::create_dir_all(&work).map_err(|e| format!("Cannot create AI work folder: {e}"))?;
 
-    let result = upscale_inner(&mut original, &settings, scale, expected, &engine, &work, &options);
+    let result = upscale_inner(&mut original, &settings, scale, expected, &engine, &work, &options, &cancel);
 
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&work);
@@ -157,7 +178,9 @@ fn upscale_inner(
     engine: &Path,
     work: &Path,
     options: &UpscaleOptions,
+    cancel: &AtomicBool,
 ) -> Result<UpscaleResult, String> {
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     // Apply the existing PixelForge adjustments to the
     // full-resolution image before neural-network inference.
     for pixel in original.pixels_mut() {
@@ -167,13 +190,15 @@ fn upscale_inner(
     let input = work.join("input.png");
     let output = work.join("native_4x.png");
 
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     original
         .save(&input)
         .map_err(|e| format!("Cannot prepare AI input: {e}"))?;
 
     let engine_dir = engine.parent().ok_or("Invalid AI engine directory")?;
 
-    let process = Command::new(engine)
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
+    let mut process = Command::new(engine)
         .current_dir(engine_dir)
         .arg("-i")
         .arg(&input)
@@ -192,20 +217,29 @@ fn upscale_inner(
         .arg(options.gpu_id.to_string())
         .arg("-f")
         .arg("png")
-        .output()
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
         .map_err(|e| format!("Cannot launch Real-ESRGAN: {e}"))?;
 
-    if !process.status.success() {
-        let stderr = String::from_utf8_lossy(&process.stderr);
-        let stdout = String::from_utf8_lossy(&process.stdout);
-
-        return Err(format!(
-            "Real-ESRGAN failed ({}): {} {}",
-            process.status,
-            stderr.trim(),
-            stdout.trim()
-        ));
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = process.kill();
+            let _ = process.wait();
+            return Err("AI upscale cancelled".into());
+        }
+        match process.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(status)) => return Err(format!("Real-ESRGAN failed ({status})")),
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => {
+                let _ = process.kill();
+                let _ = process.wait();
+                return Err(format!("Cannot monitor Real-ESRGAN: {e}"));
+            }
+        }
     }
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into());
 
     if !output.is_file() {
         return Err("Real-ESRGAN did not produce an output image".into());
@@ -228,6 +262,7 @@ fn upscale_inner(
     image::ImageDecoder::set_limits(&mut decoder, limits)
         .map_err(|e| format!("AI PNG exceeds memory limit: {e}"))?;
 
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     let native = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| format!("Cannot decode AI output: {e}"))?
         .to_rgba8();
@@ -252,6 +287,7 @@ fn upscale_inner(
 
     validate_dimensions(&result, expected, "Final AI result")?;
 
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     // Compare against a conventional high-quality resize.
     // Both paths use the same adjusted source pixels.
     let baseline = image::imageops::resize(
@@ -300,6 +336,7 @@ fn upscale_inner(
         image::imageops::FilterType::Triangle,
     );
 
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     Ok(UpscaleResult {
         work_dir: work.to_path_buf(),
         ai_path,
@@ -470,6 +507,13 @@ pub fn save_blended(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_image_preflight() {
+        assert!(validate_upscale_size(1000, 1000, 4).is_ok());
+        assert!(validate_upscale_size(10000, 10000, 2).is_err());
+        assert!(validate_upscale_size(u32::MAX, 10, 4).is_err());
+    }
 
     #[test]
     fn owned_blending_matches_existing_blending() {
