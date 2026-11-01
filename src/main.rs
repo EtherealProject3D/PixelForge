@@ -190,6 +190,9 @@ enum PendingOpen {
 struct PixelForge {
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
+    ai_model: usize,
+    ai_gpu_id: i32,
+    ai_tile_size: u32,
     ai_result: Option<std::sync::Arc<ai_upscale::UpscaleResult>>,
     ai_save_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
     ai_saving: bool,
@@ -304,6 +307,9 @@ impl Default for PixelForge {
         Self {
             ai_rx: None,
             ai_running: false,
+            ai_model: 0,
+            ai_gpu_id: -1,
+            ai_tile_size: 0,
             ai_result: None,
             ai_save_rx: None,
             ai_saving: false,
@@ -1498,6 +1504,11 @@ impl PixelForge {
         };
 
         let pixels = original.clone();
+        let options = ai_upscale::UpscaleOptions {
+            model: ["realesrgan-x4plus", "realesrgan-x4plus-anime", "realesr-animevideov3"][self.ai_model.min(2)].into(),
+            gpu_id: self.ai_gpu_id,
+            tile_size: self.ai_tile_size,
+        };
         let (tx, rx) = std::sync::mpsc::channel();
 
         self.ai_rx = Some(rx);
@@ -1528,7 +1539,7 @@ impl PixelForge {
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let result = ai_upscale::upscale(pixels, settings, scale);
+            let result = ai_upscale::upscale(pixels, settings, scale, options);
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -3938,6 +3949,26 @@ impl eframe::App for PixelForge {
                             ui.heading("AI Upscaling");
                             ui.separator();
                             ui.label("Real-ESRGAN");
+                            ui.add_enabled_ui(!self.ai_running, |ui| {
+                                egui::ComboBox::from_label("Upscaling model")
+                                    .selected_text(["Photo", "Illustration / Anime", "Anime Video"][self.ai_model.min(2)])
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.ai_model, 0, "Photo");
+                                        ui.selectable_value(&mut self.ai_model, 1, "Illustration / Anime");
+                                        ui.selectable_value(&mut self.ai_model, 2, "Anime Video");
+                                    });
+                                ui.horizontal(|ui| {
+                                    ui.label("Vulkan GPU (-1 = automatic)");
+                                    ui.add(egui::DragValue::new(&mut self.ai_gpu_id).range(-1..=32));
+                                });
+                                egui::ComboBox::from_label("Tile size")
+                                    .selected_text(if self.ai_tile_size == 0 { "Auto".to_owned() } else { self.ai_tile_size.to_string() })
+                                    .show_ui(ui, |ui| {
+                                        for tile in [0, 32, 64, 128, 256, 512] {
+                                            ui.selectable_value(&mut self.ai_tile_size, tile, if tile == 0 { "Auto".to_owned() } else { tile.to_string() });
+                                        }
+                                    });
+                            });
 
                             ui.add_space(8.0);
 
