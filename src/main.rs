@@ -186,6 +186,18 @@ struct PixelForge {
     ai_inspect_zoom: f32,
     ai_inspect_pan: Vec2,
     ai_inspect_fit: bool,
+
+    // Native-resolution inspection: one background request at a time.
+    ai_detail_rx: Option<
+        std::sync::mpsc::Receiver<
+            Result<([u32; 4], u32, image::RgbaImage, image::RgbaImage), String>,
+        >,
+    >,
+    ai_detail_key: Option<([u32; 4], u32)>,
+    ai_detail_rect: Option<[u32; 4]>,
+    ai_detail_ai_texture: Option<TextureHandle>,
+    ai_detail_lanczos_texture: Option<TextureHandle>,
+    ai_detail_status: String,
     texture: Option<TextureHandle>,
     processed_texture: Option<TextureHandle>,
     histogram: histogram::Histogram,
@@ -258,6 +270,12 @@ impl Default for PixelForge {
             ai_inspect_zoom: 1.0,
             ai_inspect_pan: Vec2::ZERO,
             ai_inspect_fit: true,
+            ai_detail_rx: None,
+            ai_detail_key: None,
+            ai_detail_rect: None,
+            ai_detail_ai_texture: None,
+            ai_detail_lanczos_texture: None,
+            ai_detail_status: String::new(),
             texture: None,
             processed_texture: None,
             histogram: histogram::Histogram::default(),
@@ -1301,6 +1319,13 @@ impl PixelForge {
         self.ai_rx = Some(rx);
         self.ai_running = true;
         self.ai_status = format!("Running Real-ESRGAN {scale}x on GPU...");
+
+        self.ai_detail_rx = None;
+        self.ai_detail_key = None;
+        self.ai_detail_rect = None;
+        self.ai_detail_ai_texture = None;
+        self.ai_detail_lanczos_texture = None;
+        self.ai_detail_status.clear();
         self.ai_result = None;
         self.ai_result_texture = None;
         self.ai_baseline_texture = None;
@@ -1397,6 +1422,13 @@ impl PixelForge {
 
         self.ai_inspect_texture = None;
         self.ai_inspect_size = size;
+
+        // Strength changes invalidate the native-resolution blend.
+        self.ai_detail_key = None;
+        self.ai_detail_rect = None;
+        self.ai_detail_ai_texture = None;
+        self.ai_detail_lanczos_texture = None;
+
         ctx.request_repaint();
     }
 
@@ -1597,11 +1629,29 @@ impl PixelForge {
 
             if limited {
                 ui.small(
-                    "Inspection texture is limited to 4096 pixels on its longest side. \
-                         At 100%, image coordinates are 1:1, but fine details may be softer \
-                         than in the saved PNG.",
+                    "Native-resolution inspection activates at 75% zoom. \
+                     The visible detail region loads in the background; \
+                     the fast preview remains underneath.",
                 );
             }
+
+            // Keep the inspection status area at a fixed height.
+            // Changing status text must not resize the preview canvas.
+            ui.horizontal(|ui| {
+                ui.set_min_height(20.0);
+
+                let message = if self.ai_inspect_zoom < 0.75 {
+                    "Preview mode"
+                } else if self.ai_detail_rx.is_some() {
+                    "Loading native-resolution detail..."
+                } else if self.ai_detail_ai_texture.is_some() {
+                    "Native-resolution detail ready"
+                } else {
+                    "Waiting for native-resolution detail"
+                };
+
+                ui.add(egui::Label::new(egui::RichText::new(message).small()).truncate());
+            });
 
             ui.small(format!(
                 "Mouse wheel: zoom | {}: pan | Fit: whole image | 100%: image pixel scale",
@@ -1709,6 +1759,159 @@ impl PixelForge {
 
             let image_rect = Rect::from_center_size(center, draw_size);
 
+            // Request a native-resolution crop for the visible image region.
+            // The ordinary preview remains available while it loads.
+            if self.ai_inspect_zoom >= 0.75 {
+                if let Some(result) = self.ai_result.as_ref() {
+                    let visible = rect.intersect(image_rect);
+
+                    if visible.width() > 1.0 && visible.height() > 1.0 {
+                        let zoom = self.ai_inspect_zoom.max(0.001);
+
+                        let source_x = ((visible.left() - image_rect.left()) / zoom)
+                            .floor()
+                            .max(0.0) as u32;
+
+                        let source_y =
+                            ((visible.top() - image_rect.top()) / zoom).floor().max(0.0) as u32;
+
+                        let source_w = (visible.width() / zoom).ceil() as u32;
+                        let source_h = (visible.height() / zoom).ceil() as u32;
+
+                        let image_w = self.ai_result_size[0];
+                        let image_h = self.ai_result_size[1];
+
+                        // A bounded 2048 x 2048 native crop limits GPU memory.
+                        // Center it on the visible area, with some extra margin.
+                        let crop_w = source_w.saturating_add(256).min(2048).min(image_w).max(1);
+
+                        let crop_h = source_h.saturating_add(256).min(2048).min(image_h).max(1);
+
+                        let center_x = source_x.saturating_add(source_w / 2);
+                        let center_y = source_y.saturating_add(source_h / 2);
+
+                        let max_x = image_w.saturating_sub(crop_w);
+                        let max_y = image_h.saturating_sub(crop_h);
+
+                        let crop_x = center_x.saturating_sub(crop_w / 2).min(max_x);
+                        let crop_y = center_y.saturating_sub(crop_h / 2).min(max_y);
+
+                        let crop = [crop_x, crop_y, crop_w, crop_h];
+                        let strength_key =
+                            (self.ai_strength.clamp(0.0, 1.0) * 1000.0).round() as u32;
+
+                        let key = (crop, strength_key);
+
+                        if self.ai_detail_rx.is_none() && self.ai_detail_key != Some(key) {
+                            let retained = std::sync::Arc::clone(result);
+                            let (tx, rx) = std::sync::mpsc::channel();
+
+                            self.ai_detail_rx = Some(rx);
+                            self.ai_detail_key = Some(key);
+                            self.ai_detail_status = "Loading native pixels...".into();
+
+                            let repaint = ctx.clone();
+
+                            std::thread::spawn(move || {
+                                let loaded = (|| -> Result<
+                                    ([u32; 4], u32, image::RgbaImage, image::RgbaImage),
+                                    String
+                                > {
+                                    let ai = image::open(&retained.ai_path)
+                                        .map_err(|e| format!("AI inspection: {e}"))?
+                                        .to_rgba8();
+
+                                    let baseline = image::open(&retained.baseline_path)
+                                        .map_err(|e| format!("Lanczos inspection: {e}"))?
+                                        .to_rgba8();
+
+                                    if ai.dimensions() != baseline.dimensions() {
+                                        return Err("Inspection image sizes differ".into());
+                                    }
+
+                                    let ai_crop = image::imageops::crop_imm(
+                                        &ai, crop[0], crop[1], crop[2], crop[3]
+                                    ).to_image();
+
+                                    let baseline_crop = image::imageops::crop_imm(
+                                        &baseline, crop[0], crop[1], crop[2], crop[3]
+                                    ).to_image();
+
+                                    let blended = ai_upscale::blend_images(
+                                        &ai_crop,
+                                        &baseline_crop,
+                                        strength_key as f32 / 1000.0,
+                                    )?;
+
+                                    Ok((crop, strength_key, blended, baseline_crop))
+                                })();
+
+                                let _ = tx.send(loaded);
+                                repaint.request_repaint();
+                            });
+                        }
+                    }
+                }
+            }
+
+            // Poll without blocking the editor.
+            let detail_message = self
+                .ai_detail_rx
+                .as_ref()
+                .and_then(|rx| match rx.try_recv() {
+                    Ok(value) => Some(value),
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        Some(Err("Inspection worker disconnected".into()))
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                });
+
+            if let Some(message) = detail_message {
+                self.ai_detail_rx = None;
+
+                match message {
+                    Ok((crop, strength_key, ai_pixels, lanczos_pixels)) => {
+                        // A strength or viewport change may have occurred
+                        // while the worker was decoding the PNG files.
+                        if self.ai_detail_key == Some((crop, strength_key))
+                            && strength_key
+                                == (self.ai_strength.clamp(0.0, 1.0) * 1000.0).round() as u32
+                        {
+                            let size = [ai_pixels.width() as usize, ai_pixels.height() as usize];
+
+                            let ai_color =
+                                ColorImage::from_rgba_unmultiplied(size, ai_pixels.as_raw());
+
+                            let baseline_color =
+                                ColorImage::from_rgba_unmultiplied(size, lanczos_pixels.as_raw());
+
+                            self.ai_detail_ai_texture = Some(ctx.load_texture(
+                                "ai_native_inspection",
+                                ai_color,
+                                TextureOptions::LINEAR,
+                            ));
+
+                            self.ai_detail_lanczos_texture = Some(ctx.load_texture(
+                                "lanczos_native_inspection",
+                                baseline_color,
+                                TextureOptions::LINEAR,
+                            ));
+
+                            self.ai_detail_rect = Some(crop);
+                            self.ai_detail_status = "Native-resolution detail ready".into();
+                        }
+                    }
+                    Err(error) => {
+                        self.ai_detail_key = None;
+                        self.ai_detail_status = error;
+                    }
+                }
+            }
+
+            if self.ai_detail_rx.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            }
+
             let painter = ui.painter_at(rect);
 
             painter.rect_filled(rect, 0.0, Color32::from_gray(30));
@@ -1719,6 +1922,32 @@ impl PixelForge {
                 Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                 Color32::WHITE,
             );
+
+            // Overlay native AI pixels over the fast preview.
+            if self.ai_inspect_zoom >= 0.75 {
+                if let (Some(crop), Some(detail)) =
+                    (self.ai_detail_rect, &self.ai_detail_ai_texture)
+                {
+                    let detail_rect = Rect::from_min_size(
+                        image_rect.min
+                            + Vec2::new(
+                                crop[0] as f32 * self.ai_inspect_zoom,
+                                crop[1] as f32 * self.ai_inspect_zoom,
+                            ),
+                        Vec2::new(
+                            crop[2] as f32 * self.ai_inspect_zoom,
+                            crop[3] as f32 * self.ai_inspect_zoom,
+                        ),
+                    );
+
+                    painter.image(
+                        detail.id(),
+                        detail_rect,
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+                }
+            }
 
             if self.ai_comparison {
                 if let Some(baseline) = &self.ai_baseline_texture {
@@ -1735,6 +1964,32 @@ impl PixelForge {
                         Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
                         Color32::WHITE,
                     );
+
+                    // Use the same crop coordinates on the Lanczos side.
+                    if self.ai_inspect_zoom >= 0.75 {
+                        if let (Some(crop), Some(detail)) =
+                            (self.ai_detail_rect, &self.ai_detail_lanczos_texture)
+                        {
+                            let detail_rect = Rect::from_min_size(
+                                image_rect.min
+                                    + Vec2::new(
+                                        crop[0] as f32 * self.ai_inspect_zoom,
+                                        crop[1] as f32 * self.ai_inspect_zoom,
+                                    ),
+                                Vec2::new(
+                                    crop[2] as f32 * self.ai_inspect_zoom,
+                                    crop[3] as f32 * self.ai_inspect_zoom,
+                                ),
+                            );
+
+                            comparison_painter.image(
+                                detail.id(),
+                                detail_rect,
+                                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        }
+                    }
 
                     painter.line_segment(
                         [
