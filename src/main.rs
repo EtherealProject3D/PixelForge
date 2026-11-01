@@ -197,10 +197,10 @@ struct GeneratedItem {
 }
 
 const GENERATION_STYLES: &[(&str, &str)] = &[
-    ("None", ""),
-    ("Photorealistic", "professional realistic photography, natural light, realistic materials, lifelike details"),
+    ("Default", ""),
+    ("Photorealistic", "unedited RAW photograph captured on a full-frame DSLR, authentic documentary photography, physically accurate natural lighting, realistic dynamic range, natural color science, subtle film grain, organic fine detail, true-to-life material textures, no CGI, no illustration, no artificial HDR, no oversharpening"),
     ("Portrait", "professional portrait photography, flattering studio light, natural skin texture, shallow depth of field"),
-    ("Landscape", "fine art landscape photography, natural atmosphere, detailed scenery"),
+    ("Landscape Photography", "real outdoor landscape photograph, full-frame camera, realistic geography and atmospheric perspective, naturally irregular trees and foliage, authentic terrain, subtle natural daylight, realistic haze, neutral color grading, restrained contrast, no fantasy scenery, no CGI, no artificial HDR, no oversaturation"),
     ("Product", "commercial product photography, clean composition, studio lighting"),
     ("Macro", "macro photography, intricate close-up detail, shallow depth of field"),
     ("Cinematic", "cinematic film still, dramatic lighting, atmospheric color grading"),
@@ -922,7 +922,6 @@ impl PixelForge {
             if ui.button("Open Selected in Editor").clicked() {
                 self.generation_image = Some(self.generation_gallery[self.generation_selected].pixels.clone());
                 self.open_generated_image(ui.ctx());
-                if !self.project_dirty { self.generation_workspace = false; }
             }
         });
         ui.horizontal(|ui| {
@@ -1147,6 +1146,9 @@ impl PixelForge {
                 self.create_project_tab();
                 self.load_image_path(ctx, path);
                 self.generation_workspace = false;
+                self.generation_tools_tab = false;
+                self.ai_tools_tab = false;
+                self.selection_tools_tab = false;
             },
             Err(error) => self.generation_status = format!("Cannot prepare generated image: {error}"),
         }
