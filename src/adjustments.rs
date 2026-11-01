@@ -10,6 +10,8 @@ pub struct Adjustments {
     pub shadows: f32,
     pub whites: f32,
     pub blacks: f32,
+    pub vibrance: f32,
+    pub gamma: f32,
 }
 
 impl Adjustments {
@@ -60,13 +62,33 @@ impl Adjustments {
 
         let endpoint_offset = self.whites * 1.25 * white_weight + self.blacks * 1.25 * black_weight;
 
+        // Vibrance emphasizes less-saturated colors.
+        let maximum = rgb[0].max(rgb[1]).max(rgb[2]);
+        let minimum = rgb[0].min(rgb[1]).min(rgb[2]);
+        let chroma = (maximum - minimum).clamp(0.0, 255.0) / 255.0;
+
+        let strength = self.vibrance / 100.0;
+
+        let vibrance_factor = if strength >= 0.0 {
+            1.0 + strength * (1.0 - chroma)
+        } else {
+            1.0 + strength
+        };
+
+        // Positive gamma brightens midtones.
+        // Negative gamma darkens midtones.
+        let gamma_exponent = 2.0_f32.powf(-self.gamma / 100.0);
+
         for channel in 0..3 {
             let value = luminance
-                + (rgb[channel] - luminance) * saturation_factor
+                + (rgb[channel] - luminance) * saturation_factor * vibrance_factor
                 + tonal_offset
                 + endpoint_offset;
 
-            pixel[channel] = value.clamp(0.0, 255.0).round() as u8;
+            let normalized = (value / 255.0).clamp(0.0, 1.0);
+            let corrected = normalized.powf(gamma_exponent) * 255.0;
+
+            pixel[channel] = corrected.clamp(0.0, 255.0).round() as u8;
         }
 
         // Alpha remains unchanged.
@@ -262,5 +284,88 @@ mod tests {
         .apply_pixel(&mut pixel);
 
         assert_eq!(pixel[3], 83);
+    }
+
+    #[test]
+    fn positive_gamma_lifts_midtones() {
+        let mut pixel = image::Rgba([80, 120, 180, 255]);
+
+        Adjustments {
+            gamma: 50.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut pixel);
+
+        assert!(pixel[0] > 80);
+        assert!(pixel[1] > 120);
+        assert!(pixel[2] > 180);
+    }
+
+    #[test]
+    fn negative_gamma_darkens_midtones() {
+        let mut pixel = image::Rgba([80, 120, 180, 255]);
+
+        Adjustments {
+            gamma: -50.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut pixel);
+
+        assert!(pixel[0] < 80);
+        assert!(pixel[1] < 120);
+        assert!(pixel[2] < 180);
+    }
+
+    #[test]
+    fn gamma_preserves_endpoints() {
+        for gamma in [-100.0, 0.0, 100.0] {
+            let mut black = image::Rgba([0, 0, 0, 255]);
+            let mut white = image::Rgba([255, 255, 255, 255]);
+
+            let settings = Adjustments {
+                gamma,
+                ..Default::default()
+            };
+
+            settings.apply_pixel(&mut black);
+            settings.apply_pixel(&mut white);
+
+            assert_eq!(black.0, [0, 0, 0, 255]);
+            assert_eq!(white.0, [255, 255, 255, 255]);
+        }
+    }
+
+    #[test]
+    fn vibrance_emphasizes_muted_colors() {
+        let mut muted = image::Rgba([140, 120, 110, 255]);
+        let mut vivid = image::Rgba([230, 50, 30, 255]);
+
+        let settings = Adjustments {
+            vibrance: 75.0,
+            ..Default::default()
+        };
+
+        settings.apply_pixel(&mut muted);
+        settings.apply_pixel(&mut vivid);
+
+        let muted_gain = (muted[0] as i32 - muted[2] as i32) as f32 / 30.0;
+
+        let vivid_gain = (vivid[0] as i32 - vivid[2] as i32) as f32 / 200.0;
+
+        assert!(muted_gain > vivid_gain);
+    }
+
+    #[test]
+    fn vibrance_and_gamma_preserve_alpha() {
+        let mut pixel = image::Rgba([100, 140, 180, 73]);
+
+        Adjustments {
+            vibrance: 45.0,
+            gamma: -25.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut pixel);
+
+        assert_eq!(pixel[3], 73);
     }
 }

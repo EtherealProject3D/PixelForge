@@ -6,6 +6,7 @@ const MAGIC_V2: &[u8; 4] = b"PXF2";
 const MAGIC_V3: &[u8; 4] = b"PXF3";
 const MAGIC_V4: &[u8; 4] = b"PXF4";
 const MAGIC_V5: &[u8; 4] = b"PXF5";
+const MAGIC_V6: &[u8; 4] = b"PXF6";
 const MAX_BYTES: u64 = 1_073_741_824;
 const MAX_NAME: usize = 4096;
 
@@ -22,6 +23,8 @@ pub struct Project {
     pub shadows: f32,
     pub whites: f32,
     pub blacks: f32,
+    pub vibrance: f32,
+    pub gamma: f32,
     pub comparison_enabled: bool,
     pub comparison_position: f32,
 }
@@ -47,7 +50,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
     }
 
     let mut data = Vec::new();
-    data.extend_from_slice(MAGIC_V5);
+    data.extend_from_slice(MAGIC_V6);
     data.extend_from_slice(&project.brightness.to_le_bytes());
     data.extend_from_slice(&project.contrast.to_le_bytes());
     data.extend_from_slice(&project.exposure.to_le_bytes());
@@ -58,6 +61,8 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
     data.extend_from_slice(&project.shadows.to_le_bytes());
     data.extend_from_slice(&project.whites.to_le_bytes());
     data.extend_from_slice(&project.blacks.to_le_bytes());
+    data.extend_from_slice(&project.vibrance.to_le_bytes());
+    data.extend_from_slice(&project.gamma.to_le_bytes());
     data.push(u8::from(project.comparison_enabled));
     data.extend_from_slice(&project.comparison_position.to_le_bytes());
     data.extend_from_slice(&(name.len() as u32).to_le_bytes());
@@ -158,6 +163,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         && &version != MAGIC_V3
         && &version != MAGIC_V4
         && &version != MAGIC_V5
+        && &version != MAGIC_V6
     {
         return Err("Unsupported PixelForge project format".into());
     }
@@ -165,7 +171,10 @@ pub fn load(path: &Path) -> Result<Project, String> {
     let brightness = f32::from_le_bytes(read::<4>(&mut reader)?);
     let contrast = f32::from_le_bytes(read::<4>(&mut reader)?);
 
-    let (exposure, saturation) = if matches!(&version, MAGIC_V2 | MAGIC_V3 | MAGIC_V4 | MAGIC_V5) {
+    let (exposure, saturation) = if matches!(
+        &version,
+        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6
+    ) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -174,7 +183,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (temperature, tint) = if matches!(&version, MAGIC_V3 | MAGIC_V4 | MAGIC_V5) {
+    let (temperature, tint) = if matches!(&version, MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -183,7 +192,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (highlights, shadows) = if matches!(&version, MAGIC_V4 | MAGIC_V5) {
+    let (highlights, shadows) = if matches!(&version, MAGIC_V4 | MAGIC_V5 | MAGIC_V6) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -192,7 +201,16 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (whites, blacks) = if &version == MAGIC_V5 {
+    let (whites, blacks) = if matches!(&version, MAGIC_V5 | MAGIC_V6) {
+        (
+            f32::from_le_bytes(read::<4>(&mut reader)?),
+            f32::from_le_bytes(read::<4>(&mut reader)?),
+        )
+    } else {
+        (0.0, 0.0)
+    };
+
+    let (vibrance, gamma) = if &version == MAGIC_V6 {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -214,6 +232,10 @@ pub fn load(path: &Path) -> Result<Project, String> {
         || !shadows.is_finite()
         || !whites.is_finite()
         || !blacks.is_finite()
+        || !vibrance.is_finite()
+        || !gamma.is_finite()
+        || !(-100.0..=100.0).contains(&vibrance)
+        || !(-100.0..=100.0).contains(&gamma)
         || !(-100.0..=100.0).contains(&whites)
         || !(-100.0..=100.0).contains(&blacks)
         || !(-100.0..=100.0).contains(&highlights)
@@ -269,6 +291,8 @@ pub fn load(path: &Path) -> Result<Project, String> {
         shadows,
         whites,
         blacks,
+        vibrance,
+        gamma,
         comparison_enabled: enabled == 1,
         comparison_position,
     })
@@ -302,6 +326,8 @@ mod tests {
             shadows: 48.0,
             whites: 32.0,
             blacks: -27.0,
+            vibrance: 38.0,
+            gamma: -22.0,
             comparison_enabled: true,
             comparison_position: 0.3,
         };
@@ -322,6 +348,8 @@ mod tests {
         assert_eq!(loaded.shadows, original.shadows);
         assert_eq!(loaded.whites, original.whites);
         assert_eq!(loaded.blacks, original.blacks);
+        assert_eq!(loaded.vibrance, original.vibrance);
+        assert_eq!(loaded.gamma, original.gamma);
         assert_eq!(loaded.comparison_enabled, original.comparison_enabled);
         assert_eq!(loaded.comparison_position, original.comparison_position);
     }

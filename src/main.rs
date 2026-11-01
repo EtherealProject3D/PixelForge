@@ -176,6 +176,8 @@ struct PixelForge {
     shadows: f32,
     whites: f32,
     blacks: f32,
+    vibrance: f32,
+    gamma: f32,
     comparison_enabled: bool,
     comparison_position: f32,
     divider_dragging: bool,
@@ -223,6 +225,8 @@ impl Default for PixelForge {
             shadows: 0.0,
             whites: 0.0,
             blacks: 0.0,
+            vibrance: 0.0,
+            gamma: 0.0,
             comparison_enabled: true,
             comparison_position: 0.5,
             divider_dragging: false,
@@ -284,6 +288,8 @@ impl PixelForge {
                 self.shadows = 0.0;
                 self.whites = 0.0;
                 self.blacks = 0.0;
+                self.vibrance = 0.0;
+                self.gamma = 0.0;
                 self.comparison_position = 0.5;
                 self.comparison_enabled = true;
                 self.divider_dragging = false;
@@ -343,6 +349,8 @@ impl PixelForge {
         self.shadows = 0.0;
         self.whites = 0.0;
         self.blacks = 0.0;
+        self.vibrance = 0.0;
+        self.gamma = 0.0;
         self.comparison_enabled = true;
         self.comparison_position = 0.5;
         self.divider_dragging = false;
@@ -494,6 +502,8 @@ impl PixelForge {
             shadows: self.shadows,
             whites: self.whites,
             blacks: self.blacks,
+            vibrance: self.vibrance,
+            gamma: self.gamma,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
         };
@@ -547,6 +557,8 @@ impl PixelForge {
         self.shadows = data.shadows;
         self.whites = data.whites;
         self.blacks = data.blacks;
+        self.vibrance = data.vibrance;
+        self.gamma = data.gamma;
         self.comparison_enabled = data.comparison_enabled;
         self.comparison_position = data.comparison_position;
 
@@ -576,6 +588,8 @@ impl PixelForge {
             || self.shadows != 0.0
             || self.whites != 0.0
             || self.blacks != 0.0
+            || self.vibrance != 0.0
+            || self.gamma != 0.0
         {
             self.update_processed_image(ctx);
         }
@@ -772,6 +786,8 @@ impl PixelForge {
             shadows: self.shadows,
             whites: self.whites,
             blacks: self.blacks,
+            vibrance: self.vibrance,
+            gamma: self.gamma,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -890,6 +906,8 @@ impl PixelForge {
         let shadows = self.shadows;
         let whites = self.whites;
         let blacks = self.blacks;
+        let vibrance = self.vibrance;
+        let gamma = self.gamma;
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -921,6 +939,8 @@ impl PixelForge {
                     shadows,
                     whites,
                     blacks,
+                    vibrance,
+                    gamma,
                 };
 
                 let total = adjusted.width() as usize * adjusted.height() as usize;
@@ -1138,7 +1158,7 @@ impl PixelForge {
         }
     }
     fn show_adjustments(&mut self, ui: &mut egui::Ui) {
-        let before = (
+        let before_adjustments = [
             self.brightness,
             self.contrast,
             self.exposure,
@@ -1149,9 +1169,11 @@ impl PixelForge {
             self.shadows,
             self.whites,
             self.blacks,
-            self.comparison_enabled,
-            self.comparison_position,
-        );
+            self.vibrance,
+            self.gamma,
+        ];
+
+        let before_comparison = (self.comparison_enabled, self.comparison_position);
         ui.horizontal(|ui| {
             ui.heading("Image Adjustments");
 
@@ -1164,7 +1186,9 @@ impl PixelForge {
                 || self.highlights != 0.0
                 || self.shadows != 0.0
                 || self.whites != 0.0
-                || self.blacks != 0.0;
+                || self.blacks != 0.0
+                || self.vibrance != 0.0
+                || self.gamma != 0.0;
 
             if ui
                 .add_enabled(can_reset, egui::Button::new("Reset All"))
@@ -1180,6 +1204,8 @@ impl PixelForge {
                 self.shadows = 0.0;
                 self.whites = 0.0;
                 self.blacks = 0.0;
+                self.vibrance = 0.0;
+                self.gamma = 0.0;
                 self.update_processed_image(ui.ctx());
             }
         });
@@ -1188,211 +1214,250 @@ impl PixelForge {
 
         let mut changed = false;
 
-        ui.label("Brightness");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.brightness, -100.0..=100.0))
-                .changed();
+        egui::CollapsingHeader::new("Light & Tone")
+            .id_salt("pixelforge_Light_and_Tone")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Exposure (EV)");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.exposure, -3.0..=3.0).step_by(0.1))
+                        .changed();
 
-            if ui
-                .add_enabled(self.brightness != 0.0, egui::Button::new("Reset"))
-                .on_hover_text("Reset brightness only")
-                .clicked()
-            {
-                self.brightness = 0.0;
-                changed = true;
-            }
-        });
+                    if ui
+                        .add_enabled(self.exposure != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.exposure = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Brightness");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.brightness, -100.0..=100.0))
+                        .changed();
 
-        ui.add_space(6.0);
+                    if ui
+                        .add_enabled(self.brightness != 0.0, egui::Button::new("Reset"))
+                        .on_hover_text("Reset brightness only")
+                        .clicked()
+                    {
+                        self.brightness = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Contrast");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.contrast, -100.0..=100.0))
+                        .changed();
 
-        ui.label("Contrast");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.contrast, -100.0..=100.0))
-                .changed();
+                    if ui
+                        .add_enabled(self.contrast != 0.0, egui::Button::new("Reset"))
+                        .on_hover_text("Reset contrast only")
+                        .clicked()
+                    {
+                        self.contrast = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Gamma");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.gamma, -100.0..=100.0))
+                        .changed();
 
-            if ui
-                .add_enabled(self.contrast != 0.0, egui::Button::new("Reset"))
-                .on_hover_text("Reset contrast only")
-                .clicked()
-            {
-                self.contrast = 0.0;
-                changed = true;
-            }
-        });
+                    if ui
+                        .add_enabled(self.gamma != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.gamma = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+            });
 
-        ui.add_space(6.0);
+        egui::CollapsingHeader::new("Tonal Range")
+            .id_salt("pixelforge_Tonal_Range")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.label("Highlights");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.highlights, -100.0..=100.0))
+                        .changed();
 
-        ui.label("Exposure (EV)");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.exposure, -3.0..=3.0).step_by(0.1))
-                .changed();
+                    if ui
+                        .add_enabled(self.highlights != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.highlights = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Shadows");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.shadows, -100.0..=100.0))
+                        .changed();
 
-            if ui
-                .add_enabled(self.exposure != 0.0, egui::Button::new("Reset"))
-                .clicked()
-            {
-                self.exposure = 0.0;
-                changed = true;
-            }
-        });
+                    if ui
+                        .add_enabled(self.shadows != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.shadows = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Whites");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.whites, -100.0..=100.0))
+                        .changed();
 
-        ui.add_space(6.0);
+                    if ui
+                        .add_enabled(self.whites != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.whites = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Blacks");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.blacks, -100.0..=100.0))
+                        .changed();
 
-        ui.label("Saturation");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.saturation, -100.0..=100.0))
-                .changed();
+                    if ui
+                        .add_enabled(self.blacks != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.blacks = 0.0;
+                        self.vibrance = 0.0;
+                        self.gamma = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+            });
 
-            if ui
-                .add_enabled(self.saturation != 0.0, egui::Button::new("Reset"))
-                .clicked()
-            {
-                self.saturation = 0.0;
-                changed = true;
-            }
-        });
+        egui::CollapsingHeader::new("Color")
+            .id_salt("pixelforge_Color")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Temperature (Cool / Warm)");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.temperature, -100.0..=100.0))
+                        .changed();
 
-        ui.add_space(6.0);
+                    if ui
+                        .add_enabled(self.temperature != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.temperature = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Tint (Green / Magenta)");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.tint, -100.0..=100.0))
+                        .changed();
 
-        ui.label("Temperature (Cool / Warm)");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.temperature, -100.0..=100.0))
-                .changed();
+                    if ui
+                        .add_enabled(self.tint != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.tint = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Saturation");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.saturation, -100.0..=100.0))
+                        .changed();
 
-            if ui
-                .add_enabled(self.temperature != 0.0, egui::Button::new("Reset"))
-                .clicked()
-            {
-                self.temperature = 0.0;
-                changed = true;
-            }
-        });
+                    if ui
+                        .add_enabled(self.saturation != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.saturation = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+                ui.label("Vibrance");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(egui::Slider::new(&mut self.vibrance, -100.0..=100.0))
+                        .changed();
 
-        ui.add_space(6.0);
-
-        ui.label("Tint (Green / Magenta)");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.tint, -100.0..=100.0))
-                .changed();
-
-            if ui
-                .add_enabled(self.tint != 0.0, egui::Button::new("Reset"))
-                .clicked()
-            {
-                self.tint = 0.0;
-                changed = true;
-            }
-        });
-
-        ui.add_space(6.0);
-
-        ui.label("Highlights");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.highlights, -100.0..=100.0))
-                .changed();
-
-            if ui
-                .add_enabled(self.highlights != 0.0, egui::Button::new("Reset"))
-                .clicked()
-            {
-                self.highlights = 0.0;
-                changed = true;
-            }
-        });
-
-        ui.add_space(6.0);
-
-        ui.label("Shadows");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.shadows, -100.0..=100.0))
-                .changed();
-
-            if ui
-                .add_enabled(self.shadows != 0.0, egui::Button::new("Reset"))
-                .clicked()
-            {
-                self.shadows = 0.0;
-                self.whites = 0.0;
-                self.blacks = 0.0;
-                changed = true;
-            }
-        });
-
-        ui.add_space(6.0);
-
-        ui.label("Whites");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.whites, -100.0..=100.0))
-                .changed();
-
-            if ui
-                .add_enabled(self.whites != 0.0, egui::Button::new("Reset"))
-                .clicked()
-            {
-                self.whites = 0.0;
-                changed = true;
-            }
-        });
-
-        ui.add_space(6.0);
-
-        ui.label("Blacks");
-        ui.horizontal(|ui| {
-            changed |= ui
-                .add(egui::Slider::new(&mut self.blacks, -100.0..=100.0))
-                .changed();
-
-            if ui
-                .add_enabled(self.blacks != 0.0, egui::Button::new("Reset"))
-                .clicked()
-            {
-                self.blacks = 0.0;
-                changed = true;
-            }
-        });
+                    if ui
+                        .add_enabled(self.vibrance != 0.0, egui::Button::new("Reset"))
+                        .clicked()
+                    {
+                        self.vibrance = 0.0;
+                        changed = true;
+                    }
+                });
+                ui.add_space(6.0);
+            });
 
         if changed {
             self.update_processed_image(ui.ctx());
         }
 
         ui.separator();
-        ui.heading("Comparison");
+        egui::CollapsingHeader::new("Before / After")
+            .id_salt("pixelforge_comparison")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.checkbox(&mut self.comparison_enabled, "Enable Before / After");
 
-        ui.checkbox(&mut self.comparison_enabled, "Enable Before / After");
+                if self.comparison_enabled {
+                    ui.label("Divider Position");
 
-        if self.comparison_enabled {
-            ui.label("Divider Position");
+                    ui.add(
+                        egui::Slider::new(&mut self.comparison_position, 0.0..=1.0)
+                            .show_value(false),
+                    );
 
-            ui.add(egui::Slider::new(&mut self.comparison_position, 0.0..=1.0).show_value(false));
+                    ui.label("Drag the divider on the image.");
+                    ui.label("Left: Original");
+                    ui.label("Right: Adjusted");
+                }
+            });
 
-            ui.label("Drag the divider on the image.");
-            ui.label("Left: Original");
-            ui.label("Right: Adjusted");
-        }
-        if before
-            != (
-                self.brightness,
-                self.contrast,
-                self.exposure,
-                self.saturation,
-                self.temperature,
-                self.tint,
-                self.highlights,
-                self.shadows,
-                self.whites,
-                self.blacks,
-                self.comparison_enabled,
-                self.comparison_position,
-            )
+        let after_adjustments = [
+            self.brightness,
+            self.contrast,
+            self.exposure,
+            self.saturation,
+            self.temperature,
+            self.tint,
+            self.highlights,
+            self.shadows,
+            self.whites,
+            self.blacks,
+            self.vibrance,
+            self.gamma,
+        ];
+
+        if before_adjustments != after_adjustments
+            || before_comparison != (self.comparison_enabled, self.comparison_position)
         {
             self.project_dirty = true;
         }
@@ -1728,7 +1793,9 @@ impl eframe::App for PixelForge {
                                     || self.highlights != 0.0
                                     || self.shadows != 0.0
                                     || self.whites != 0.0
-                                    || self.blacks != 0.0),
+                                    || self.blacks != 0.0
+                                    || self.vibrance != 0.0
+                                    || self.gamma != 0.0),
                             egui::Button::new("Reset All Adjustments"),
                         )
                         .clicked()
@@ -1744,6 +1811,8 @@ impl eframe::App for PixelForge {
                         self.shadows = 0.0;
                         self.whites = 0.0;
                         self.blacks = 0.0;
+                        self.vibrance = 0.0;
+                        self.gamma = 0.0;
                         self.project_dirty = true;
                         self.update_processed_image(ctx);
                     }
@@ -1940,7 +2009,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.2.4")
+            .with_title("PixelForge v0.2.5")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
