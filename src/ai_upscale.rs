@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -190,6 +191,8 @@ fn upscale_inner(
     let engine_dir = engine.parent().ok_or("Invalid AI engine directory")?;
 
     if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
+    // Drain stderr concurrently so Real-ESRGAN cannot block on a full pipe.
+    // Keep a bounded diagnostic tail for reporting engine failures.
     let mut process = Command::new(engine)
         .current_dir(engine_dir)
         .arg("-i")
@@ -210,23 +213,51 @@ fn upscale_inner(
         .arg("-f")
         .arg("png")
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Cannot launch Real-ESRGAN: {e}"))?;
+
+    let stderr = process.stderr.take().ok_or("Cannot capture Real-ESRGAN diagnostics")?;
+    let diagnostics = std::thread::spawn(move || {
+        let mut reader = stderr;
+        let mut buffer = [0u8; 4096];
+        let mut tail = Vec::new();
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 { break; }
+            tail.extend_from_slice(&buffer[..count]);
+            if tail.len() > 16_384 {
+                tail.drain(..tail.len() - 16_384);
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    });
 
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = process.kill();
             let _ = process.wait();
+            let _ = diagnostics.join();
             return Err("AI upscale cancelled".into());
         }
         match process.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(status)) => return Err(format!("Real-ESRGAN failed ({status})")),
+            Ok(Some(status)) if status.success() => {
+                let _ = diagnostics.join();
+                break;
+            }
+            Ok(Some(status)) => {
+                let details = diagnostics.join().unwrap_or_default();
+                let details = details.trim();
+                return Err(if details.is_empty() {
+                    format!("Real-ESRGAN failed ({status}); no diagnostics returned")
+                } else {
+                    format!("Real-ESRGAN failed ({status}): {details}")
+                });
+            },
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
             Err(e) => {
                 let _ = process.kill();
                 let _ = process.wait();
+                let _ = diagnostics.join();
                 return Err(format!("Cannot monitor Real-ESRGAN: {e}"));
             }
         }
