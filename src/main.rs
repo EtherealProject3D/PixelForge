@@ -166,6 +166,7 @@ struct PixelForge {
     export_encoding: bool,
     exporting: bool,
     export_result: Option<bool>,
+    last_export_path: Option<PathBuf>,
     contrast: f32,
     exposure: f32,
     saturation: f32,
@@ -173,6 +174,8 @@ struct PixelForge {
     tint: f32,
     highlights: f32,
     shadows: f32,
+    whites: f32,
+    blacks: f32,
     comparison_enabled: bool,
     comparison_position: f32,
     divider_dragging: bool,
@@ -210,6 +213,7 @@ impl Default for PixelForge {
             export_encoding: false,
             exporting: false,
             export_result: None,
+            last_export_path: None,
             contrast: 0.0,
             exposure: 0.0,
             saturation: 0.0,
@@ -217,6 +221,8 @@ impl Default for PixelForge {
             tint: 0.0,
             highlights: 0.0,
             shadows: 0.0,
+            whites: 0.0,
+            blacks: 0.0,
             comparison_enabled: true,
             comparison_position: 0.5,
             divider_dragging: false,
@@ -276,6 +282,8 @@ impl PixelForge {
                 self.tint = 0.0;
                 self.highlights = 0.0;
                 self.shadows = 0.0;
+                self.whites = 0.0;
+                self.blacks = 0.0;
                 self.comparison_position = 0.5;
                 self.comparison_enabled = true;
                 self.divider_dragging = false;
@@ -333,6 +341,8 @@ impl PixelForge {
         self.tint = 0.0;
         self.highlights = 0.0;
         self.shadows = 0.0;
+        self.whites = 0.0;
+        self.blacks = 0.0;
         self.comparison_enabled = true;
         self.comparison_position = 0.5;
         self.divider_dragging = false;
@@ -482,6 +492,8 @@ impl PixelForge {
             tint: self.tint,
             highlights: self.highlights,
             shadows: self.shadows,
+            whites: self.whites,
+            blacks: self.blacks,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
         };
@@ -533,6 +545,8 @@ impl PixelForge {
         self.tint = data.tint;
         self.highlights = data.highlights;
         self.shadows = data.shadows;
+        self.whites = data.whites;
+        self.blacks = data.blacks;
         self.comparison_enabled = data.comparison_enabled;
         self.comparison_position = data.comparison_position;
 
@@ -560,6 +574,8 @@ impl PixelForge {
             || self.tint != 0.0
             || self.highlights != 0.0
             || self.shadows != 0.0
+            || self.whites != 0.0
+            || self.blacks != 0.0
         {
             self.update_processed_image(ctx);
         }
@@ -754,6 +770,8 @@ impl PixelForge {
             tint: self.tint,
             highlights: self.highlights,
             shadows: self.shadows,
+            whites: self.whites,
+            blacks: self.blacks,
         };
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -870,6 +888,8 @@ impl PixelForge {
         let tint = self.tint;
         let highlights = self.highlights;
         let shadows = self.shadows;
+        let whites = self.whites;
+        let blacks = self.blacks;
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -879,6 +899,7 @@ impl PixelForge {
         self.export_encoding = false;
         self.exporting = true;
         self.export_result = None;
+        self.last_export_path = None;
         self.status = "Export started".into();
 
         std::thread::spawn(move || {
@@ -898,6 +919,8 @@ impl PixelForge {
                     tint,
                     highlights,
                     shadows,
+                    whites,
+                    blacks,
                 };
 
                 let total = adjusted.width() as usize * adjusted.height() as usize;
@@ -1096,6 +1119,7 @@ impl PixelForge {
                             self.export_progress = 1.0;
                             self.export_stage = "Export complete".into();
                             self.status = format!("Exported: {}", path.display());
+                            self.last_export_path = Some(path);
                         }
                         Err(err) => {
                             self.export_stage = "Export failed".into();
@@ -1123,6 +1147,8 @@ impl PixelForge {
             self.tint,
             self.highlights,
             self.shadows,
+            self.whites,
+            self.blacks,
             self.comparison_enabled,
             self.comparison_position,
         );
@@ -1136,7 +1162,9 @@ impl PixelForge {
                 || self.temperature != 0.0
                 || self.tint != 0.0
                 || self.highlights != 0.0
-                || self.shadows != 0.0;
+                || self.shadows != 0.0
+                || self.whites != 0.0
+                || self.blacks != 0.0;
 
             if ui
                 .add_enabled(can_reset, egui::Button::new("Reset All"))
@@ -1150,6 +1178,8 @@ impl PixelForge {
                 self.tint = 0.0;
                 self.highlights = 0.0;
                 self.shadows = 0.0;
+                self.whites = 0.0;
+                self.blacks = 0.0;
                 self.update_processed_image(ui.ctx());
             }
         });
@@ -1290,6 +1320,42 @@ impl PixelForge {
                 .clicked()
             {
                 self.shadows = 0.0;
+                self.whites = 0.0;
+                self.blacks = 0.0;
+                changed = true;
+            }
+        });
+
+        ui.add_space(6.0);
+
+        ui.label("Whites");
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.whites, -100.0..=100.0))
+                .changed();
+
+            if ui
+                .add_enabled(self.whites != 0.0, egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.whites = 0.0;
+                changed = true;
+            }
+        });
+
+        ui.add_space(6.0);
+
+        ui.label("Blacks");
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.blacks, -100.0..=100.0))
+                .changed();
+
+            if ui
+                .add_enabled(self.blacks != 0.0, egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.blacks = 0.0;
                 changed = true;
             }
         });
@@ -1322,6 +1388,8 @@ impl PixelForge {
                 self.tint,
                 self.highlights,
                 self.shadows,
+                self.whites,
+                self.blacks,
                 self.comparison_enabled,
                 self.comparison_position,
             )
@@ -1658,7 +1726,9 @@ impl eframe::App for PixelForge {
                                     || self.temperature != 0.0
                                     || self.tint != 0.0
                                     || self.highlights != 0.0
-                                    || self.shadows != 0.0),
+                                    || self.shadows != 0.0
+                                    || self.whites != 0.0
+                                    || self.blacks != 0.0),
                             egui::Button::new("Reset All Adjustments"),
                         )
                         .clicked()
@@ -1672,6 +1742,8 @@ impl eframe::App for PixelForge {
                         self.tint = 0.0;
                         self.highlights = 0.0;
                         self.shadows = 0.0;
+                        self.whites = 0.0;
+                        self.blacks = 0.0;
                         self.project_dirty = true;
                         self.update_processed_image(ctx);
                     }
@@ -1820,7 +1892,23 @@ impl eframe::App for PixelForge {
                         }
 
                         if self.export_result == Some(true) {
-                            ui.label("Image saved successfully");
+                            ui.horizontal(|ui| {
+                                ui.label("Image saved successfully");
+
+                                if ui.button("Open Image Folder").clicked() {
+                                    if let Some(path) = &self.last_export_path {
+                                        let result = std::process::Command::new("explorer.exe")
+                                            .arg("/select,")
+                                            .arg(path)
+                                            .spawn();
+
+                                        if let Err(err) = result {
+                                            self.status =
+                                                format!("Could not open image folder: {err}");
+                                        }
+                                    }
+                                }
+                            });
                         }
                     }
                 },
@@ -1852,7 +1940,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.2.3")
+            .with_title("PixelForge v0.2.4")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()

@@ -8,6 +8,8 @@ pub struct Adjustments {
     pub tint: f32,
     pub highlights: f32,
     pub shadows: f32,
+    pub whites: f32,
+    pub blacks: f32,
 }
 
 impl Adjustments {
@@ -52,8 +54,17 @@ impl Adjustments {
         let tonal_offset =
             self.shadows * 1.2 * shadow_weight + self.highlights * 1.2 * highlight_weight;
 
+        // Endpoint controls target narrower tonal ranges.
+        let white_weight = tone.powi(4);
+        let black_weight = (1.0 - tone).powi(4);
+
+        let endpoint_offset = self.whites * 1.25 * white_weight + self.blacks * 1.25 * black_weight;
+
         for channel in 0..3 {
-            let value = luminance + (rgb[channel] - luminance) * saturation_factor + tonal_offset;
+            let value = luminance
+                + (rgb[channel] - luminance) * saturation_factor
+                + tonal_offset
+                + endpoint_offset;
 
             pixel[channel] = value.clamp(0.0, 255.0).round() as u8;
         }
@@ -205,5 +216,51 @@ mod tests {
         assert_eq!(pixel[0], pixel[1]);
         assert_eq!(pixel[1], pixel[2]);
         assert_eq!(pixel[3], 190);
+    }
+
+    #[test]
+    fn whites_affect_bright_pixels_more() {
+        let mut dark = image::Rgba([40, 40, 40, 255]);
+        let mut bright = image::Rgba([210, 210, 210, 255]);
+
+        let settings = Adjustments {
+            whites: 50.0,
+            ..Default::default()
+        };
+
+        settings.apply_pixel(&mut dark);
+        settings.apply_pixel(&mut bright);
+
+        assert!(bright[0] as i32 - 210 > dark[0] as i32 - 40);
+    }
+
+    #[test]
+    fn blacks_affect_dark_pixels_more() {
+        let mut dark = image::Rgba([40, 40, 40, 255]);
+        let mut bright = image::Rgba([210, 210, 210, 255]);
+
+        let settings = Adjustments {
+            blacks: -50.0,
+            ..Default::default()
+        };
+
+        settings.apply_pixel(&mut dark);
+        settings.apply_pixel(&mut bright);
+
+        assert!(40 - dark[0] as i32 > 210 - bright[0] as i32);
+    }
+
+    #[test]
+    fn whites_and_blacks_preserve_alpha() {
+        let mut pixel = image::Rgba([100, 140, 200, 83]);
+
+        Adjustments {
+            whites: 35.0,
+            blacks: -25.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut pixel);
+
+        assert_eq!(pixel[3], 83);
     }
 }
