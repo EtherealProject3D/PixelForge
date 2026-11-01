@@ -234,6 +234,7 @@ struct PixelForge {
     selection_mask: Option<masking::SelectionMask>,
     saved_selections: Vec<(String, masking::SelectionMask)>,
     selected_saved_selection: Option<usize>,
+    active_saved_selection: Option<usize>,
     selection_name_input: String,
     selection_texture: Option<TextureHandle>,
     selection_brush_enabled: bool,
@@ -329,6 +330,7 @@ impl Default for PixelForge {
             selection_mask: None,
             saved_selections: Vec::new(),
             selected_saved_selection: None,
+            active_saved_selection: None,
             selection_name_input: String::new(),
             selection_texture: None,
             selection_brush_enabled: false,
@@ -2791,13 +2793,21 @@ impl PixelForge {
             ui.small("No saved selections yet.");
         } else {
             let mut selected = self.selected_saved_selection;
+            let mut activate = None;
 
             egui::ScrollArea::vertical()
                 .id_salt("saved_selections")
                 .max_height(130.0)
                 .show(ui, |ui| {
                     for (index, (name, _)) in self.saved_selections.iter().enumerate() {
-                        if ui.selectable_label(selected == Some(index), name).clicked() {
+                        let response = ui.selectable_label(
+                            self.active_saved_selection == Some(index),
+                            name,
+                        );
+                        if response.double_clicked() {
+                            selected = Some(index);
+                            activate = Some(index);
+                        } else if response.clicked() {
                             selected = Some(index);
                         }
                     }
@@ -2805,10 +2815,17 @@ impl PixelForge {
 
             if selected != self.selected_saved_selection {
                 self.selected_saved_selection = selected;
-
                 if let Some(index) = selected {
                     self.selection_name_input = self.saved_selections[index].0.clone();
                 }
+            }
+
+            if let Some(index) = activate {
+                self.selection_checkpoint();
+                self.selection_mask = Some(self.saved_selections[index].1.clone());
+                self.active_saved_selection = Some(index);
+                self.selection_last_point = None;
+                self.refresh_selection_overlay(&ctx);
             }
         }
 
@@ -2843,7 +2860,9 @@ impl PixelForge {
             {
                 if let Some(mask) = self.selection_mask.clone() {
                     self.saved_selections.push((name.clone(), mask));
-                    self.selected_saved_selection = Some(self.saved_selections.len() - 1);
+                    self.selected_saved_selection = None;
+                    self.selection_name_input.clear();
+                    self.active_saved_selection = None;
                     self.project_dirty = true;
                 }
             }
@@ -2858,6 +2877,7 @@ impl PixelForge {
                 if let Some(index) = self.selected_saved_selection {
                     self.selection_checkpoint();
                     self.selection_mask = Some(self.saved_selections[index].1.clone());
+                    self.active_saved_selection = Some(index);
                     self.selection_last_point = None;
                     self.refresh_selection_overlay(&ctx_for_library);
                 }
@@ -2913,6 +2933,15 @@ impl PixelForge {
         {
             if let Some(index) = self.selected_saved_selection {
                 self.saved_selections.remove(index);
+                if let Some(active) = self.active_saved_selection {
+                    self.active_saved_selection = if active == index {
+                        None
+                    } else if active > index {
+                        Some(active - 1)
+                    } else {
+                        Some(active)
+                    };
+                }
                 self.selected_saved_selection = None;
                 self.selection_name_input.clear();
                 self.project_dirty = true;
@@ -2921,8 +2950,8 @@ impl PixelForge {
 
         ui.small(
             "Save New copies the working mask. \
-             Update replaces the saved copy. \
-             Load restores a saved selection.",
+             Double-click a name to load it. \
+             Only the active selection is highlighted.",
         );
 
         ui.add_space(12.0);
@@ -3025,6 +3054,7 @@ impl PixelForge {
                     if let Some(mask) = self.selection_mask.as_mut() {
                         mask.clear();
                     }
+                    self.active_saved_selection = None;
 
                     self.refresh_selection_overlay(&ctx);
                 }
