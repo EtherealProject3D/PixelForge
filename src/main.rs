@@ -1,4 +1,5 @@
 mod adjustments;
+mod histogram;
 mod project;
 
 use eframe::egui;
@@ -155,9 +156,11 @@ enum PendingOpen {
 struct PixelForge {
     texture: Option<TextureHandle>,
     processed_texture: Option<TextureHandle>,
+    histogram: histogram::Histogram,
+    histogram_mode: histogram::HistogramMode,
     original_pixels: Option<image::RgbaImage>,
     preview_source: Option<std::sync::Arc<image::RgbaImage>>,
-    preview_rx: Option<std::sync::mpsc::Receiver<(u64, ColorImage)>>,
+    preview_rx: Option<std::sync::mpsc::Receiver<(u64, ColorImage, histogram::Histogram)>>,
     preview_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     brightness: f32,
     export_rx: Option<std::sync::mpsc::Receiver<ExportEvent>>,
@@ -204,6 +207,8 @@ impl Default for PixelForge {
         Self {
             texture: None,
             processed_texture: None,
+            histogram: histogram::Histogram::default(),
+            histogram_mode: histogram::HistogramMode::Rgb,
             original_pixels: None,
             preview_source: None,
             preview_rx: None,
@@ -327,6 +332,7 @@ impl PixelForge {
         self.texture = None;
         self.processed_texture = None;
         self.original_pixels = None;
+        self.histogram = histogram::Histogram::default();
         self.preview_source = None;
         self.preview_rx = None;
         self.preview_generation
@@ -760,6 +766,7 @@ impl PixelForge {
             original.clone()
         };
 
+        self.histogram = histogram::Histogram::from_image(&preview);
         self.preview_source = Some(std::sync::Arc::new(preview));
     }
 
@@ -815,13 +822,14 @@ impl PixelForge {
 
             let size = [adjusted.width() as usize, adjusted.height() as usize];
 
+            let hist = histogram::Histogram::from_image(&adjusted);
             let color = ColorImage::from_rgba_unmultiplied(size, adjusted.as_raw());
 
             if generation_counter.load(Ordering::Relaxed) != generation {
                 return;
             }
 
-            if tx.send((generation, color)).is_ok() {
+            if tx.send((generation, color, hist)).is_ok() {
                 ctx.request_repaint();
             }
         });
@@ -837,8 +845,9 @@ impl PixelForge {
         let result = rx.try_recv();
 
         match result {
-            Ok((generation, color)) => {
+            Ok((generation, color, hist)) => {
                 if generation == self.preview_generation.load(Ordering::Relaxed) {
+                    self.histogram = hist;
                     if let Some(texture) = &mut self.processed_texture {
                         texture.set(color, TextureOptions::LINEAR);
                     } else {
@@ -1156,6 +1165,38 @@ impl PixelForge {
         } else {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
+    }
+    fn show_histogram(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Histogram")
+            .id_salt("pixelforge_histogram")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(
+                        &mut self.histogram_mode,
+                        histogram::HistogramMode::Rgb,
+                        "RGB",
+                    );
+
+                    ui.selectable_value(
+                        &mut self.histogram_mode,
+                        histogram::HistogramMode::Luminance,
+                        "Luminance",
+                    );
+                });
+
+                ui.add_space(4.0);
+                self.histogram.show(ui, self.histogram_mode);
+
+                ui.horizontal(|ui| {
+                    ui.small("Shadows");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.small("Highlights");
+                    });
+                });
+
+                ui.small("Based on the current image preview");
+            });
     }
     fn show_adjustments(&mut self, ui: &mut egui::Ui) {
         let before_adjustments = [
@@ -1894,6 +1935,8 @@ impl eframe::App for PixelForge {
             .resizable(true)
             .show(ctx, |ui| {
                 if self.texture.is_some() {
+                    self.show_histogram(ui);
+                    ui.add_space(8.0);
                     self.show_adjustments(ui);
                     ui.add_space(12.0);
                 }
@@ -2009,7 +2052,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.2.5")
+            .with_title("PixelForge v0.3.0")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
