@@ -26,6 +26,7 @@ struct Controls {
     pan: PanButton,
     fit: FitButton,
     zoom_sensitivity: f32,
+    ui_scale: f32,
 }
 
 impl Default for Controls {
@@ -34,6 +35,7 @@ impl Default for Controls {
             pan: PanButton::Middle,
             fit: FitButton::Left,
             zoom_sensitivity: 1.0,
+            ui_scale: 1.0,
         }
     }
 }
@@ -74,6 +76,13 @@ impl Controls {
                         _ => FitButton::Left,
                     };
                 }
+                "ui_scale" => {
+                    if let Ok(value) = value.trim().parse::<f32>() {
+                        if value.is_finite() {
+                            settings.ui_scale = value.clamp(0.75, 2.0);
+                        }
+                    }
+                }
                 "zoom_sensitivity" => {
                     if let Ok(value) = value.trim().parse::<f32>() {
                         if value.is_finite() {
@@ -108,8 +117,8 @@ impl Controls {
         };
 
         let contents = format!(
-            "pan={pan}\nfit={fit}\nzoom_sensitivity={}\n",
-            self.zoom_sensitivity
+            "pan={pan}\nfit={fit}\nzoom_sensitivity={}\nui_scale={}\n",
+            self.zoom_sensitivity, self.ui_scale
         );
 
         std::fs::write(path, contents)
@@ -159,6 +168,11 @@ enum PendingOpen {
 struct PixelForge {
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
+    ai_strength: f32,
+    ai_comparison: bool,
+    ai_comparison_position: f32,
+    ai_divider_dragging: bool,
+    ai_baseline_texture: Option<TextureHandle>,
     ai_status: String,
     ai_result_texture: Option<TextureHandle>,
     ai_result_size: [u32; 2],
@@ -208,6 +222,7 @@ struct PixelForge {
     panning: bool,
     advanced: bool,
     show_settings: bool,
+    ai_tools_tab: bool,
     controls: Controls,
     status: String,
     project_path: Option<PathBuf>,
@@ -222,6 +237,11 @@ impl Default for PixelForge {
         Self {
             ai_rx: None,
             ai_running: false,
+            ai_strength: 1.0,
+            ai_comparison: true,
+            ai_comparison_position: 0.5,
+            ai_divider_dragging: false,
+            ai_baseline_texture: None,
             ai_status: String::new(),
             ai_result_texture: None,
             ai_result_size: [0, 0],
@@ -271,6 +291,15 @@ impl Default for PixelForge {
             panning: false,
             advanced: false,
             show_settings: false,
+            ai_tools_tab: std::env::var_os("APPDATA")
+                .map(|base| {
+                    std::path::PathBuf::from(base)
+                        .join("PixelForge")
+                        .join("sidebar_tab.txt")
+                })
+                .and_then(|path| std::fs::read_to_string(path).ok())
+                .map(|value| value.trim() == "ai")
+                .unwrap_or(false),
             controls: Controls::load(),
             status: "Ready".into(),
             project_path: None,
@@ -683,6 +712,35 @@ impl PixelForge {
             .default_width(390.0)
             .resizable(false)
             .show(ctx, |ui| {
+                ui.heading("Appearance");
+                ui.separator();
+
+                ui.label("User interface scale");
+
+                let scale_changed = ui
+                    .add(
+                        egui::Slider::new(&mut self.controls.ui_scale, 0.75..=2.0)
+                            .step_by(0.05)
+                            .custom_formatter(|value, _| format!("{:.0}%", value * 100.0)),
+                    )
+                    .changed();
+
+                if scale_changed {
+                    changed = true;
+                    ctx.set_pixels_per_point(
+                        ctx.native_pixels_per_point().unwrap_or(1.0) * self.controls.ui_scale,
+                    );
+                }
+
+                if ui.button("Reset UI Scale to 100%").clicked() {
+                    self.controls.ui_scale = 1.0;
+                    changed = true;
+                    ctx.set_pixels_per_point(ctx.native_pixels_per_point().unwrap_or(1.0));
+                }
+
+                ui.label("Changes apply immediately and are saved automatically.");
+
+                ui.add_space(12.0);
                 ui.heading("Mouse Controls");
                 ui.separator();
 
@@ -1244,12 +1302,14 @@ impl PixelForge {
         };
 
         let pixels = original.clone();
+        let strength = self.ai_strength;
         let (tx, rx) = std::sync::mpsc::channel();
 
         self.ai_rx = Some(rx);
         self.ai_running = true;
         self.ai_status = format!("Running Real-ESRGAN {scale}x on GPU...");
         self.ai_result_texture = None;
+        self.ai_baseline_texture = None;
         self.ai_inspect_texture = None;
         self.ai_inspect_size = [0, 0];
         self.ai_inspect_zoom = 1.0;
@@ -1261,7 +1321,7 @@ impl PixelForge {
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let result = ai_upscale::upscale(pixels, settings, scale, path);
+            let result = ai_upscale::upscale(pixels, settings, scale, strength, path);
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -1295,6 +1355,22 @@ impl PixelForge {
                 self.ai_result_texture =
                     Some(ctx.load_texture("ai_upscale_result", color, TextureOptions::LINEAR));
 
+                let baseline_size = [
+                    result.baseline_preview.width() as usize,
+                    result.baseline_preview.height() as usize,
+                ];
+
+                let baseline_color = ColorImage::from_rgba_unmultiplied(
+                    baseline_size,
+                    result.baseline_preview.as_raw(),
+                );
+
+                self.ai_baseline_texture = Some(ctx.load_texture(
+                    "ai_lanczos_comparison",
+                    baseline_color,
+                    TextureOptions::LINEAR,
+                ));
+
                 self.ai_result_size = result.dimensions;
                 self.ai_status = format!(
                     "AI upscale complete: {} x {}",
@@ -1311,7 +1387,7 @@ impl PixelForge {
         }
     }
 
-    fn show_ai_result(&mut self, ctx: &egui::Context) {
+    fn show_ai_result(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         if !self.ai_show_result {
             return;
         }
@@ -1380,146 +1456,234 @@ impl PixelForge {
             && (self.ai_inspect_size[0] as u32 != self.ai_result_size[0]
                 || self.ai_inspect_size[1] as u32 != self.ai_result_size[1]);
 
-        egui::Window::new("AI Upscale Result")
-            .open(&mut self.ai_show_result)
-            .resizable(true)
-            .default_size([850.0, 650.0])
-            .min_size([350.0, 250.0])
-            .show(ctx, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.label(format!(
-                        "Output: {} x {}",
-                        self.ai_result_size[0], self.ai_result_size[1]
-                    ));
+        ui.horizontal(|ui| {
+            ui.heading("AI Upscale Result");
 
-                    ui.separator();
+            if ui.button("Back to Editor").clicked() {
+                self.ai_show_result = false;
+                self.ai_divider_dragging = false;
+            }
+        });
 
-                    if ui.button("Fit").clicked() {
-                        self.ai_inspect_fit = true;
-                        self.ai_inspect_pan = Vec2::ZERO;
-                    }
+        ui.separator();
 
-                    if ui.button("100%").clicked() {
-                        self.ai_inspect_fit = false;
-                        self.ai_inspect_zoom = 1.0;
-                        self.ai_inspect_pan = Vec2::ZERO;
-                    }
-
-                    if ui.button("-").clicked() {
-                        self.ai_inspect_fit = false;
-                        self.ai_inspect_zoom = (self.ai_inspect_zoom / 1.25).clamp(0.05, 16.0);
-                    }
-
-                    if ui.button("+").clicked() {
-                        self.ai_inspect_fit = false;
-                        self.ai_inspect_zoom = (self.ai_inspect_zoom * 1.25).clamp(0.05, 16.0);
-                    }
-
-                    if ui.button("Reset").clicked() {
-                        self.ai_inspect_fit = true;
-                        self.ai_inspect_pan = Vec2::ZERO;
-                    }
-
-                    ui.separator();
-
-                    ui.label(format!("{:.0}%", self.ai_inspect_zoom * 100.0));
-                });
-
-                if let Some(path) = &self.ai_result_path {
-                    ui.label(path.display().to_string());
-                }
-
-                if limited {
-                    ui.small(
-                        "Inspection texture is limited to 4096 pixels on its longest side. \
-                         At 100%, image coordinates are 1:1, but fine details may be softer \
-                         than in the saved PNG.",
-                    );
-                }
-
-                ui.small(format!(
-                    "Mouse wheel: zoom | {}: pan | Fit: whole image | 100%: image pixel scale",
-                    match self.controls.pan {
-                        PanButton::Middle => "Middle-drag",
-                        PanButton::Left => "Left-drag",
-                        PanButton::SpaceLeft => "Space + Left-drag",
-                    }
+        {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(format!(
+                    "Output: {} x {}",
+                    self.ai_result_size[0], self.ai_result_size[1]
                 ));
 
                 ui.separator();
 
-                let available = ui.available_size().max(Vec2::splat(64.0));
-                let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
-
-                let fit = (rect.width() / source_size.x.max(1.0))
-                    .min(rect.height() / source_size.y.max(1.0))
-                    .min(1.0)
-                    .max(0.001);
-
-                if self.ai_inspect_fit {
-                    self.ai_inspect_zoom = fit;
+                if ui.button("Fit").clicked() {
+                    self.ai_inspect_fit = true;
                     self.ai_inspect_pan = Vec2::ZERO;
                 }
 
-                if response.hovered() {
-                    let wheel = ui.input(|i| i.raw_scroll_delta.y);
+                if ui.button("100%").clicked() {
+                    self.ai_inspect_fit = false;
+                    self.ai_inspect_zoom = 1.0;
+                    self.ai_inspect_pan = Vec2::ZERO;
+                }
 
-                    if wheel.abs() > 0.01 {
-                        self.ai_inspect_fit = false;
+                if ui.button("-").clicked() {
+                    self.ai_inspect_fit = false;
+                    self.ai_inspect_zoom = (self.ai_inspect_zoom / 1.25).clamp(0.05, 16.0);
+                }
 
-                        let old_zoom = self.ai_inspect_zoom;
-                        let new_zoom = (old_zoom * (wheel * 0.0015).exp()).clamp(0.05, 16.0);
+                if ui.button("+").clicked() {
+                    self.ai_inspect_fit = false;
+                    self.ai_inspect_zoom = (self.ai_inspect_zoom * 1.25).clamp(0.05, 16.0);
+                }
 
-                        if let Some(pointer) = response.hover_pos() {
-                            let center = rect.center();
-                            let relative = pointer - center - self.ai_inspect_pan;
+                if ui.button("Reset").clicked() {
+                    self.ai_inspect_fit = true;
+                    self.ai_inspect_pan = Vec2::ZERO;
+                }
 
-                            if old_zoom > 0.0 {
-                                self.ai_inspect_pan -= relative * (new_zoom / old_zoom - 1.0);
-                            }
+                ui.separator();
+
+                ui.label(format!("{:.0}%", self.ai_inspect_zoom * 100.0));
+            });
+
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut self.ai_comparison, "Compare Lanczos / Result");
+
+                if self.ai_comparison {
+                    ui.add(
+                        egui::Slider::new(&mut self.ai_comparison_position, 0.0..=1.0)
+                            .text("Divider"),
+                    );
+                }
+            });
+
+            if let Some(path) = &self.ai_result_path {
+                ui.label(path.display().to_string());
+            }
+
+            if limited {
+                ui.small(
+                    "Inspection texture is limited to 4096 pixels on its longest side. \
+                         At 100%, image coordinates are 1:1, but fine details may be softer \
+                         than in the saved PNG.",
+                );
+            }
+
+            ui.small(format!(
+                "Mouse wheel: zoom | {}: pan | Fit: whole image | 100%: image pixel scale",
+                match self.controls.pan {
+                    PanButton::Middle => "Middle-drag",
+                    PanButton::Left => "Left-drag",
+                    PanButton::SpaceLeft => "Space + Left-drag",
+                }
+            ));
+
+            ui.separator();
+
+            let available = ui.available_size().max(Vec2::splat(64.0));
+            let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
+
+            let fit = (rect.width() / source_size.x.max(1.0))
+                .min(rect.height() / source_size.y.max(1.0))
+                .min(1.0)
+                .max(0.001);
+
+            if self.ai_inspect_fit {
+                self.ai_inspect_zoom = fit;
+                self.ai_inspect_pan = Vec2::ZERO;
+            }
+
+            if response.hovered() {
+                let wheel = ui.input(|i| i.raw_scroll_delta.y);
+
+                if wheel.abs() > 0.01 {
+                    self.ai_inspect_fit = false;
+
+                    let old_zoom = self.ai_inspect_zoom;
+                    let new_zoom = (old_zoom * (wheel * 0.0015).exp()).clamp(0.05, 16.0);
+
+                    if let Some(pointer) = response.hover_pos() {
+                        let center = rect.center();
+                        let relative = pointer - center - self.ai_inspect_pan;
+
+                        if old_zoom > 0.0 {
+                            self.ai_inspect_pan -= relative * (new_zoom / old_zoom - 1.0);
                         }
+                    }
 
-                        self.ai_inspect_zoom = new_zoom;
+                    self.ai_inspect_zoom = new_zoom;
+                    ctx.request_repaint();
+                }
+            }
+
+            // The divider uses the primary mouse button.
+            // Capture a drag only when it begins close to
+            // the visible comparison divider.
+            if self.ai_comparison && self.ai_baseline_texture.is_some() {
+                let divider_x = rect.left() + rect.width() * self.ai_comparison_position;
+
+                if response.drag_started_by(egui::PointerButton::Primary) {
+                    let near_divider = response
+                        .interact_pointer_pos()
+                        .map(|pos| (pos.x - divider_x).abs() <= 14.0)
+                        .unwrap_or(false);
+
+                    self.ai_divider_dragging = near_divider;
+                }
+
+                if self.ai_divider_dragging {
+                    if let Some(pos) = response.interact_pointer_pos() {
+                        self.ai_comparison_position =
+                            ((pos.x - rect.left()) / rect.width().max(1.0)).clamp(0.0, 1.0);
+
                         ctx.request_repaint();
                     }
                 }
+            }
 
-                // Match the main editor's configured pan button.
-                let pan_active = match self.controls.pan {
-                    PanButton::Middle => response.dragged_by(egui::PointerButton::Middle),
-                    PanButton::Left => response.dragged_by(egui::PointerButton::Primary),
-                    PanButton::SpaceLeft => {
-                        let space_held = ui.input(|i| i.key_down(egui::Key::Space));
-                        space_held && response.dragged_by(egui::PointerButton::Primary)
-                    }
-                };
+            if response.drag_stopped() {
+                self.ai_divider_dragging = false;
+            }
 
-                if pan_active {
-                    self.ai_inspect_fit = false;
-                    self.ai_inspect_pan += ui.input(|i| i.pointer.delta());
-                    ctx.request_repaint();
+            // Match the main editor's configured pan button.
+            let pan_active = match self.controls.pan {
+                PanButton::Middle => response.dragged_by(egui::PointerButton::Middle),
+                PanButton::Left => response.dragged_by(egui::PointerButton::Primary),
+                PanButton::SpaceLeft => {
+                    let space_held = ui.input(|i| i.key_down(egui::Key::Space));
+                    space_held && response.dragged_by(egui::PointerButton::Primary)
                 }
+            };
 
-                let draw_size = source_size * self.ai_inspect_zoom;
-                let center = rect.center() + self.ai_inspect_pan;
+            if pan_active && !self.ai_divider_dragging {
+                self.ai_inspect_fit = false;
+                self.ai_inspect_pan += ui.input(|i| i.pointer.delta());
+                ctx.request_repaint();
+            }
 
-                let image_rect = Rect::from_center_size(center, draw_size);
+            let draw_size = source_size * self.ai_inspect_zoom;
+            let center = rect.center() + self.ai_inspect_pan;
 
-                let painter = ui.painter_at(rect);
+            let image_rect = Rect::from_center_size(center, draw_size);
 
-                painter.rect_filled(rect, 0.0, Color32::from_gray(30));
+            let painter = ui.painter_at(rect);
 
-                painter.image(
-                    texture_id,
-                    image_rect,
-                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
-                    Color32::WHITE,
-                );
+            painter.rect_filled(rect, 0.0, Color32::from_gray(30));
 
-                // Keep texture_size referenced to document that
-                // the displayed image can use a capped texture.
-                let _ = texture_size;
-            });
+            painter.image(
+                texture_id,
+                image_rect,
+                Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                Color32::WHITE,
+            );
+
+            if self.ai_comparison {
+                if let Some(baseline) = &self.ai_baseline_texture {
+                    let divider_x = rect.left() + rect.width() * self.ai_comparison_position;
+
+                    let left_clip =
+                        Rect::from_min_max(rect.min, Pos2::new(divider_x, rect.bottom()));
+
+                    let comparison_painter = painter.with_clip_rect(left_clip);
+
+                    comparison_painter.image(
+                        baseline.id(),
+                        image_rect,
+                        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
+                    );
+
+                    painter.line_segment(
+                        [
+                            Pos2::new(divider_x, rect.top()),
+                            Pos2::new(divider_x, rect.bottom()),
+                        ],
+                        egui::Stroke::new(2.0, Color32::LIGHT_BLUE),
+                    );
+
+                    painter.text(
+                        Pos2::new(rect.left() + 8.0, rect.top() + 8.0),
+                        egui::Align2::LEFT_TOP,
+                        "Lanczos",
+                        egui::FontId::proportional(14.0),
+                        Color32::WHITE,
+                    );
+
+                    painter.text(
+                        Pos2::new(rect.right() - 8.0, rect.top() + 8.0),
+                        egui::Align2::RIGHT_TOP,
+                        "AI Result",
+                        egui::FontId::proportional(14.0),
+                        Color32::WHITE,
+                    );
+                }
+            }
+
+            // Keep texture_size referenced to document that
+            // the displayed image can use a capped texture.
+            let _ = texture_size;
+        }
     }
     fn run_auto_enhance(&mut self, ctx: &egui::Context) {
         let Some(source) = &self.preview_source else {
@@ -2413,128 +2577,197 @@ impl eframe::App for PixelForge {
             });
         });
         egui::SidePanel::right("tools")
-            .default_width(280.0)
-            .min_width(240.0)
+            .default_width(310.0)
+            .min_width(260.0)
+            .max_width(400.0)
             .resizable(true)
             .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let edit_clicked = ui.selectable_label(!self.ai_tools_tab, "Edit").clicked();
+
+                    let ai_clicked = ui.selectable_label(self.ai_tools_tab, "AI Tools").clicked();
+
+                    if edit_clicked || ai_clicked {
+                        self.ai_tools_tab = ai_clicked;
+
+                        if let Some(base) = std::env::var_os("APPDATA") {
+                            let folder = std::path::PathBuf::from(base).join("PixelForge");
+
+                            if std::fs::create_dir_all(&folder).is_ok() {
+                                let selected = if self.ai_tools_tab { "ai" } else { "edit" };
+
+                                let _ = std::fs::write(folder.join("sidebar_tab.txt"), selected);
+                            }
+                        }
+                    }
+                });
+
+                ui.separator();
+
+                // Image information remains visible in both tabs.
+                ui.heading("Image Information");
+
+                if let Some(path) = &self.image_path {
+                    if let Some(name) = path.file_name() {
+                        ui.label(name.to_string_lossy());
+                    }
+
+                    ui.label(format!(
+                        "{} x {} pixels",
+                        self.image_size[0], self.image_size[1]
+                    ));
+
+                    ui.label(format!("{:.2} MB", self.file_size as f64 / 1_048_576.0));
+                } else {
+                    ui.label("No image loaded");
+                }
+
+                ui.separator();
+
                 egui::ScrollArea::vertical()
                     .id_salt("pixelforge_tools_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.texture.is_some() {
-                            ui.heading("Auto Enhance");
+                        if !self.ai_tools_tab {
+                            if self.texture.is_some() {
+                                ui.heading("Auto Enhance");
 
-                            if ui
-                                .add_enabled(
-                                    !self.exporting,
-                                    egui::Button::new("Auto Enhance Image"),
-                                )
-                                .clicked()
-                            {
-                                self.run_auto_enhance(ctx);
+                                if ui
+                                    .add_enabled(
+                                        !self.exporting,
+                                        egui::Button::new("Auto Enhance Image"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.run_auto_enhance(ctx);
+                                }
+
+                                ui.label(
+                                    "Automatic exposure, tonal and color correction. \
+                         Fine-tune the results with the sliders below.",
+                                );
+
+                                ui.add_space(10.0);
+                                self.show_histogram(ui);
+                                ui.add_space(8.0);
+                                self.show_image_analysis(ui);
+                                ui.add_space(8.0);
+                                self.show_adjustments(ui);
+                                ui.add_space(12.0);
                             }
 
-                            ui.small(
-                                "Automatic exposure, tonal and color correction. \
-                         Fine-tune the results with the sliders below.",
+                            if self.advanced {
+                                ui.separator();
+                                ui.heading("Advanced");
+                                ui.label("Layers and masks coming soon.");
+                            }
+                        } else {
+                            ui.heading("AI Upscaling");
+                            ui.separator();
+                            ui.label("Real-ESRGAN");
+
+                            ui.add_space(8.0);
+
+                            ui.horizontal(|ui| {
+                                ui.label("AI Strength");
+
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(format!("{:.0}%", self.ai_strength * 100.0));
+                                    },
+                                );
+                            });
+
+                            // egui Slider has its own internal width.
+                            // Set that width explicitly rather than
+                            // just enlarging its allocated rectangle.
+                            let old_slider_width = ui.spacing().slider_width;
+
+                            ui.spacing_mut().slider_width = (ui.available_width() - 20.0).max(80.0);
+
+                            ui.add(
+                                egui::Slider::new(&mut self.ai_strength, 0.0..=1.0)
+                                    .step_by(0.05)
+                                    .show_value(false),
                             );
 
-                            ui.add_space(10.0);
-                            self.show_histogram(ui);
+                            ui.spacing_mut().slider_width = old_slider_width;
+
+                            ui.label("Blend conventional resizing with AI");
+
                             ui.add_space(8.0);
-                            self.show_image_analysis(ui);
-                            ui.add_space(8.0);
-                            self.show_adjustments(ui);
-                            ui.add_space(12.0);
-                        }
 
-                        ui.heading("Image Tools");
-                        ui.separator();
-
-                        ui.label("AI Upscaling - Real-ESRGAN");
-
-                        ui.horizontal(|ui| {
-                            if ui
-                                .add_enabled(
-                                    !self.ai_running
-                                        && !self.exporting
-                                        && self.original_pixels.is_some(),
-                                    egui::Button::new("AI 2x"),
-                                )
-                                .clicked()
-                            {
-                                self.start_ai_upscale(ctx, 2);
-                            }
-
-                            if ui
-                                .add_enabled(
-                                    !self.ai_running
-                                        && !self.exporting
-                                        && self.original_pixels.is_some(),
-                                    egui::Button::new("AI 4x"),
-                                )
-                                .clicked()
-                            {
-                                self.start_ai_upscale(ctx, 4);
-                            }
-                        });
-
-                        if self.ai_running {
                             ui.horizontal(|ui| {
-                                ui.spinner();
-                                ui.label("GPU inference running...");
+                                let enabled = !self.ai_running
+                                    && !self.exporting
+                                    && self.original_pixels.is_some();
+
+                                let spacing = ui.spacing().item_spacing.x;
+                                let width = ((ui.available_width() - spacing) / 2.0).max(60.0);
+
+                                if ui
+                                    .add_enabled(
+                                        enabled,
+                                        egui::Button::new("Upscale 2x")
+                                            .min_size(egui::vec2(width, 36.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.start_ai_upscale(ctx, 2);
+                                }
+
+                                if ui
+                                    .add_enabled(
+                                        enabled,
+                                        egui::Button::new("Upscale 4x")
+                                            .min_size(egui::vec2(width, 36.0)),
+                                    )
+                                    .clicked()
+                                {
+                                    self.start_ai_upscale(ctx, 4);
+                                }
                             });
-                        }
-
-                        if !self.ai_status.is_empty() {
-                            ui.small(&self.ai_status);
-                        }
-
-                        if self.ai_result_texture.is_some() {
-                            if ui.button("Show AI Result").clicked() {
-                                self.ai_show_result = true;
+                            if self.ai_running {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    ui.label("GPU inference running...");
+                                });
                             }
 
-                            if ui.button("Open Output Folder").clicked() {
-                                if let Some(path) = &self.ai_result_path {
-                                    let _ = std::process::Command::new("explorer.exe")
-                                        .arg("/select,")
-                                        .arg(path)
-                                        .spawn();
+                            if !self.ai_status.is_empty() {
+                                ui.label(&self.ai_status);
+                            }
+
+                            if self.ai_result_texture.is_some() {
+                                if ui.button("Show AI Result").clicked() {
+                                    self.ai_show_result = true;
+                                }
+
+                                if ui.button("Open Output Folder").clicked() {
+                                    if let Some(path) = &self.ai_result_path {
+                                        let _ = std::process::Command::new("explorer.exe")
+                                            .arg("/select,")
+                                            .arg(path)
+                                            .spawn();
+                                    }
                                 }
                             }
-                        }
 
-                        ui.separator();
-                        ui.label("Restoration");
-                        ui.add_enabled(false, egui::Button::new("Denoise"));
-                        ui.add_enabled(false, egui::Button::new("Deblur"));
-                        ui.add_enabled(false, egui::Button::new("Restore Faces"));
-
-                        if self.advanced {
+                            ui.add_space(12.0);
                             ui.separator();
-                            ui.heading("Advanced");
-                            ui.label("Layers and masks coming soon.");
-                        }
 
-                        if let Some(path) = &self.image_path {
-                            ui.separator();
-                            ui.heading("Image Information");
+                            ui.heading("Restoration");
+                            ui.label("Additional AI tools coming later");
 
-                            if let Some(name) = path.file_name() {
-                                ui.label(name.to_string_lossy());
-                            }
+                            ui.add_enabled(false, egui::Button::new("Denoise"));
 
-                            ui.label(format!(
-                                "{} x {} pixels",
-                                self.image_size[0], self.image_size[1]
-                            ));
+                            ui.add_enabled(false, egui::Button::new("Deblur"));
 
-                            ui.label(format!("{:.2} MB", self.file_size as f64 / 1_048_576.0));
+                            ui.add_enabled(false, egui::Button::new("Restore Faces"));
                         }
                     });
             });
-
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), 76.0),
@@ -2598,21 +2831,34 @@ impl eframe::App for PixelForge {
             });
         });
         egui::CentralPanel::default().show(ctx, |ui| {
-            self.show_viewer(ui);
+            if self.ai_show_result {
+                self.show_ai_result(ctx, ui);
+            } else {
+                self.show_viewer(ui);
+            }
         });
 
         self.show_controls_settings(ctx);
         self.show_unsaved_prompt(ctx);
         self.show_exit_confirmation(ctx);
-        self.show_ai_result(ctx);
     }
 }
 
 fn main() -> eframe::Result {
+    let icon_image = image::load_from_memory(include_bytes!("../assets/pixelforge_window.png"))
+        .expect("Failed to load PixelForge window icon")
+        .into_rgba8();
+
+    let icon_data = egui::IconData {
+        rgba: icon_image.as_raw().clone(),
+        width: icon_image.width(),
+        height: icon_image.height(),
+    };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.4.0")
-            .with_inner_size([1280.0, 800.0])
+            .with_title("PixelForge v0.5.0-dev")
+            .with_icon(icon_data)
+            .with_maximized(true)
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
     };
@@ -2622,6 +2868,12 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+
+            let controls = Controls::load();
+            let native_scale = cc.egui_ctx.native_pixels_per_point().unwrap_or(1.0);
+
+            cc.egui_ctx
+                .set_pixels_per_point(native_scale * controls.ui_scale);
             Ok(Box::new(PixelForge::default()))
         }),
     )

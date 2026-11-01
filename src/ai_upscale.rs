@@ -7,6 +7,7 @@ use image::RgbaImage;
 pub struct UpscaleResult {
     pub path: PathBuf,
     pub preview: RgbaImage,
+    pub baseline_preview: RgbaImage,
     pub dimensions: [u32; 2],
 }
 
@@ -49,6 +50,7 @@ pub fn upscale(
     mut original: RgbaImage,
     settings: crate::adjustments::Adjustments,
     scale: u32,
+    strength: f32,
     destination: PathBuf,
 ) -> Result<UpscaleResult, String> {
     let expected = expected_dimensions(original.width(), original.height(), scale)?;
@@ -82,6 +84,7 @@ pub fn upscale(
         &mut original,
         &settings,
         scale,
+        strength,
         expected,
         &destination,
         &engine,
@@ -97,6 +100,7 @@ fn upscale_inner(
     original: &mut RgbaImage,
     settings: &crate::adjustments::Adjustments,
     scale: u32,
+    strength: f32,
     expected: [u32; 2],
     destination: &Path,
     engine: &Path,
@@ -177,6 +181,31 @@ fn upscale_inner(
 
     validate_dimensions(&result, expected, "Final AI result")?;
 
+    // Compare against a conventional high-quality resize.
+    // Both paths use the same adjusted source pixels.
+    let baseline = image::imageops::resize(
+        original,
+        expected[0],
+        expected[1],
+        image::imageops::FilterType::Lanczos3,
+    );
+
+    let strength = strength.clamp(0.0, 1.0);
+    let mut result = result;
+
+    if strength < 1.0 {
+        for (out, conventional) in result.pixels_mut().zip(baseline.pixels()) {
+            for channel in 0..4 {
+                let a = conventional.0[channel] as f32;
+                let b = out.0[channel] as f32;
+
+                out.0[channel] = (a * (1.0 - strength) + b * strength)
+                    .round()
+                    .clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+
     // Build a smaller UI preview before saving the
     // full-resolution result.
     let dimensions = [result.width(), result.height()];
@@ -198,6 +227,23 @@ fn upscale_inner(
         )
     } else {
         result.clone()
+    };
+
+    let baseline_preview = if longest > 1200 {
+        let ratio = 1200.0 / longest as f64;
+
+        let width = ((dimensions[0] as f64 * ratio).round() as u32).max(1);
+
+        let height = ((dimensions[1] as f64 * ratio).round() as u32).max(1);
+
+        image::imageops::resize(
+            &baseline,
+            width,
+            height,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        baseline
     };
 
     // Save to a temporary sibling file, verify it,
@@ -250,6 +296,7 @@ fn upscale_inner(
     Ok(UpscaleResult {
         path: destination.to_path_buf(),
         preview,
+        baseline_preview,
         dimensions,
     })
 }
