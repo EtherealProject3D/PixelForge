@@ -62,42 +62,60 @@ pub fn install(index: usize, folder: PathBuf, progress: Arc<AtomicU64>,
     Ok(destination)
 }
 
-/// Find an existing checkpoint folder, preferring the directory that already
-/// contains a known installed SDXL checkpoint. Never guess if ambiguous.
+/// Resolve ComfyUI Desktop's extra-model-paths YAML, then verify the folder
+/// contains a checkpoint reported by the running backend.
 pub fn detect_checkpoint_folder(known: &[String]) -> Option<PathBuf> {
     let mut roots = Vec::new();
+    if let Some(roaming) = std::env::var_os("APPDATA") {
+        let configs = PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths");
+        if let Ok(files) = fs::read_dir(configs) {
+            for file in files.flatten() {
+                let path = file.path();
+                if !matches!(path.extension().and_then(|x| x.to_str()), Some("yaml" | "yml")) { continue; }
+                if let Ok(content) = fs::read_to_string(&path) {
+                    if let Ok(config) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                        if let Some(sections) = config.as_mapping() {
+                            for section in sections.values() {
+                                let Some(mapping) = section.as_mapping() else { continue };
+                                let base = mapping.get(serde_yaml::Value::String("base_path".into()))
+                                    .and_then(|v| v.as_str()).map(PathBuf::from);
+                                let checkpoints = mapping.get(serde_yaml::Value::String("checkpoints".into()))
+                                    .and_then(|v| v.as_str());
+                                if let Some(checkpoints) = checkpoints {
+                                    for line in checkpoints.lines().map(str::trim).filter(|x| !x.is_empty()) {
+                                        let p = PathBuf::from(line);
+                                        roots.push(if p.is_absolute() { p } else if let Some(base) = &base { base.join(p) } else { continue });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
     if let Some(local) = std::env::var_os("LOCALAPPDATA") {
         let root = PathBuf::from(local).join("Comfy-Desktop/ComfyUI-Installs");
         if let Ok(installs) = fs::read_dir(root) {
             for install in installs.flatten() {
                 roots.push(install.path().join("ComfyUI/models/checkpoints"));
-                roots.push(install.path().join("ComfyUI/user/default/models/checkpoints"));
             }
         }
-    }
-    if let Some(roaming) = std::env::var_os("APPDATA") {
-        let root = PathBuf::from(roaming).join("Comfy Desktop");
-        roots.push(root.join("models/checkpoints"));
-    }
-    if let Some(home) = std::env::var_os("USERPROFILE") {
-        let home = PathBuf::from(home);
-        roots.push(home.join("Documents/ComfyUI/models/checkpoints"));
-        roots.push(home.join("ComfyUI/models/checkpoints"));
     }
     let mut matched = Vec::new();
     for root in roots {
         if !root.is_dir() { continue; }
-        if let Ok(files) = fs::read_dir(&root) {
-            let found = files.flatten().any(|entry| {
-                let filename = entry.file_name().to_string_lossy().to_lowercase();
-                known.iter().any(|model| {
-                    let name = Path::new(model).file_name()
-                        .map(|name| name.to_string_lossy().to_lowercase())
-                        .unwrap_or_default();
-                    !name.is_empty() && filename == name
-                })
-            });
-            if found && !matched.contains(&root) { matched.push(root); }
+        let found = fs::read_dir(&root).ok().is_some_and(|files| files.flatten().any(|entry| {
+            let filename = entry.file_name().to_string_lossy().to_lowercase();
+            known.iter().any(|model| {
+                let name = Path::new(model).file_name()
+                    .map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
+                !name.is_empty() && filename == name
+            })
+        }));
+        if found {
+            let canonical = root.canonicalize().unwrap_or(root);
+            if !matched.contains(&canonical) { matched.push(canonical); }
         }
     }
     if matched.len() == 1 { matched.pop() } else { None }
