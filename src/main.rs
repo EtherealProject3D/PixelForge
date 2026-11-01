@@ -202,6 +202,8 @@ struct PixelForge {
     generation_seed: u64,
     generation_rx: Option<std::sync::mpsc::Receiver<Result<image::RgbaImage, String>>>,
     generation_running: bool,
+    generation_started: Option<std::time::Instant>,
+    generation_models_rx: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
     generation_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     generation_image: Option<image::RgbaImage>,
     generation_texture: Option<TextureHandle>,
@@ -343,6 +345,8 @@ impl Default for PixelForge {
             generation_seed: 42,
             generation_rx: None,
             generation_running: false,
+            generation_started: None,
+            generation_models_rx: None,
             generation_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             generation_image: None,
             generation_texture: None,
@@ -566,6 +570,7 @@ impl PixelForge {
         let (tx, rx) = std::sync::mpsc::channel();
         self.generation_rx = Some(rx);
         self.generation_running = true;
+        self.generation_started = Some(std::time::Instant::now());
         self.generation_status = "Generating locally with ComfyUI...".into();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
@@ -576,19 +581,37 @@ impl PixelForge {
     }
 
     fn poll_generation(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.generation_models_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.generation_models_rx = None;
+                match result {
+                    Ok(models) => {
+                        if !models.contains(&self.generation_checkpoint) {
+                            self.generation_checkpoint = models.first().cloned().unwrap_or_default();
+                        }
+                        self.generation_status = format!("Found {} local checkpoints", models.len());
+                        self.generation_checkpoints = models;
+                    }
+                    Err(error) => self.generation_status = format!("{error} ({elapsed:.1}s elapsed)"),
+                }
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
+        }
         if !self.generation_running { return; }
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
         let result = self.generation_rx.as_ref().and_then(|rx| rx.try_recv().ok());
         if let Some(result) = result {
             self.generation_running = false;
             self.generation_rx = None;
+            let elapsed = self.generation_started.take().map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
             match result {
                 Ok(image) => {
                     let size = [image.width() as usize, image.height() as usize];
                     let preview = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
                     self.generation_texture = Some(ctx.load_texture("generated_preview", preview, TextureOptions::LINEAR));
                     self.generation_image = Some(image);
-                    self.generation_status = "Generation complete. Open the result in the editor.".into();
+                    self.generation_status = format!("Generation complete in {elapsed:.1}s. Open the result in the editor.");
                 }
                 Err(error) => self.generation_status = error,
             }
@@ -4229,15 +4252,16 @@ impl eframe::App for PixelForge {
                             ui.heading("Image Generation");
                             ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
                             if ui.button("Connect / Refresh Models").clicked() {
-                                match ai_generation::checkpoints() {
-                                    Ok(models) => {
-                                        if !models.contains(&self.generation_checkpoint) {
-                                            self.generation_checkpoint = models.first().cloned().unwrap_or_default();
-                                        }
-                                        self.generation_status = format!("Found {} local checkpoints", models.len());
-                                        self.generation_checkpoints = models;
-                                    }
-                                    Err(error) => self.generation_status = error,
+                                if self.generation_models_rx.is_none() {
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    self.generation_models_rx = Some(rx);
+                                    self.generation_status = "Connecting to local ComfyUI (starting backend if needed)...".into();
+                                    let ctx = ctx.clone();
+                                    std::thread::spawn(move || {
+                                        let result = ai_generation::checkpoints();
+                                        let _ = tx.send(result);
+                                        ctx.request_repaint();
+                                    });
                                 }
                             }
                             egui::ComboBox::from_label("Checkpoint")
@@ -4274,6 +4298,9 @@ impl eframe::App for PixelForge {
                                     self.generation_status = "Cancelling generation...".into();
                                 }
                             });
+                            if let Some(started) = self.generation_started {
+                                ui.label(format!("Generation elapsed: {:.1}s", started.elapsed().as_secs_f32()));
+                            }
                             ui.label(&self.generation_status);
                             if let Some(texture) = &self.generation_texture {
                                 let width = ui.available_width().max(80.0);
@@ -4543,4 +4570,11 @@ fn main() -> eframe::Result {
             Ok(Box::new(PixelForge::default()))
         }),
     )
+}
+
+impl Drop for PixelForge {
+    fn drop(&mut self) {
+        self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        ai_generation::stop_managed_backend();
+    }
 }
