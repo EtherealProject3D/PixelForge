@@ -71,10 +71,16 @@ pub fn run(
     cancel: Arc<AtomicBool>,
 ) -> Result<crate::ai_upscale::UpscaleResult, String> {
     if cancel.load(Ordering::Relaxed) { return Err(format!("AI {} cancelled", operation.name())); }
-    let engine = engine_path(operation);
-    if !engine.is_file() {
-        return Err(format!("AI {} neural inference engine not installed at {}. This feature requires a compatible external model runner; no conventional filter was substituted.", operation.name(), engine.display()));
-    }
+    if operation != Operation::Deblur { return Err("Use the dedicated Real-ESRGAN sharpen pipeline".into()); }
+    let relative = PathBuf::from("tools").join("restoration");
+    let bundled = std::env::current_exe().ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(&relative)));
+    let folder = bundled.filter(|dir| dir.join("nafnet_deblur.py").is_file())
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&relative));
+    let script = folder.join("nafnet_deblur.py");
+    let model = folder.join("deblurring_nafnet_2025may.onnx");
+    if !script.is_file() { return Err(format!("NAFNet runner missing: {}", script.display())); }
+    if !model.is_file() { return Err(format!("Download the OpenCV NAFNet ONNX model to {}", model.display())); }
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
     let work = std::env::temp_dir().join(format!("pixelforge_restore_{}_{}", std::process::id(), stamp));
     std::fs::create_dir_all(&work).map_err(|e| format!("Cannot create restoration workspace: {e}"))?;
@@ -84,10 +90,12 @@ pub fn run(
         let input = work.join("input.png");
         let output = work.join("output.png");
         original.save(&input).map_err(|e| format!("Cannot prepare AI restoration input: {e}"))?;
-        let mut process = Command::new(&engine)
+        let mut process = Command::new("py")
+            .arg("-3").arg(&script)
             .arg("--input").arg(&input).arg("--output").arg(&output)
+            .arg("--model").arg(&model)
             .stdout(Stdio::null()).stderr(Stdio::piped())
-            .spawn().map_err(|e| format!("Cannot launch AI {}: {e}", operation.name()))?;
+            .spawn().map_err(|e| format!("Cannot launch Python NAFNet runner: {e}. Install Python 3 with the Windows py launcher."))?;
         let stderr = process.stderr.take().ok_or("Cannot capture restoration diagnostics")?;
         let reader = std::thread::spawn(move || {
             let mut pipe = stderr;
