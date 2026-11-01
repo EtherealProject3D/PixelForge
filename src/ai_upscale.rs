@@ -1,0 +1,313 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use image::RgbaImage;
+
+pub struct UpscaleResult {
+    pub path: PathBuf,
+    pub preview: RgbaImage,
+    pub dimensions: [u32; 2],
+}
+
+pub fn engine_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tools")
+        .join("realesrgan")
+        .join("realesrgan-ncnn-vulkan.exe")
+}
+
+fn expected_dimensions(width: u32, height: u32, scale: u32) -> Result<[u32; 2], String> {
+    if scale != 2 && scale != 4 {
+        return Err(format!("Unsupported AI scale: {scale}"));
+    }
+
+    let width = width.checked_mul(scale).ok_or("Upscaled width overflow")?;
+
+    let height = height
+        .checked_mul(scale)
+        .ok_or("Upscaled height overflow")?;
+
+    Ok([width, height])
+}
+
+fn validate_dimensions(image: &RgbaImage, expected: [u32; 2], label: &str) -> Result<(), String> {
+    if image.width() != expected[0] || image.height() != expected[1] {
+        return Err(format!(
+            "{label}: expected {}x{}, got {}x{}",
+            expected[0],
+            expected[1],
+            image.width(),
+            image.height()
+        ));
+    }
+
+    Ok(())
+}
+
+pub fn upscale(
+    mut original: RgbaImage,
+    settings: crate::adjustments::Adjustments,
+    scale: u32,
+    destination: PathBuf,
+) -> Result<UpscaleResult, String> {
+    let expected = expected_dimensions(original.width(), original.height(), scale)?;
+
+    // Validate the native 4x intermediate dimensions too.
+    let _native_dimensions = expected_dimensions(original.width(), original.height(), 4)?;
+
+    let engine = engine_path();
+
+    if !engine.is_file() {
+        return Err(format!(
+            "Real-ESRGAN engine not found: {}",
+            engine.display()
+        ));
+    }
+
+    if destination.exists() {
+        return Err("Output file already exists. Choose another filename.".into());
+    }
+
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+
+    let work = std::env::temp_dir().join(format!("pixelforge_ai_{}_{}", std::process::id(), stamp));
+
+    std::fs::create_dir_all(&work).map_err(|e| format!("Cannot create AI work folder: {e}"))?;
+
+    let result = upscale_inner(
+        &mut original,
+        &settings,
+        scale,
+        expected,
+        &destination,
+        &engine,
+        &work,
+    );
+
+    let _ = std::fs::remove_dir_all(&work);
+
+    result
+}
+
+fn upscale_inner(
+    original: &mut RgbaImage,
+    settings: &crate::adjustments::Adjustments,
+    scale: u32,
+    expected: [u32; 2],
+    destination: &Path,
+    engine: &Path,
+    work: &Path,
+) -> Result<UpscaleResult, String> {
+    // Apply the existing PixelForge adjustments to the
+    // full-resolution image before neural-network inference.
+    for pixel in original.pixels_mut() {
+        settings.apply_pixel(pixel);
+    }
+
+    let input = work.join("input.png");
+    let output = work.join("native_4x.png");
+
+    original
+        .save(&input)
+        .map_err(|e| format!("Cannot prepare AI input: {e}"))?;
+
+    let engine_dir = engine.parent().ok_or("Invalid AI engine directory")?;
+
+    let process = Command::new(engine)
+        .current_dir(engine_dir)
+        .arg("-i")
+        .arg(&input)
+        .arg("-o")
+        .arg(&output)
+        .arg("-n")
+        .arg("realesrgan-x4plus")
+        .arg("-m")
+        .arg(engine_dir.join("models"))
+        .arg("-s")
+        // Always run the model at its native scale.
+        .arg("4")
+        .arg("-t")
+        .arg("0")
+        .arg("-f")
+        .arg("png")
+        .output()
+        .map_err(|e| format!("Cannot launch Real-ESRGAN: {e}"))?;
+
+    if !process.status.success() {
+        let stderr = String::from_utf8_lossy(&process.stderr);
+        let stdout = String::from_utf8_lossy(&process.stdout);
+
+        return Err(format!(
+            "Real-ESRGAN failed ({}): {} {}",
+            process.status,
+            stderr.trim(),
+            stdout.trim()
+        ));
+    }
+
+    if !output.is_file() {
+        return Err("Real-ESRGAN did not produce an output image".into());
+    }
+
+    let native = image::open(&output)
+        .map_err(|e| format!("Cannot decode AI output: {e}"))?
+        .to_rgba8();
+
+    let native_expected = expected_dimensions(original.width(), original.height(), 4)?;
+
+    validate_dimensions(&native, native_expected, "Native 4x AI result")?;
+
+    // For 2x, run genuine 4x AI inference first and
+    // downsample with Lanczos3. This avoids the
+    // problematic direct 2x inference path.
+    let result = if scale == 2 {
+        image::imageops::resize(
+            &native,
+            expected[0],
+            expected[1],
+            image::imageops::FilterType::Lanczos3,
+        )
+    } else {
+        native
+    };
+
+    validate_dimensions(&result, expected, "Final AI result")?;
+
+    // Build a smaller UI preview before saving the
+    // full-resolution result.
+    let dimensions = [result.width(), result.height()];
+
+    let longest = dimensions[0].max(dimensions[1]);
+
+    let preview = if longest > 1200 {
+        let ratio = 1200.0 / longest as f64;
+
+        let width = ((dimensions[0] as f64 * ratio).round() as u32).max(1);
+
+        let height = ((dimensions[1] as f64 * ratio).round() as u32).max(1);
+
+        image::imageops::resize(
+            &result,
+            width,
+            height,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        result.clone()
+    };
+
+    // Save to a temporary sibling file, verify it,
+    // then move it to the requested destination.
+    let file_name = destination
+        .file_name()
+        .ok_or("Invalid AI output filename")?
+        .to_string_lossy();
+
+    let temporary_destination =
+        destination.with_file_name(format!(".{file_name}.pixelforge-partial.png"));
+
+    if temporary_destination.exists() {
+        return Err("A previous partial output file exists. Remove it before retrying.".into());
+    }
+
+    let save_result = (|| -> Result<(), String> {
+        result
+            .save_with_format(&temporary_destination, image::ImageFormat::Png)
+            .map_err(|e| format!("Cannot save AI PNG: {e}"))?;
+
+        let saved = image::image_dimensions(&temporary_destination)
+            .map_err(|e| format!("Cannot verify saved PNG: {e}"))?;
+
+        if saved != (expected[0], expected[1]) {
+            return Err(format!(
+                "Saved dimensions incorrect: {}x{}",
+                saved.0, saved.1
+            ));
+        }
+
+        // A newly created output must not overwrite an
+        // existing image.
+        if destination.exists() {
+            return Err("Destination appeared during processing; refusing to overwrite.".into());
+        }
+
+        std::fs::rename(&temporary_destination, destination)
+            .map_err(|e| format!("Cannot finalize AI PNG: {e}"))?;
+
+        Ok(())
+    })();
+
+    if save_result.is_err() {
+        let _ = std::fs::remove_file(&temporary_destination);
+    }
+
+    save_result?;
+
+    Ok(UpscaleResult {
+        path: destination.to_path_buf(),
+        preview,
+        dimensions,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn engine_path_is_predictable() {
+        assert!(
+            engine_path()
+                .to_string_lossy()
+                .contains("realesrgan-ncnn-vulkan.exe")
+        );
+    }
+
+    #[test]
+    fn two_x_dimensions_are_correct() {
+        assert_eq!(expected_dimensions(2048, 2048, 2).unwrap(), [4096, 4096]);
+    }
+
+    #[test]
+    fn four_x_dimensions_are_correct() {
+        assert_eq!(expected_dimensions(2048, 2048, 4).unwrap(), [8192, 8192]);
+    }
+
+    #[test]
+    fn invalid_scale_is_rejected() {
+        assert!(expected_dimensions(10, 10, 3).is_err());
+    }
+
+    #[test]
+    fn overflow_is_rejected() {
+        assert!(expected_dimensions(u32::MAX, 10, 4).is_err());
+    }
+
+    #[test]
+    fn correct_dimensions_pass() {
+        let img = RgbaImage::new(16, 16);
+
+        assert!(validate_dimensions(&img, [16, 16], "test").is_ok());
+    }
+
+    #[test]
+    fn incorrect_dimensions_fail() {
+        let img = RgbaImage::new(16, 16);
+
+        assert!(validate_dimensions(&img, [32, 32], "test").is_err());
+    }
+
+    #[test]
+    fn lanczos_downsample_has_correct_size() {
+        let native = RgbaImage::new(40, 40);
+
+        let reduced =
+            image::imageops::resize(&native, 20, 20, image::imageops::FilterType::Lanczos3);
+
+        assert_eq!(reduced.dimensions(), (20, 20));
+    }
+}

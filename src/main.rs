@@ -1,4 +1,5 @@
 mod adjustments;
+mod ai_upscale;
 mod analysis;
 mod auto_enhance;
 mod histogram;
@@ -156,6 +157,18 @@ enum PendingOpen {
 }
 
 struct PixelForge {
+    ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
+    ai_running: bool,
+    ai_status: String,
+    ai_result_texture: Option<TextureHandle>,
+    ai_result_size: [u32; 2],
+    ai_result_path: Option<PathBuf>,
+    ai_show_result: bool,
+    ai_inspect_texture: Option<TextureHandle>,
+    ai_inspect_size: [usize; 2],
+    ai_inspect_zoom: f32,
+    ai_inspect_pan: Vec2,
+    ai_inspect_fit: bool,
     texture: Option<TextureHandle>,
     processed_texture: Option<TextureHandle>,
     histogram: histogram::Histogram,
@@ -207,6 +220,18 @@ struct PixelForge {
 impl Default for PixelForge {
     fn default() -> Self {
         Self {
+            ai_rx: None,
+            ai_running: false,
+            ai_status: String::new(),
+            ai_result_texture: None,
+            ai_result_size: [0, 0],
+            ai_result_path: None,
+            ai_show_result: false,
+            ai_inspect_texture: None,
+            ai_inspect_size: [0, 0],
+            ai_inspect_zoom: 1.0,
+            ai_inspect_pan: Vec2::ZERO,
+            ai_inspect_fit: true,
             texture: None,
             processed_texture: None,
             histogram: histogram::Histogram::default(),
@@ -1168,6 +1193,334 @@ impl PixelForge {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
+    fn start_ai_upscale(&mut self, ctx: &egui::Context, scale: u32) {
+        if self.ai_running || self.exporting {
+            self.ai_status = "Another operation is running".into();
+            return;
+        }
+
+        let Some(original) = &self.original_pixels else {
+            self.ai_status = "Open an image first".into();
+            return;
+        };
+
+        let stem = self
+            .image_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".to_string());
+
+        let suggested = format!("{stem}_AI_{scale}x.png");
+
+        let Some(mut path) = rfd::FileDialog::new()
+            .add_filter("PNG Image", &["png"])
+            .set_file_name(&suggested)
+            .save_file()
+        else {
+            return;
+        };
+
+        path.set_extension("png");
+
+        if path.exists() {
+            self.ai_status = "Output already exists. Choose another filename.".into();
+            return;
+        }
+
+        let settings = adjustments::Adjustments {
+            brightness: self.brightness,
+            contrast: self.contrast,
+            exposure: self.exposure,
+            saturation: self.saturation,
+            temperature: self.temperature,
+            tint: self.tint,
+            highlights: self.highlights,
+            shadows: self.shadows,
+            whites: self.whites,
+            blacks: self.blacks,
+            vibrance: self.vibrance,
+            gamma: self.gamma,
+        };
+
+        let pixels = original.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        self.ai_rx = Some(rx);
+        self.ai_running = true;
+        self.ai_status = format!("Running Real-ESRGAN {scale}x on GPU...");
+        self.ai_result_texture = None;
+        self.ai_inspect_texture = None;
+        self.ai_inspect_size = [0, 0];
+        self.ai_inspect_zoom = 1.0;
+        self.ai_inspect_pan = Vec2::ZERO;
+        self.ai_inspect_fit = true;
+        self.ai_result_path = None;
+        self.ai_show_result = false;
+
+        let ctx = ctx.clone();
+
+        std::thread::spawn(move || {
+            let result = ai_upscale::upscale(pixels, settings, scale, path);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_ai_upscale(&mut self, ctx: &egui::Context) {
+        if !self.ai_running {
+            return;
+        }
+
+        ctx.request_repaint_after(std::time::Duration::from_millis(150));
+
+        let result = self.ai_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+
+        let Some(result) = result else {
+            return;
+        };
+
+        self.ai_running = false;
+        self.ai_rx = None;
+
+        match result {
+            Ok(result) => {
+                let size = [
+                    result.preview.width() as usize,
+                    result.preview.height() as usize,
+                ];
+
+                let color = ColorImage::from_rgba_unmultiplied(size, result.preview.as_raw());
+
+                self.ai_result_texture =
+                    Some(ctx.load_texture("ai_upscale_result", color, TextureOptions::LINEAR));
+
+                self.ai_result_size = result.dimensions;
+                self.ai_status = format!(
+                    "AI upscale complete: {} x {}",
+                    result.dimensions[0], result.dimensions[1]
+                );
+                self.status = self.ai_status.clone();
+                self.ai_result_path = Some(result.path);
+                self.ai_show_result = true;
+            }
+            Err(error) => {
+                self.ai_status = format!("AI upscale failed: {error}");
+                self.status = self.ai_status.clone();
+            }
+        }
+    }
+
+    fn show_ai_result(&mut self, ctx: &egui::Context) {
+        if !self.ai_show_result {
+            return;
+        }
+
+        if self.ai_result_texture.is_none() {
+            return;
+        }
+
+        // Load a high-resolution inspection texture once.
+        // Cap its longest edge at 4096 to limit GPU memory use.
+        if self.ai_inspect_texture.is_none() {
+            if let Some(path) = &self.ai_result_path {
+                match image::open(path) {
+                    Ok(image) => {
+                        let mut rgba = image.to_rgba8();
+                        let longest = rgba.width().max(rgba.height());
+
+                        if longest > 4096 {
+                            let ratio = 4096.0 / longest as f64;
+                            let width = ((rgba.width() as f64 * ratio).round() as u32).max(1);
+                            let height = ((rgba.height() as f64 * ratio).round() as u32).max(1);
+
+                            rgba = image::imageops::resize(
+                                &rgba,
+                                width,
+                                height,
+                                image::imageops::FilterType::Lanczos3,
+                            );
+                        }
+
+                        let size = [rgba.width() as usize, rgba.height() as usize];
+
+                        let color = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+
+                        self.ai_inspect_texture = Some(ctx.load_texture(
+                            "ai_inspection_full",
+                            color,
+                            TextureOptions::LINEAR,
+                        ));
+
+                        self.ai_inspect_size = size;
+                    }
+                    Err(error) => {
+                        self.ai_status = format!("Cannot load full-resolution preview: {error}");
+                    }
+                }
+            }
+        }
+
+        let texture = self
+            .ai_inspect_texture
+            .as_ref()
+            .or(self.ai_result_texture.as_ref());
+
+        let Some(texture) = texture else {
+            return;
+        };
+
+        let texture_id = texture.id();
+
+        let source_size = Vec2::new(self.ai_result_size[0] as f32, self.ai_result_size[1] as f32);
+
+        let texture_size = texture.size_vec2();
+
+        let limited = self.ai_inspect_texture.is_some()
+            && (self.ai_inspect_size[0] as u32 != self.ai_result_size[0]
+                || self.ai_inspect_size[1] as u32 != self.ai_result_size[1]);
+
+        egui::Window::new("AI Upscale Result")
+            .open(&mut self.ai_show_result)
+            .resizable(true)
+            .default_size([850.0, 650.0])
+            .min_size([350.0, 250.0])
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(format!(
+                        "Output: {} x {}",
+                        self.ai_result_size[0], self.ai_result_size[1]
+                    ));
+
+                    ui.separator();
+
+                    if ui.button("Fit").clicked() {
+                        self.ai_inspect_fit = true;
+                        self.ai_inspect_pan = Vec2::ZERO;
+                    }
+
+                    if ui.button("100%").clicked() {
+                        self.ai_inspect_fit = false;
+                        self.ai_inspect_zoom = 1.0;
+                        self.ai_inspect_pan = Vec2::ZERO;
+                    }
+
+                    if ui.button("-").clicked() {
+                        self.ai_inspect_fit = false;
+                        self.ai_inspect_zoom = (self.ai_inspect_zoom / 1.25).clamp(0.05, 16.0);
+                    }
+
+                    if ui.button("+").clicked() {
+                        self.ai_inspect_fit = false;
+                        self.ai_inspect_zoom = (self.ai_inspect_zoom * 1.25).clamp(0.05, 16.0);
+                    }
+
+                    if ui.button("Reset").clicked() {
+                        self.ai_inspect_fit = true;
+                        self.ai_inspect_pan = Vec2::ZERO;
+                    }
+
+                    ui.separator();
+
+                    ui.label(format!("{:.0}%", self.ai_inspect_zoom * 100.0));
+                });
+
+                if let Some(path) = &self.ai_result_path {
+                    ui.label(path.display().to_string());
+                }
+
+                if limited {
+                    ui.small(
+                        "Inspection texture is limited to 4096 pixels on its longest side. \
+                         At 100%, image coordinates are 1:1, but fine details may be softer \
+                         than in the saved PNG.",
+                    );
+                }
+
+                ui.small(format!(
+                    "Mouse wheel: zoom | {}: pan | Fit: whole image | 100%: image pixel scale",
+                    match self.controls.pan {
+                        PanButton::Middle => "Middle-drag",
+                        PanButton::Left => "Left-drag",
+                        PanButton::SpaceLeft => "Space + Left-drag",
+                    }
+                ));
+
+                ui.separator();
+
+                let available = ui.available_size().max(Vec2::splat(64.0));
+                let (rect, response) = ui.allocate_exact_size(available, Sense::click_and_drag());
+
+                let fit = (rect.width() / source_size.x.max(1.0))
+                    .min(rect.height() / source_size.y.max(1.0))
+                    .min(1.0)
+                    .max(0.001);
+
+                if self.ai_inspect_fit {
+                    self.ai_inspect_zoom = fit;
+                    self.ai_inspect_pan = Vec2::ZERO;
+                }
+
+                if response.hovered() {
+                    let wheel = ui.input(|i| i.raw_scroll_delta.y);
+
+                    if wheel.abs() > 0.01 {
+                        self.ai_inspect_fit = false;
+
+                        let old_zoom = self.ai_inspect_zoom;
+                        let new_zoom = (old_zoom * (wheel * 0.0015).exp()).clamp(0.05, 16.0);
+
+                        if let Some(pointer) = response.hover_pos() {
+                            let center = rect.center();
+                            let relative = pointer - center - self.ai_inspect_pan;
+
+                            if old_zoom > 0.0 {
+                                self.ai_inspect_pan -= relative * (new_zoom / old_zoom - 1.0);
+                            }
+                        }
+
+                        self.ai_inspect_zoom = new_zoom;
+                        ctx.request_repaint();
+                    }
+                }
+
+                // Match the main editor's configured pan button.
+                let pan_active = match self.controls.pan {
+                    PanButton::Middle => response.dragged_by(egui::PointerButton::Middle),
+                    PanButton::Left => response.dragged_by(egui::PointerButton::Primary),
+                    PanButton::SpaceLeft => {
+                        let space_held = ui.input(|i| i.key_down(egui::Key::Space));
+                        space_held && response.dragged_by(egui::PointerButton::Primary)
+                    }
+                };
+
+                if pan_active {
+                    self.ai_inspect_fit = false;
+                    self.ai_inspect_pan += ui.input(|i| i.pointer.delta());
+                    ctx.request_repaint();
+                }
+
+                let draw_size = source_size * self.ai_inspect_zoom;
+                let center = rect.center() + self.ai_inspect_pan;
+
+                let image_rect = Rect::from_center_size(center, draw_size);
+
+                let painter = ui.painter_at(rect);
+
+                painter.rect_filled(rect, 0.0, Color32::from_gray(30));
+
+                painter.image(
+                    texture_id,
+                    image_rect,
+                    Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0)),
+                    Color32::WHITE,
+                );
+
+                // Keep texture_size referenced to document that
+                // the displayed image can use a capped texture.
+                let _ = texture_size;
+            });
+    }
     fn run_auto_enhance(&mut self, ctx: &egui::Context) {
         let Some(source) = &self.preview_source else {
             self.status = "Open an image before Auto Enhance".into();
@@ -1869,6 +2222,7 @@ impl eframe::App for PixelForge {
 
         self.poll_export(ctx);
         self.poll_preview(ctx);
+        self.poll_ai_upscale(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -2097,9 +2451,59 @@ impl eframe::App for PixelForge {
                         ui.heading("Image Tools");
                         ui.separator();
 
-                        ui.label("Upscaling");
-                        ui.add_enabled(false, egui::Button::new("2x Upscale"));
-                        ui.add_enabled(false, egui::Button::new("4x Upscale"));
+                        ui.label("AI Upscaling - Real-ESRGAN");
+
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    !self.ai_running
+                                        && !self.exporting
+                                        && self.original_pixels.is_some(),
+                                    egui::Button::new("AI 2x"),
+                                )
+                                .clicked()
+                            {
+                                self.start_ai_upscale(ctx, 2);
+                            }
+
+                            if ui
+                                .add_enabled(
+                                    !self.ai_running
+                                        && !self.exporting
+                                        && self.original_pixels.is_some(),
+                                    egui::Button::new("AI 4x"),
+                                )
+                                .clicked()
+                            {
+                                self.start_ai_upscale(ctx, 4);
+                            }
+                        });
+
+                        if self.ai_running {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label("GPU inference running...");
+                            });
+                        }
+
+                        if !self.ai_status.is_empty() {
+                            ui.small(&self.ai_status);
+                        }
+
+                        if self.ai_result_texture.is_some() {
+                            if ui.button("Show AI Result").clicked() {
+                                self.ai_show_result = true;
+                            }
+
+                            if ui.button("Open Output Folder").clicked() {
+                                if let Some(path) = &self.ai_result_path {
+                                    let _ = std::process::Command::new("explorer.exe")
+                                        .arg("/select,")
+                                        .arg(path)
+                                        .spawn();
+                                }
+                            }
+                        }
 
                         ui.separator();
                         ui.label("Restoration");
@@ -2200,13 +2604,14 @@ impl eframe::App for PixelForge {
         self.show_controls_settings(ctx);
         self.show_unsaved_prompt(ctx);
         self.show_exit_confirmation(ctx);
+        self.show_ai_result(ctx);
     }
 }
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.3.2")
+            .with_title("PixelForge v0.4.0")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
