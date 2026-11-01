@@ -190,6 +190,7 @@ enum PendingOpen {
 struct PixelForge {
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
+    ai_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ai_model: usize,
     ai_gpu_id: i32,
     ai_gpus: Vec<ai_upscale::VulkanGpu>,
@@ -309,6 +310,7 @@ impl Default for PixelForge {
         Self {
             ai_rx: None,
             ai_running: false,
+            ai_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ai_model: 0,
             ai_gpu_id: -1,
             ai_gpus: Vec::new(),
@@ -1057,6 +1059,11 @@ impl PixelForge {
 
         let generation = generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
+        if let Err(error) = ai_upscale::validate_upscale_size(original.width(), original.height(), scale) {
+            self.ai_status = error;
+            return;
+        }
+
         let settings = adjustments::Adjustments {
             brightness: self.brightness,
             contrast: self.contrast,
@@ -1530,6 +1537,8 @@ impl PixelForge {
         };
         let (tx, rx) = std::sync::mpsc::channel();
 
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.ai_cancel = cancel.clone();
         self.ai_rx = Some(rx);
         self.ai_running = true;
         self.ai_status = format!("Running Real-ESRGAN {scale}x on GPU...");
@@ -1558,7 +1567,7 @@ impl PixelForge {
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let result = ai_upscale::upscale(pixels, settings, scale, options);
+            let result = ai_upscale::upscale(pixels, settings, scale, options, cancel);
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -1578,6 +1587,7 @@ impl PixelForge {
 
         self.ai_running = false;
         self.ai_rx = None;
+        self.ai_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
 
         match result {
             Ok(result) => {
@@ -4071,6 +4081,10 @@ impl eframe::App for PixelForge {
                                 ui.horizontal(|ui| {
                                     ui.spinner();
                                     ui.label("GPU inference running...");
+                                    if ui.button("Cancel Upscale").clicked() {
+                                        self.ai_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                                        self.ai_status = "Cancelling AI upscale...".into();
+                                    }
                                 });
                             }
 
