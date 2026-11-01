@@ -777,11 +777,18 @@ impl PixelForge {
             ui.selectable_value(&mut self.generation_portrait, false, "Landscape");
             ui.selectable_value(&mut self.generation_portrait, true, "Portrait");
         });
+        let (_, rw, rh) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
+        let (rw, rh) = if self.generation_portrait { (rh, rw) } else { (rw, rh) };
+        let resolution_labels: Vec<String> = [("Small", 0.75_f32), ("Standard", 1.0), ("Large", 1.25)]
+            .iter().map(|(name, scale)| {
+                let snap = |value: f32| ((value / 64.0).round() as u32 * 64).clamp(256, 2048);
+                format!("{} — {} × {}", name, snap(rw as f32 * scale), snap(rh as f32 * scale))
+            }).collect();
         egui::ComboBox::from_label("Resolution")
-            .selected_text(["Small", "Standard (SDXL)", "Large"][self.generation_resolution.min(2)])
+            .selected_text(&resolution_labels[self.generation_resolution.min(2)])
             .show_ui(ui, |ui| {
-                for (i, name) in ["Small", "Standard (SDXL)", "Large"].iter().enumerate() {
-                    ui.selectable_value(&mut self.generation_resolution, i, *name);
+                for (i, label) in resolution_labels.iter().enumerate() {
+                    ui.selectable_value(&mut self.generation_resolution, i, label);
                 }
             });
         ui.checkbox(&mut self.generation_custom_size, "Custom proportional resolution");
