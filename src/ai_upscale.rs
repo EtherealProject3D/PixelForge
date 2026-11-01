@@ -5,10 +5,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use image::RgbaImage;
 
 pub struct UpscaleResult {
-    pub path: PathBuf,
+    pub work_dir: PathBuf,
+    pub ai_path: PathBuf,
+    pub baseline_path: PathBuf,
     pub preview: RgbaImage,
     pub baseline_preview: RgbaImage,
     pub dimensions: [u32; 2],
+}
+
+impl Drop for UpscaleResult {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.work_dir);
+    }
 }
 
 pub fn engine_path() -> PathBuf {
@@ -50,8 +58,6 @@ pub fn upscale(
     mut original: RgbaImage,
     settings: crate::adjustments::Adjustments,
     scale: u32,
-    strength: f32,
-    destination: PathBuf,
 ) -> Result<UpscaleResult, String> {
     let expected = expected_dimensions(original.width(), original.height(), scale)?;
 
@@ -67,10 +73,6 @@ pub fn upscale(
         ));
     }
 
-    if destination.exists() {
-        return Err("Output file already exists. Choose another filename.".into());
-    }
-
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -80,18 +82,11 @@ pub fn upscale(
 
     std::fs::create_dir_all(&work).map_err(|e| format!("Cannot create AI work folder: {e}"))?;
 
-    let result = upscale_inner(
-        &mut original,
-        &settings,
-        scale,
-        strength,
-        expected,
-        &destination,
-        &engine,
-        &work,
-    );
+    let result = upscale_inner(&mut original, &settings, scale, expected, &engine, &work);
 
-    let _ = std::fs::remove_dir_all(&work);
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&work);
+    }
 
     result
 }
@@ -100,9 +95,7 @@ fn upscale_inner(
     original: &mut RgbaImage,
     settings: &crate::adjustments::Adjustments,
     scale: u32,
-    strength: f32,
     expected: [u32; 2],
-    destination: &Path,
     engine: &Path,
     work: &Path,
 ) -> Result<UpscaleResult, String> {
@@ -190,115 +183,146 @@ fn upscale_inner(
         image::imageops::FilterType::Lanczos3,
     );
 
+    // Retain the two unblended full-resolution images.
+    let ai_path = work.join("ai_result.png");
+    let baseline_path = work.join("lanczos_result.png");
+
+    result
+        .save(&ai_path)
+        .map_err(|e| format!("Cannot retain AI result: {e}"))?;
+
+    baseline
+        .save(&baseline_path)
+        .map_err(|e| format!("Cannot retain Lanczos result: {e}"))?;
+
+    let dimensions = [result.width(), result.height()];
+    let longest = dimensions[0].max(dimensions[1]);
+
+    let preview_size = if longest > 2048 {
+        let ratio = 2048.0 / longest as f64;
+        [
+            ((dimensions[0] as f64 * ratio).round() as u32).max(1),
+            ((dimensions[1] as f64 * ratio).round() as u32).max(1),
+        ]
+    } else {
+        dimensions
+    };
+
+    let preview = image::imageops::resize(
+        &result,
+        preview_size[0],
+        preview_size[1],
+        image::imageops::FilterType::Triangle,
+    );
+
+    let baseline_preview = image::imageops::resize(
+        &baseline,
+        preview_size[0],
+        preview_size[1],
+        image::imageops::FilterType::Triangle,
+    );
+
+    Ok(UpscaleResult {
+        work_dir: work.to_path_buf(),
+        ai_path,
+        baseline_path,
+        preview,
+        baseline_preview,
+        dimensions,
+    })
+}
+
+pub fn blend_images(
+    ai: &RgbaImage,
+    baseline: &RgbaImage,
+    strength: f32,
+) -> Result<RgbaImage, String> {
+    if ai.dimensions() != baseline.dimensions() {
+        return Err("AI and Lanczos dimensions differ".into());
+    }
+
     let strength = strength.clamp(0.0, 1.0);
-    let mut result = result;
 
-    if strength < 1.0 {
-        for (out, conventional) in result.pixels_mut().zip(baseline.pixels()) {
-            for channel in 0..4 {
-                let a = conventional.0[channel] as f32;
-                let b = out.0[channel] as f32;
+    if strength >= 1.0 {
+        return Ok(ai.clone());
+    }
 
-                out.0[channel] = (a * (1.0 - strength) + b * strength)
-                    .round()
-                    .clamp(0.0, 255.0) as u8;
-            }
+    if strength <= 0.0 {
+        return Ok(baseline.clone());
+    }
+
+    let mut output = baseline.clone();
+
+    for (out, neural) in output.pixels_mut().zip(ai.pixels()) {
+        for channel in 0..4 {
+            let a = out.0[channel] as f32;
+            let b = neural.0[channel] as f32;
+            out.0[channel] = (a + (b - a) * strength).round().clamp(0.0, 255.0) as u8;
         }
     }
 
-    // Build a smaller UI preview before saving the
-    // full-resolution result.
-    let dimensions = [result.width(), result.height()];
+    Ok(output)
+}
 
-    let longest = dimensions[0].max(dimensions[1]);
+pub fn save_blended(
+    ai_path: &Path,
+    baseline_path: &Path,
+    strength: f32,
+    destination: &Path,
+) -> Result<PathBuf, String> {
+    if destination.exists() {
+        return Err("Destination already exists".into());
+    }
 
-    let preview = if longest > 1200 {
-        let ratio = 1200.0 / longest as f64;
+    let ai = image::open(ai_path)
+        .map_err(|e| format!("Cannot read AI result: {e}"))?
+        .to_rgba8();
 
-        let width = ((dimensions[0] as f64 * ratio).round() as u32).max(1);
+    let baseline = image::open(baseline_path)
+        .map_err(|e| format!("Cannot read Lanczos result: {e}"))?
+        .to_rgba8();
 
-        let height = ((dimensions[1] as f64 * ratio).round() as u32).max(1);
+    let output = blend_images(&ai, &baseline, strength)?;
 
-        image::imageops::resize(
-            &result,
-            width,
-            height,
-            image::imageops::FilterType::Triangle,
-        )
-    } else {
-        result.clone()
-    };
-
-    let baseline_preview = if longest > 1200 {
-        let ratio = 1200.0 / longest as f64;
-
-        let width = ((dimensions[0] as f64 * ratio).round() as u32).max(1);
-
-        let height = ((dimensions[1] as f64 * ratio).round() as u32).max(1);
-
-        image::imageops::resize(
-            &baseline,
-            width,
-            height,
-            image::imageops::FilterType::Triangle,
-        )
-    } else {
-        baseline
-    };
-
-    // Save to a temporary sibling file, verify it,
-    // then move it to the requested destination.
-    let file_name = destination
+    let filename = destination
         .file_name()
-        .ok_or("Invalid AI output filename")?
+        .ok_or("Invalid destination filename")?
         .to_string_lossy();
 
-    let temporary_destination =
-        destination.with_file_name(format!(".{file_name}.pixelforge-partial.png"));
+    let temporary = destination.with_file_name(format!(".{filename}.pixelforge-partial.png"));
 
-    if temporary_destination.exists() {
-        return Err("A previous partial output file exists. Remove it before retrying.".into());
+    if temporary.exists() {
+        return Err("A partial export file already exists".into());
     }
 
     let save_result = (|| -> Result<(), String> {
-        result
-            .save_with_format(&temporary_destination, image::ImageFormat::Png)
-            .map_err(|e| format!("Cannot save AI PNG: {e}"))?;
+        output
+            .save_with_format(&temporary, image::ImageFormat::Png)
+            .map_err(|e| format!("Cannot save PNG: {e}"))?;
 
-        let saved = image::image_dimensions(&temporary_destination)
-            .map_err(|e| format!("Cannot verify saved PNG: {e}"))?;
+        let dimensions =
+            image::image_dimensions(&temporary).map_err(|e| format!("Cannot verify PNG: {e}"))?;
 
-        if saved != (expected[0], expected[1]) {
-            return Err(format!(
-                "Saved dimensions incorrect: {}x{}",
-                saved.0, saved.1
-            ));
+        if dimensions != output.dimensions() {
+            return Err("Saved PNG dimensions are incorrect".into());
         }
 
-        // A newly created output must not overwrite an
-        // existing image.
         if destination.exists() {
-            return Err("Destination appeared during processing; refusing to overwrite.".into());
+            return Err("Destination appeared during export".into());
         }
 
-        std::fs::rename(&temporary_destination, destination)
-            .map_err(|e| format!("Cannot finalize AI PNG: {e}"))?;
+        std::fs::rename(&temporary, destination)
+            .map_err(|e| format!("Cannot finalize PNG: {e}"))?;
 
         Ok(())
     })();
 
     if save_result.is_err() {
-        let _ = std::fs::remove_file(&temporary_destination);
+        let _ = std::fs::remove_file(&temporary);
     }
 
     save_result?;
-
-    Ok(UpscaleResult {
-        path: destination.to_path_buf(),
-        preview,
-        baseline_preview,
-        dimensions,
-    })
+    Ok(destination.to_path_buf())
 }
 
 #[cfg(test)]

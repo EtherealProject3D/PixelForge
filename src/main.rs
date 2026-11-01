@@ -168,6 +168,9 @@ enum PendingOpen {
 struct PixelForge {
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
+    ai_result: Option<std::sync::Arc<ai_upscale::UpscaleResult>>,
+    ai_save_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    ai_saving: bool,
     ai_strength: f32,
     ai_comparison: bool,
     ai_comparison_position: f32,
@@ -237,6 +240,9 @@ impl Default for PixelForge {
         Self {
             ai_rx: None,
             ai_running: false,
+            ai_result: None,
+            ai_save_rx: None,
+            ai_saving: false,
             ai_strength: 1.0,
             ai_comparison: true,
             ai_comparison_position: 0.5,
@@ -332,6 +338,12 @@ impl PixelForge {
 
                 self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
+                self.ai_result = None;
+                self.ai_show_result = false;
+                self.ai_result_texture = None;
+                self.ai_baseline_texture = None;
+                self.ai_inspect_texture = None;
+                self.ai_result_path = None;
                 self.original_pixels = Some(rgba);
                 self.prepare_preview_source();
                 self.project_path = None;
@@ -384,6 +396,12 @@ impl PixelForge {
     }
 
     fn close_image(&mut self) {
+        self.ai_result = None;
+        self.ai_show_result = false;
+        self.ai_result_texture = None;
+        self.ai_baseline_texture = None;
+        self.ai_inspect_texture = None;
+        self.ai_result_path = None;
         // Release image textures and original image data.
         self.texture = None;
         self.processed_texture = None;
@@ -1252,7 +1270,7 @@ impl PixelForge {
         }
     }
     fn start_ai_upscale(&mut self, ctx: &egui::Context, scale: u32) {
-        if self.ai_running || self.exporting {
+        if self.ai_running || self.ai_saving || self.exporting {
             self.ai_status = "Another operation is running".into();
             return;
         }
@@ -1261,30 +1279,6 @@ impl PixelForge {
             self.ai_status = "Open an image first".into();
             return;
         };
-
-        let stem = self
-            .image_path
-            .as_ref()
-            .and_then(|p| p.file_stem())
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "image".to_string());
-
-        let suggested = format!("{stem}_AI_{scale}x.png");
-
-        let Some(mut path) = rfd::FileDialog::new()
-            .add_filter("PNG Image", &["png"])
-            .set_file_name(&suggested)
-            .save_file()
-        else {
-            return;
-        };
-
-        path.set_extension("png");
-
-        if path.exists() {
-            self.ai_status = "Output already exists. Choose another filename.".into();
-            return;
-        }
 
         let settings = adjustments::Adjustments {
             brightness: self.brightness,
@@ -1302,12 +1296,12 @@ impl PixelForge {
         };
 
         let pixels = original.clone();
-        let strength = self.ai_strength;
         let (tx, rx) = std::sync::mpsc::channel();
 
         self.ai_rx = Some(rx);
         self.ai_running = true;
         self.ai_status = format!("Running Real-ESRGAN {scale}x on GPU...");
+        self.ai_result = None;
         self.ai_result_texture = None;
         self.ai_baseline_texture = None;
         self.ai_inspect_texture = None;
@@ -1321,12 +1315,11 @@ impl PixelForge {
         let ctx = ctx.clone();
 
         std::thread::spawn(move || {
-            let result = ai_upscale::upscale(pixels, settings, scale, strength, path);
+            let result = ai_upscale::upscale(pixels, settings, scale);
             let _ = tx.send(result);
             ctx.request_repaint();
         });
     }
-
     fn poll_ai_upscale(&mut self, ctx: &egui::Context) {
         if !self.ai_running {
             return;
@@ -1345,15 +1338,7 @@ impl PixelForge {
 
         match result {
             Ok(result) => {
-                let size = [
-                    result.preview.width() as usize,
-                    result.preview.height() as usize,
-                ];
-
-                let color = ColorImage::from_rgba_unmultiplied(size, result.preview.as_raw());
-
-                self.ai_result_texture =
-                    Some(ctx.load_texture("ai_upscale_result", color, TextureOptions::LINEAR));
+                self.ai_result_size = result.dimensions;
 
                 let baseline_size = [
                     result.baseline_preview.width() as usize,
@@ -1371,13 +1356,19 @@ impl PixelForge {
                     TextureOptions::LINEAR,
                 ));
 
-                self.ai_result_size = result.dimensions;
+                self.ai_inspect_size = [
+                    result.preview.width() as usize,
+                    result.preview.height() as usize,
+                ];
+
                 self.ai_status = format!(
-                    "AI upscale complete: {} x {}",
+                    "AI upscale complete: {} x {}. Not saved.",
                     result.dimensions[0], result.dimensions[1]
                 );
+
                 self.status = self.ai_status.clone();
-                self.ai_result_path = Some(result.path);
+                self.ai_result = Some(std::sync::Arc::new(result));
+                self.refresh_ai_preview(ctx);
                 self.ai_show_result = true;
             }
             Err(error) => {
@@ -1387,6 +1378,122 @@ impl PixelForge {
         }
     }
 
+    fn refresh_ai_preview(&mut self, ctx: &egui::Context) {
+        let Some(result) = &self.ai_result else {
+            return;
+        };
+
+        let Ok(blended) =
+            ai_upscale::blend_images(&result.preview, &result.baseline_preview, self.ai_strength)
+        else {
+            return;
+        };
+
+        let size = [blended.width() as usize, blended.height() as usize];
+        let color = ColorImage::from_rgba_unmultiplied(size, blended.as_raw());
+
+        self.ai_result_texture =
+            Some(ctx.load_texture("ai_strength_preview", color, TextureOptions::LINEAR));
+
+        self.ai_inspect_texture = None;
+        self.ai_inspect_size = size;
+        ctx.request_repaint();
+    }
+
+    fn save_ai_result(&mut self, ctx: &egui::Context) {
+        if self.ai_running || self.ai_saving || self.exporting {
+            return;
+        }
+
+        let Some(result) = self.ai_result.clone() else {
+            return;
+        };
+
+        let stem = self
+            .image_path
+            .as_ref()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "image".into());
+
+        let scale = self
+            .original_pixels
+            .as_ref()
+            .map(|image| {
+                if image.width().checked_mul(2) == Some(result.dimensions[0]) {
+                    2
+                } else {
+                    4
+                }
+            })
+            .unwrap_or(4);
+
+        let suggested = format!("{stem}_AI_{scale}x.png");
+
+        let Some(mut destination) = rfd::FileDialog::new()
+            .add_filter("PNG Image", &["png"])
+            .set_file_name(&suggested)
+            .save_file()
+        else {
+            return;
+        };
+
+        destination.set_extension("png");
+
+        if destination.exists() {
+            self.ai_status = "Filename already exists. Choose another.".into();
+            return;
+        }
+
+        let strength = self.ai_strength;
+        let (tx, rx) = std::sync::mpsc::channel();
+
+        self.ai_save_rx = Some(rx);
+        self.ai_saving = true;
+        self.ai_status = "Saving full-resolution AI result...".into();
+
+        let ctx = ctx.clone();
+
+        std::thread::spawn(move || {
+            // Arc retains temporary files until export finishes.
+            let saved = ai_upscale::save_blended(
+                &result.ai_path,
+                &result.baseline_path,
+                strength,
+                &destination,
+            );
+
+            let _ = tx.send(saved);
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll_ai_save(&mut self, ctx: &egui::Context) {
+        if !self.ai_saving {
+            return;
+        }
+
+        let result = self.ai_save_rx.as_ref().and_then(|rx| rx.try_recv().ok());
+
+        if let Some(result) = result {
+            self.ai_saving = false;
+            self.ai_save_rx = None;
+
+            match result {
+                Ok(path) => {
+                    self.ai_status = format!("Saved: {}", path.display());
+                    self.ai_result_path = Some(path);
+                }
+                Err(error) => {
+                    self.ai_status = format!("Save failed: {error}");
+                }
+            }
+
+            self.status = self.ai_status.clone();
+        } else {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
     fn show_ai_result(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         if !self.ai_show_result {
             return;
@@ -1396,68 +1503,32 @@ impl PixelForge {
             return;
         }
 
-        // Load a high-resolution inspection texture once.
-        // Cap its longest edge at 4096 to limit GPU memory use.
-        if self.ai_inspect_texture.is_none() {
-            if let Some(path) = &self.ai_result_path {
-                match image::open(path) {
-                    Ok(image) => {
-                        let mut rgba = image.to_rgba8();
-                        let longest = rgba.width().max(rgba.height());
-
-                        if longest > 4096 {
-                            let ratio = 4096.0 / longest as f64;
-                            let width = ((rgba.width() as f64 * ratio).round() as u32).max(1);
-                            let height = ((rgba.height() as f64 * ratio).round() as u32).max(1);
-
-                            rgba = image::imageops::resize(
-                                &rgba,
-                                width,
-                                height,
-                                image::imageops::FilterType::Lanczos3,
-                            );
-                        }
-
-                        let size = [rgba.width() as usize, rgba.height() as usize];
-
-                        let color = ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-
-                        self.ai_inspect_texture = Some(ctx.load_texture(
-                            "ai_inspection_full",
-                            color,
-                            TextureOptions::LINEAR,
-                        ));
-
-                        self.ai_inspect_size = size;
-                    }
-                    Err(error) => {
-                        self.ai_status = format!("Cannot load full-resolution preview: {error}");
-                    }
-                }
-            }
-        }
-
-        let texture = self
-            .ai_inspect_texture
-            .as_ref()
-            .or(self.ai_result_texture.as_ref());
-
-        let Some(texture) = texture else {
+        let Some(texture_id) = self.ai_result_texture.as_ref().map(|t| t.id()) else {
             return;
         };
 
-        let texture_id = texture.id();
-
         let source_size = Vec2::new(self.ai_result_size[0] as f32, self.ai_result_size[1] as f32);
 
-        let texture_size = texture.size_vec2();
-
-        let limited = self.ai_inspect_texture.is_some()
-            && (self.ai_inspect_size[0] as u32 != self.ai_result_size[0]
-                || self.ai_inspect_size[1] as u32 != self.ai_result_size[1]);
+        let limited = self.ai_inspect_size[0] as u32 != self.ai_result_size[0]
+            || self.ai_inspect_size[1] as u32 != self.ai_result_size[1];
 
         ui.horizontal(|ui| {
             ui.heading("AI Upscale Result");
+
+            if ui
+                .add_enabled(
+                    !self.ai_saving && self.ai_result.is_some(),
+                    egui::Button::new("Save Result..."),
+                )
+                .clicked()
+            {
+                self.save_ai_result(ctx);
+            }
+
+            if self.ai_saving {
+                ui.spinner();
+                ui.label("Saving PNG...");
+            }
 
             if ui.button("Back to Editor").clicked() {
                 self.ai_show_result = false;
@@ -1519,7 +1590,9 @@ impl PixelForge {
             });
 
             if let Some(path) = &self.ai_result_path {
-                ui.label(path.display().to_string());
+                ui.label(format!("Last saved: {}", path.display()));
+            } else {
+                ui.label("Temporary result - not saved");
             }
 
             if limited {
@@ -1582,6 +1655,15 @@ impl PixelForge {
             // the visible comparison divider.
             if self.ai_comparison && self.ai_baseline_texture.is_some() {
                 let divider_x = rect.left() + rect.width() * self.ai_comparison_position;
+
+                if response
+                    .hover_pos()
+                    .map(|pos| (pos.x - divider_x).abs() <= 14.0)
+                    .unwrap_or(false)
+                    || self.ai_divider_dragging
+                {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                }
 
                 if response.drag_started_by(egui::PointerButton::Primary) {
                     let near_divider = response
@@ -1679,10 +1761,6 @@ impl PixelForge {
                     );
                 }
             }
-
-            // Keep texture_size referenced to document that
-            // the displayed image can use a capped texture.
-            let _ = texture_size;
         }
     }
     fn run_auto_enhance(&mut self, ctx: &egui::Context) {
@@ -2387,6 +2465,7 @@ impl eframe::App for PixelForge {
         self.poll_export(ctx);
         self.poll_preview(ctx);
         self.poll_ai_upscale(ctx);
+        self.poll_ai_save(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -2686,11 +2765,16 @@ impl eframe::App for PixelForge {
 
                             ui.spacing_mut().slider_width = (ui.available_width() - 20.0).max(80.0);
 
-                            ui.add(
-                                egui::Slider::new(&mut self.ai_strength, 0.0..=1.0)
-                                    .step_by(0.05)
-                                    .show_value(false),
-                            );
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut self.ai_strength, 0.0..=1.0)
+                                        .step_by(0.05)
+                                        .show_value(false),
+                                )
+                                .changed()
+                            {
+                                self.refresh_ai_preview(ctx);
+                            }
 
                             ui.spacing_mut().slider_width = old_slider_width;
 
@@ -2700,6 +2784,7 @@ impl eframe::App for PixelForge {
 
                             ui.horizontal(|ui| {
                                 let enabled = !self.ai_running
+                                    && !self.ai_saving
                                     && !self.exporting
                                     && self.original_pixels.is_some();
 
@@ -2742,6 +2827,16 @@ impl eframe::App for PixelForge {
                             if self.ai_result_texture.is_some() {
                                 if ui.button("Show AI Result").clicked() {
                                     self.ai_show_result = true;
+                                }
+
+                                if ui
+                                    .add_enabled(
+                                        !self.ai_saving,
+                                        egui::Button::new("Save Result..."),
+                                    )
+                                    .clicked()
+                                {
+                                    self.save_ai_result(ctx);
                                 }
 
                                 if ui.button("Open Output Folder").clicked() {
