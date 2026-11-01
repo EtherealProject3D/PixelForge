@@ -108,7 +108,12 @@ pub fn checkpoints() -> Result<Vec<String>, String> {
     Ok(items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
 }
 
-pub fn generate(request: Request, cancel: Arc<AtomicBool>) -> Result<image::RgbaImage, String> {
+struct ProgressStop(Arc<AtomicBool>);
+impl Drop for ProgressStop {
+    fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); }
+}
+
+pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sync::atomic::AtomicU32>) -> Result<image::RgbaImage, String> {
     ensure_server()?;
     if request.prompt.trim().is_empty() { return Err("Enter a generation prompt".into()); }
     if request.checkpoint.trim().is_empty() { return Err("Select a local checkpoint".into()); }
@@ -130,12 +135,49 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>) -> Result<image::Rgba
         "7": {"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge","images":["6",0]}}
     });
     let http = client()?;
-    let response: Value = http.post(format!("{BASE}/prompt")).json(&json!({"prompt":workflow}))
+    // Each generation has a private websocket client ID; ComfyUI emits actual sampler steps.
+    let client_id = format!("pixelforge-{}-{}", std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_nanos());
+    let stop_progress = Arc::new(AtomicBool::new(false));
+    let stop_ws = stop_progress.clone();
+    let step_value = progress.clone();
+    let ws_client = client_id.clone();
+    std::thread::spawn(move || {
+        if let Ok((mut socket, _)) = tungstenite::connect(format!("ws://127.0.0.1:8188/ws?clientId={ws_client}")) {
+            if let tungstenite::stream::MaybeTlsStream::Plain(stream) = socket.get_mut() {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+            }
+            while !stop_ws.load(Ordering::Relaxed) {
+                match socket.read() {
+                    Ok(tungstenite::Message::Text(body)) => {
+                        if let Ok(event) = serde_json::from_str::<Value>(&body) {
+                            if event["type"] == "progress" {
+                                if let (Some(value), Some(max)) = (
+                                    event.pointer("/data/value").and_then(Value::as_u64),
+                                    event.pointer("/data/max").and_then(Value::as_u64)) {
+                                    if max > 0 {
+                                        step_value.store(value.min(max) as u32, Ordering::Relaxed);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+    let response: Value = http.post(format!("{BASE}/prompt")).json(&json!({"prompt":workflow,"client_id":client_id}))
         .send().map_err(|e| format!("Cannot submit ComfyUI prompt: {e}"))?
         .error_for_status().map_err(|e| format!("ComfyUI rejected workflow: {e}"))?
         .json().map_err(|e| e.to_string())?;
     let id = response.get("prompt_id").and_then(Value::as_str)
         .ok_or_else(|| format!("ComfyUI did not accept the prompt: {response}"))?.to_owned();
+    let _progress_guard = ProgressStop(stop_progress);
     let deadline = Instant::now() + Duration::from_secs(900);
     loop {
         if cancel.load(Ordering::Relaxed) {
