@@ -105,19 +105,11 @@ fn validate_dimensions(image: &RgbaImage, expected: [u32; 2], label: &str) -> Re
     Ok(())
 }
 
-/// Conservative preflight: the engine always creates a native 4x RGBA output.
-/// Limit the decoded 4x frame to 512 MiB to avoid excessive simultaneous buffers.
+/// Check that requested and native inference dimensions are representable.
+/// Memory pressure is managed by the inference engine and its tile-size setting.
 pub fn validate_upscale_size(width: u32, height: u32, scale: u32) -> Result<(), String> {
     expected_dimensions(width, height, scale)?;
-    let native = expected_dimensions(width, height, 4)?;
-    let bytes = u64::from(native[0]) * u64::from(native[1]) * 4;
-    const LIMIT: u64 = 512 * 1024 * 1024;
-    if bytes > LIMIT {
-        return Err(format!(
-            "Image too large for safe AI upscaling: native 4x output would require {:.1} MiB per RGBA buffer (limit 512 MiB). Try a smaller source image.",
-            bytes as f64 / (1024.0 * 1024.0)
-        ));
-    }
+    expected_dimensions(width, height, 4)?;
     Ok(())
 }
 
@@ -511,7 +503,7 @@ mod tests {
     #[test]
     fn large_image_preflight() {
         assert!(validate_upscale_size(1000, 1000, 4).is_ok());
-        assert!(validate_upscale_size(10000, 10000, 2).is_err());
+        assert!(validate_upscale_size(10000, 10000, 2).is_ok());
         assert!(validate_upscale_size(u32::MAX, 10, 4).is_err());
     }
 
