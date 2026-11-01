@@ -1091,7 +1091,7 @@ impl PixelForge {
                                 let before = *pixel;
                                 local_settings.apply_pixel(pixel);
                                 for c in 0..3 {
-                                    pixel[c] = ((before[c] as u16 * (255 - alpha) as u16 + pixel[c] as u16 * alpha as u16 + 127) / 255) as u8;
+                                    pixel[c] = ((before[c] as u32 * (255 - alpha) as u32 + pixel[c] as u32 * alpha as u32 + 127) / 255) as u8;
                                 }
                             }
                         }
@@ -1259,7 +1259,7 @@ impl PixelForge {
                                 let before = *pixel;
                                 local_settings.apply_pixel(pixel);
                                 for c in 0..3 {
-                                    pixel[c] = ((before[c] as u16 * (255 - alpha) as u16 + pixel[c] as u16 * alpha as u16 + 127) / 255) as u8;
+                                    pixel[c] = ((before[c] as u32 * (255 - alpha) as u32 + pixel[c] as u32 * alpha as u32 + 127) / 255) as u8;
                                 }
                             }
                         }
