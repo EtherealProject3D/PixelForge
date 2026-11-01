@@ -33,6 +33,10 @@ impl Drop for UpscaleResult {
 }
 
 pub fn engine_path() -> PathBuf {
+    let bundled = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("tools").join("realesrgan").join("realesrgan-ncnn-vulkan.exe")));
+    if let Some(path) = bundled {
+        if path.is_file() { return path; }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tools")
         .join("realesrgan")
@@ -88,6 +92,12 @@ pub fn upscale(
             "Real-ESRGAN engine not found: {}",
             engine.display()
         ));
+    }
+
+    let model_dir = engine.parent().ok_or("Invalid engine path")?.join("models");
+    let model_files = [model_dir.join(format!("{}.param", options.model)), model_dir.join(format!("{}.bin", options.model))];
+    for model_file in model_files {
+        if !model_file.is_file() { return Err(format!("Model file missing: {}", model_file.display())); }
     }
 
     let stamp = SystemTime::now()
