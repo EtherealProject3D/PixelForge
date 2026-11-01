@@ -257,8 +257,7 @@ struct PixelForge {
     preview_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     brightness: f32,
     selection_adjustment_target: bool,
-    selection_brightness: f32,
-    selection_exposure: f32,
+    selection_adjustments: adjustments::Adjustments,
     export_rx: Option<std::sync::mpsc::Receiver<ExportEvent>>,
     export_progress: f32,
     export_stage: String,
@@ -356,8 +355,7 @@ impl Default for PixelForge {
             preview_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             brightness: 0.0,
             selection_adjustment_target: false,
-            selection_brightness: 0.0,
-            selection_exposure: 0.0,
+            selection_adjustments: adjustments::Adjustments::default(),
             export_rx: None,
             export_progress: 0.0,
             export_stage: String::new(),
@@ -1058,11 +1056,7 @@ impl PixelForge {
         };
 
         let selection_mask = self.selection_mask.clone();
-        let local_settings = adjustments::Adjustments {
-            brightness: self.selection_brightness,
-            exposure: self.selection_exposure,
-            ..Default::default()
-        };
+        let local_settings = self.selection_adjustments;
 
         let (tx, rx) = std::sync::mpsc::channel();
         self.preview_rx = Some(rx);
@@ -1201,11 +1195,7 @@ impl PixelForge {
         let vibrance = self.vibrance;
         let gamma = self.gamma;
         let selection_mask = self.selection_mask.clone();
-        let local_settings = adjustments::Adjustments {
-            brightness: self.selection_brightness,
-            exposure: self.selection_exposure,
-            ..Default::default()
-        };
+        let local_settings = self.selection_adjustments;
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -2458,6 +2448,23 @@ impl PixelForge {
             });
     }
     fn show_adjustments(&mut self, ui: &mut egui::Ui) {
+        // Temporarily bind the existing sliders to the selection adjustment bank.
+        // Restore global values before rendering the preview.
+        if self.selection_adjustment_target {
+            std::mem::swap(&mut self.brightness, &mut self.selection_adjustments.brightness);
+            std::mem::swap(&mut self.contrast, &mut self.selection_adjustments.contrast);
+            std::mem::swap(&mut self.exposure, &mut self.selection_adjustments.exposure);
+            std::mem::swap(&mut self.saturation, &mut self.selection_adjustments.saturation);
+            std::mem::swap(&mut self.temperature, &mut self.selection_adjustments.temperature);
+            std::mem::swap(&mut self.tint, &mut self.selection_adjustments.tint);
+            std::mem::swap(&mut self.highlights, &mut self.selection_adjustments.highlights);
+            std::mem::swap(&mut self.shadows, &mut self.selection_adjustments.shadows);
+            std::mem::swap(&mut self.whites, &mut self.selection_adjustments.whites);
+            std::mem::swap(&mut self.blacks, &mut self.selection_adjustments.blacks);
+            std::mem::swap(&mut self.vibrance, &mut self.selection_adjustments.vibrance);
+            std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
+        }
+        let mut preview_needs_refresh = false;
         let before_adjustments = [
             self.brightness,
             self.contrast,
@@ -2506,7 +2513,7 @@ impl PixelForge {
                 self.blacks = 0.0;
                 self.vibrance = 0.0;
                 self.gamma = 0.0;
-                self.update_processed_image(ui.ctx());
+                preview_needs_refresh = true;
             }
         });
 
@@ -2515,25 +2522,8 @@ impl PixelForge {
             ui.selectable_value(&mut self.selection_adjustment_target, false, "Global");
             ui.selectable_value(&mut self.selection_adjustment_target, true, "Selection");
         });
-        if self.selection_adjustment_target {
-            ui.small("Selection-only Exposure and Brightness (other controls remain global).");
-            if self.selection_mask.is_none() {
-                ui.colored_label(egui::Color32::YELLOW, "Paint or load a selection mask first.");
-            }
-            let mut local_changed = false;
-            ui.label("Selection Exposure (EV)");
-            local_changed |= ui.add(egui::Slider::new(&mut self.selection_exposure, -3.0..=3.0).step_by(0.1)).changed();
-            ui.label("Selection Brightness");
-            local_changed |= ui.add(egui::Slider::new(&mut self.selection_brightness, -100.0..=100.0)).changed();
-            if ui.button("Reset Selection Adjustments").clicked() {
-                self.selection_exposure = 0.0;
-                self.selection_brightness = 0.0;
-                local_changed = true;
-            }
-            if local_changed {
-                self.project_dirty = true;
-                self.update_processed_image(ui.ctx());
-            }
+        if self.selection_adjustment_target && self.selection_mask.is_none() {
+            ui.colored_label(egui::Color32::YELLOW, "Paint or load a selection mask first.");
         }
 
         ui.separator();
@@ -2743,7 +2733,7 @@ impl PixelForge {
             });
 
         if changed {
-            self.update_processed_image(ui.ctx());
+            preview_needs_refresh = true;
         }
 
         ui.separator();
@@ -2786,6 +2776,23 @@ impl PixelForge {
             || before_comparison != (self.comparison_enabled, self.comparison_position)
         {
             self.project_dirty = true;
+        }
+        if self.selection_adjustment_target {
+            std::mem::swap(&mut self.brightness, &mut self.selection_adjustments.brightness);
+            std::mem::swap(&mut self.contrast, &mut self.selection_adjustments.contrast);
+            std::mem::swap(&mut self.exposure, &mut self.selection_adjustments.exposure);
+            std::mem::swap(&mut self.saturation, &mut self.selection_adjustments.saturation);
+            std::mem::swap(&mut self.temperature, &mut self.selection_adjustments.temperature);
+            std::mem::swap(&mut self.tint, &mut self.selection_adjustments.tint);
+            std::mem::swap(&mut self.highlights, &mut self.selection_adjustments.highlights);
+            std::mem::swap(&mut self.shadows, &mut self.selection_adjustments.shadows);
+            std::mem::swap(&mut self.whites, &mut self.selection_adjustments.whites);
+            std::mem::swap(&mut self.blacks, &mut self.selection_adjustments.blacks);
+            std::mem::swap(&mut self.vibrance, &mut self.selection_adjustments.vibrance);
+            std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
+        }
+        if preview_needs_refresh {
+            self.update_processed_image(ui.ctx());
         }
     }
     fn selection_checkpoint(&mut self) {
