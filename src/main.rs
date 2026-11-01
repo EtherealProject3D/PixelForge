@@ -592,7 +592,7 @@ impl PixelForge {
                         self.generation_status = format!("Found {} local checkpoints", models.len());
                         self.generation_checkpoints = models;
                     }
-                    Err(error) => self.generation_status = format!("{error} ({elapsed:.1}s elapsed)"),
+                    Err(error) => self.generation_status = error,
                 }
             } else {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
