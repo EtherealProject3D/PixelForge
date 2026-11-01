@@ -2533,6 +2533,19 @@ impl PixelForge {
                     ui.colored_label(egui::Color32::LIGHT_GREEN, "● Selection active");
                     ui.label(label);
                 });
+                if ui.button("Clear Selection").on_hover_text("Clear the active mask without deleting saved selections").clicked() {
+                    self.selection_checkpoint();
+                    if let Some(mask) = self.selection_mask.as_mut() {
+                        mask.clear();
+                    }
+                    self.active_saved_selection = None;
+                    self.selected_saved_selection = None;
+                    self.selection_name_input.clear();
+                    self.selection_last_point = None;
+                    self.project_dirty = true;
+                    self.refresh_selection_overlay(ui.ctx());
+                    self.update_processed_image(ui.ctx());
+                }
                 if self.selection_adjustment_target {
                     ui.small("Adjustments affect the active mask. Drag the before/after divider to compare.");
                 }
