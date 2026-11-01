@@ -203,6 +203,7 @@ struct PixelForge {
     generation_rx: Option<std::sync::mpsc::Receiver<Result<image::RgbaImage, String>>>,
     generation_running: bool,
     generation_started: Option<std::time::Instant>,
+    generation_progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
     generation_models_rx: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
     generation_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     generation_image: Option<image::RgbaImage>,
@@ -346,6 +347,7 @@ impl Default for PixelForge {
             generation_rx: None,
             generation_running: false,
             generation_started: None,
+            generation_progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             generation_models_rx: None,
             generation_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             generation_image: None,
@@ -567,6 +569,8 @@ impl PixelForge {
         };
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.generation_cancel = cancel.clone();
+        self.generation_progress = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let progress = self.generation_progress.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         self.generation_rx = Some(rx);
         self.generation_running = true;
@@ -574,7 +578,7 @@ impl PixelForge {
         self.generation_status = "Generating locally with ComfyUI...".into();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = ai_generation::generate(request, cancel);
+            let result = ai_generation::generate(request, cancel, progress);
             let _ = tx.send(result);
             ctx.request_repaint();
         });
@@ -4299,6 +4303,14 @@ impl eframe::App for PixelForge {
                                 }
                             });
                             if let Some(started) = self.generation_started {
+                                let step = self.generation_progress.load(std::sync::atomic::Ordering::Relaxed);
+                                if step > 0 {
+                                    ui.add(egui::ProgressBar::new((step as f32 / self.generation_steps.max(1) as f32).clamp(0.0, 1.0))
+                                        .text(format!("Sampling step {}/{} ({:.0}%)", step, self.generation_steps, 100.0 * step as f32 / self.generation_steps.max(1) as f32)));
+                                } else {
+                                    ui.spinner();
+                                    ui.label("Waiting for sampling progress...");
+                                }
                                 ui.label(format!("Generation elapsed: {:.1}s", started.elapsed().as_secs_f32()));
                             }
                             ui.label(&self.generation_status);
