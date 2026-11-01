@@ -1,3 +1,4 @@
+mod adjustments;
 mod project;
 
 use eframe::egui;
@@ -163,6 +164,8 @@ struct PixelForge {
     exporting: bool,
     export_result: Option<bool>,
     contrast: f32,
+    exposure: f32,
+    saturation: f32,
     comparison_enabled: bool,
     comparison_position: f32,
     divider_dragging: bool,
@@ -198,6 +201,8 @@ impl Default for PixelForge {
             exporting: false,
             export_result: None,
             contrast: 0.0,
+            exposure: 0.0,
+            saturation: 0.0,
             comparison_enabled: true,
             comparison_position: 0.5,
             divider_dragging: false,
@@ -250,6 +255,8 @@ impl PixelForge {
                 self.processed_texture = None;
                 self.brightness = 0.0;
                 self.contrast = 0.0;
+                self.exposure = 0.0;
+                self.saturation = 0.0;
                 self.comparison_position = 0.5;
                 self.comparison_enabled = true;
                 self.divider_dragging = false;
@@ -297,6 +304,8 @@ impl PixelForge {
         // Reset adjustments and comparison.
         self.brightness = 0.0;
         self.contrast = 0.0;
+        self.exposure = 0.0;
+        self.saturation = 0.0;
         self.comparison_enabled = true;
         self.comparison_position = 0.5;
         self.divider_dragging = false;
@@ -440,6 +449,8 @@ impl PixelForge {
             image_name,
             brightness: self.brightness,
             contrast: self.contrast,
+            exposure: self.exposure,
+            saturation: self.saturation,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
         };
@@ -484,6 +495,8 @@ impl PixelForge {
 
         self.brightness = data.brightness;
         self.contrast = data.contrast;
+        self.exposure = data.exposure;
+        self.saturation = data.saturation;
         self.comparison_enabled = data.comparison_enabled;
         self.comparison_position = data.comparison_position;
 
@@ -503,7 +516,11 @@ impl PixelForge {
         self.export_progress = 0.0;
         self.export_stage.clear();
 
-        if self.brightness != 0.0 || self.contrast != 0.0 {
+        if self.brightness != 0.0
+            || self.contrast != 0.0
+            || self.exposure != 0.0
+            || self.saturation != 0.0
+        {
             self.update_processed_image(ctx);
         }
 
@@ -643,18 +660,13 @@ impl PixelForge {
 
         let mut adjusted = original.clone();
 
-        let brightness = self.brightness * 2.55;
-        let contrast = 1.0 + self.contrast / 100.0;
-
-        for pixel in adjusted.pixels_mut() {
-            for channel in 0..3 {
-                let value = pixel[channel] as f32;
-                let result = (value - 127.5) * contrast + 127.5 + brightness;
-
-                pixel[channel] = result.clamp(0.0, 255.0) as u8;
-            }
+        adjustments::Adjustments {
+            brightness: self.brightness,
+            contrast: self.contrast,
+            exposure: self.exposure,
+            saturation: self.saturation,
         }
-
+        .apply(&mut adjusted);
         let size = [adjusted.width() as usize, adjusted.height() as usize];
 
         let color_image = ColorImage::from_rgba_unmultiplied(size, adjusted.as_raw());
@@ -707,6 +719,8 @@ impl PixelForge {
         let original = original.clone();
         let brightness = self.brightness;
         let contrast = self.contrast;
+        let exposure = self.exposure;
+        let saturation = self.saturation;
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -726,20 +740,17 @@ impl PixelForge {
 
                 let mut adjusted = original;
 
-                let brightness_offset = brightness * 2.55;
-                let contrast_factor = 1.0 + contrast / 100.0;
+                let settings = adjustments::Adjustments {
+                    brightness,
+                    contrast,
+                    exposure,
+                    saturation,
+                };
 
                 let total = adjusted.width() as usize * adjusted.height() as usize;
 
-                // Actual pixel-processing progress: 0-70%.
                 for (index, pixel) in adjusted.pixels_mut().enumerate() {
-                    for channel in 0..3 {
-                        let value = pixel[channel] as f32;
-                        let result = (value - 127.5) * contrast_factor + 127.5 + brightness_offset;
-
-                        pixel[channel] = result.clamp(0.0, 255.0) as u8;
-                    }
-
+                    settings.apply_pixel(pixel);
                     if index % 250_000 == 0 && total > 0 {
                         let fraction = 0.70 * index as f32 / total as f32;
 
@@ -953,13 +964,18 @@ impl PixelForge {
         let before = (
             self.brightness,
             self.contrast,
+            self.exposure,
+            self.saturation,
             self.comparison_enabled,
             self.comparison_position,
         );
         ui.horizontal(|ui| {
             ui.heading("Image Adjustments");
 
-            let can_reset = self.brightness != 0.0 || self.contrast != 0.0;
+            let can_reset = self.brightness != 0.0
+                || self.contrast != 0.0
+                || self.exposure != 0.0
+                || self.saturation != 0.0;
 
             if ui
                 .add_enabled(can_reset, egui::Button::new("Reset All"))
@@ -967,6 +983,8 @@ impl PixelForge {
             {
                 self.brightness = 0.0;
                 self.contrast = 0.0;
+                self.exposure = 0.0;
+                self.saturation = 0.0;
                 self.update_processed_image(ui.ctx());
             }
         });
@@ -1009,6 +1027,40 @@ impl PixelForge {
             }
         });
 
+        ui.add_space(6.0);
+
+        ui.label("Exposure (EV)");
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.exposure, -3.0..=3.0).step_by(0.1))
+                .changed();
+
+            if ui
+                .add_enabled(self.exposure != 0.0, egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.exposure = 0.0;
+                changed = true;
+            }
+        });
+
+        ui.add_space(6.0);
+
+        ui.label("Saturation");
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.saturation, -100.0..=100.0))
+                .changed();
+
+            if ui
+                .add_enabled(self.saturation != 0.0, egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.saturation = 0.0;
+                changed = true;
+            }
+        });
+
         if changed {
             self.update_processed_image(ui.ctx());
         }
@@ -1031,6 +1083,8 @@ impl PixelForge {
             != (
                 self.brightness,
                 self.contrast,
+                self.exposure,
+                self.saturation,
                 self.comparison_enabled,
                 self.comparison_position,
             )
@@ -1358,7 +1412,11 @@ impl eframe::App for PixelForge {
 
                     if ui
                         .add_enabled(
-                            can_edit && (self.brightness != 0.0 || self.contrast != 0.0),
+                            can_edit
+                                && (self.brightness != 0.0
+                                    || self.contrast != 0.0
+                                    || self.exposure != 0.0
+                                    || self.saturation != 0.0),
                             egui::Button::new("Reset All Adjustments"),
                         )
                         .clicked()
@@ -1366,6 +1424,8 @@ impl eframe::App for PixelForge {
                         ui.close();
                         self.brightness = 0.0;
                         self.contrast = 0.0;
+                        self.exposure = 0.0;
+                        self.saturation = 0.0;
                         self.project_dirty = true;
                         self.update_processed_image(ctx);
                     }
@@ -1546,7 +1606,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.1.9")
+            .with_title("PixelForge v0.2.0")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()

@@ -1,7 +1,8 @@
 use std::io::{Cursor, Read, Write};
 use std::path::Path;
 
-const MAGIC: &[u8; 4] = b"PXF1";
+const MAGIC_V1: &[u8; 4] = b"PXF1";
+const MAGIC_V2: &[u8; 4] = b"PXF2";
 const MAX_BYTES: u64 = 1_073_741_824;
 const MAX_NAME: usize = 4096;
 
@@ -10,6 +11,8 @@ pub struct Project {
     pub image_name: String,
     pub brightness: f32,
     pub contrast: f32,
+    pub exposure: f32,
+    pub saturation: f32,
     pub comparison_enabled: bool,
     pub comparison_position: f32,
 }
@@ -35,9 +38,11 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
     }
 
     let mut data = Vec::new();
-    data.extend_from_slice(MAGIC);
+    data.extend_from_slice(MAGIC_V2);
     data.extend_from_slice(&project.brightness.to_le_bytes());
     data.extend_from_slice(&project.contrast.to_le_bytes());
+    data.extend_from_slice(&project.exposure.to_le_bytes());
+    data.extend_from_slice(&project.saturation.to_le_bytes());
     data.push(u8::from(project.comparison_enabled));
     data.extend_from_slice(&project.comparison_position.to_le_bytes());
     data.extend_from_slice(&(name.len() as u32).to_le_bytes());
@@ -131,17 +136,33 @@ pub fn load(path: &Path) -> Result<Project, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let mut reader = Cursor::new(bytes.as_slice());
 
-    if &read::<4>(&mut reader)? != MAGIC {
+    let version = read::<4>(&mut reader)?;
+
+    if &version != MAGIC_V1 && &version != MAGIC_V2 {
         return Err("Unsupported PixelForge project format".into());
     }
 
     let brightness = f32::from_le_bytes(read::<4>(&mut reader)?);
     let contrast = f32::from_le_bytes(read::<4>(&mut reader)?);
+
+    let (exposure, saturation) = if &version == MAGIC_V2 {
+        (
+            f32::from_le_bytes(read::<4>(&mut reader)?),
+            f32::from_le_bytes(read::<4>(&mut reader)?),
+        )
+    } else {
+        (0.0, 0.0)
+    };
+
     let enabled = read::<1>(&mut reader)?[0];
     let comparison_position = f32::from_le_bytes(read::<4>(&mut reader)?);
 
     if !brightness.is_finite()
         || !contrast.is_finite()
+        || !exposure.is_finite()
+        || !saturation.is_finite()
+        || !(-3.0..=3.0).contains(&exposure)
+        || !(-100.0..=100.0).contains(&saturation)
         || !comparison_position.is_finite()
         || !(-100.0..=100.0).contains(&brightness)
         || !(-100.0..=100.0).contains(&contrast)
@@ -181,6 +202,8 @@ pub fn load(path: &Path) -> Result<Project, String> {
         image_name,
         brightness,
         contrast,
+        exposure,
+        saturation,
         comparison_enabled: enabled == 1,
         comparison_position,
     })
@@ -206,6 +229,8 @@ mod tests {
             image_name: "test.png".into(),
             brightness: 25.0,
             contrast: -10.0,
+            exposure: 1.2,
+            saturation: 35.0,
             comparison_enabled: true,
             comparison_position: 0.3,
         };
@@ -218,6 +243,8 @@ mod tests {
         assert_eq!(loaded.image_name, original.image_name);
         assert_eq!(loaded.brightness, original.brightness);
         assert_eq!(loaded.contrast, original.contrast);
+        assert_eq!(loaded.exposure, original.exposure);
+        assert_eq!(loaded.saturation, original.saturation);
         assert_eq!(loaded.comparison_enabled, original.comparison_enabled);
         assert_eq!(loaded.comparison_position, original.comparison_position);
     }
