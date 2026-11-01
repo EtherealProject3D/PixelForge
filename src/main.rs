@@ -226,6 +226,10 @@ const GENERATION_SIZES: &[(&str, u32, u32)] = &[
 ];
 
 struct PixelForge {
+    inactive_tabs: Vec<(usize, Box<PixelForge>)>,
+    active_tab: usize,
+    next_tab: usize,
+    closing_tab: Option<usize>,
     generation_style: usize,
     generation_size: usize,
     generation_portrait: bool,
@@ -386,6 +390,10 @@ struct PixelForge {
 impl Default for PixelForge {
     fn default() -> Self {
         Self {
+            inactive_tabs: Vec::new(),
+            active_tab: 0,
+            next_tab: 1,
+            closing_tab: None,
             generation_style: 0,
             generation_size: 0,
             generation_portrait: false,
@@ -975,6 +983,155 @@ impl PixelForge {
                 }
             });
         });
+    }
+
+    // Keep Generation Studio alive across document changes; editor state belongs to each tab.
+    fn swap_generation_state(&mut self, other: &mut PixelForge) {
+        std::mem::swap(&mut self.generation_style, &mut other.generation_style);
+        std::mem::swap(&mut self.generation_size, &mut other.generation_size);
+        std::mem::swap(&mut self.generation_portrait, &mut other.generation_portrait);
+        std::mem::swap(&mut self.generation_custom_size, &mut other.generation_custom_size);
+        std::mem::swap(&mut self.generation_resolution, &mut other.generation_resolution);
+        std::mem::swap(&mut self.generation_zoom, &mut other.generation_zoom);
+        std::mem::swap(&mut self.generation_pan, &mut other.generation_pan);
+        std::mem::swap(&mut self.generation_batch_count, &mut other.generation_batch_count);
+        std::mem::swap(&mut self.generation_batch_done, &mut other.generation_batch_done);
+        std::mem::swap(&mut self.generation_random_seeds, &mut other.generation_random_seeds);
+        std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
+        std::mem::swap(&mut self.generation_selected, &mut other.generation_selected);
+        std::mem::swap(&mut self.generation_compare, &mut other.generation_compare);
+        std::mem::swap(&mut self.generation_compare_index, &mut other.generation_compare_index);
+        std::mem::swap(&mut self.generation_workspace, &mut other.generation_workspace);
+        std::mem::swap(&mut self.generation_prompt, &mut other.generation_prompt);
+        std::mem::swap(&mut self.generation_negative, &mut other.generation_negative);
+        std::mem::swap(&mut self.generation_checkpoint, &mut other.generation_checkpoint);
+        std::mem::swap(&mut self.generation_checkpoints, &mut other.generation_checkpoints);
+        std::mem::swap(&mut self.generation_width, &mut other.generation_width);
+        std::mem::swap(&mut self.generation_height, &mut other.generation_height);
+        std::mem::swap(&mut self.generation_steps, &mut other.generation_steps);
+        std::mem::swap(&mut self.generation_cfg, &mut other.generation_cfg);
+        std::mem::swap(&mut self.generation_seed, &mut other.generation_seed);
+        std::mem::swap(&mut self.generation_rx, &mut other.generation_rx);
+        std::mem::swap(&mut self.generation_running, &mut other.generation_running);
+        std::mem::swap(&mut self.generation_started, &mut other.generation_started);
+        std::mem::swap(&mut self.generation_progress, &mut other.generation_progress);
+        std::mem::swap(&mut self.generation_models_rx, &mut other.generation_models_rx);
+        std::mem::swap(&mut self.generation_cancel, &mut other.generation_cancel);
+        std::mem::swap(&mut self.generation_image, &mut other.generation_image);
+        std::mem::swap(&mut self.generation_texture, &mut other.generation_texture);
+        std::mem::swap(&mut self.generation_status, &mut other.generation_status);
+        std::mem::swap(&mut self.generation_tools_tab, &mut other.generation_tools_tab);
+    }
+
+    fn project_tab_title(&self) -> String {
+        self.project_path.as_ref().or(self.image_path.as_ref())
+            .and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "Untitled".into())
+    }
+
+    fn switch_project_tab(&mut self, target: usize) {
+        if target == self.active_tab { return; }
+        let mut tabs = std::mem::take(&mut self.inactive_tabs);
+        let Some(position) = tabs.iter().position(|(id, _)| *id == target) else {
+            self.inactive_tabs = tabs;
+            return;
+        };
+        let previous = self.active_tab;
+        let next_id = self.next_tab;
+        let closing = self.closing_tab;
+        std::mem::swap(self, tabs[position].1.as_mut());
+        self.swap_generation_state(tabs[position].1.as_mut());
+        tabs[position].0 = previous;
+        self.inactive_tabs = tabs;
+        self.active_tab = target;
+        self.next_tab = next_id;
+        self.closing_tab = closing;
+    }
+
+    fn create_project_tab(&mut self) {
+        if self.original_pixels.is_none() && self.inactive_tabs.is_empty() { return; }
+        let mut tabs = std::mem::take(&mut self.inactive_tabs);
+        let previous = self.active_tab;
+        let id = self.next_tab;
+        let mut old = std::mem::replace(self, PixelForge::default());
+        self.swap_generation_state(&mut old);
+        tabs.push((previous, Box::new(old)));
+        self.inactive_tabs = tabs;
+        self.active_tab = id;
+        self.next_tab = id + 1;
+    }
+
+    fn close_project_tab(&mut self, target: usize) {
+        if target == self.active_tab {
+            if let Some((next, _)) = self.inactive_tabs.last() {
+                let next = *next;
+                self.switch_project_tab(next);
+                self.inactive_tabs.retain(|(id, _)| *id != target);
+            } else {
+                self.close_image();
+            }
+        } else {
+            self.inactive_tabs.retain(|(id, _)| *id != target);
+        }
+        self.closing_tab = None;
+    }
+
+    fn show_project_tabs(&mut self, ctx: &egui::Context) {
+        let mut entries: Vec<(usize, String, bool)> = self.inactive_tabs.iter()
+            .map(|(id, tab)| (*id, tab.project_tab_title(), tab.project_dirty)).collect();
+        entries.push((self.active_tab, self.project_tab_title(), self.project_dirty));
+        entries.sort_by_key(|entry| entry.0);
+        let mut switch = None;
+        let mut close = None;
+        egui::TopBottomPanel::top("document_tabs").show(ctx, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (id, title, dirty) in &entries {
+                        let label = format!("{}{}", title, if *dirty { " *" } else { "" });
+                        if ui.selectable_label(*id == self.active_tab, label).clicked() {
+                            switch = Some(*id);
+                        }
+                        if ui.small_button("×").on_hover_text("Close project tab").clicked() {
+                            close = Some(*id);
+                        }
+                        ui.separator();
+                    }
+                    if ui.button("+").on_hover_text("Open another image").clicked() {
+                        self.open_image(ctx);
+                    }
+                });
+            });
+        });
+        if let Some(id) = switch { self.switch_project_tab(id); }
+        if let Some(id) = close {
+            let dirty = if id == self.active_tab { self.project_dirty } else {
+                self.inactive_tabs.iter().find(|(tab_id, _)| *tab_id == id)
+                    .is_some_and(|(_, tab)| tab.project_dirty)
+            };
+            if dirty { self.closing_tab = Some(id); }
+            else { self.close_project_tab(id); }
+        }
+        if let Some(id) = self.closing_tab {
+            egui::Window::new("Unsaved Project Changes")
+                .collapsible(false).resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("Save this project's changes before closing its tab?");
+                    ui.horizontal(|ui| {
+                        if ui.button("Cancel").clicked() { self.closing_tab = None; }
+                        if ui.button("Discard").clicked() { self.close_project_tab(id); }
+                        if ui.button("Save").clicked() {
+                            let current = self.active_tab;
+                            self.switch_project_tab(id);
+                            self.save_project(false);
+                            if !self.project_dirty {
+                                self.close_project_tab(id);
+                            } else if current != id {
+                                self.switch_project_tab(current);
+                            }
+                        }
+                    });
+                });
+        }
     }
 
     fn open_generated_image(&mut self, ctx: &egui::Context) {
