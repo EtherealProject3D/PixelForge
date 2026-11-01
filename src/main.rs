@@ -183,7 +183,7 @@ enum ExportEvent {
     },
     Finished(Result<PathBuf, String>),
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingOpen {
     Image,
     Project,
