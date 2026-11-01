@@ -256,6 +256,9 @@ struct PixelForge {
     preview_rx: Option<std::sync::mpsc::Receiver<(u64, ColorImage, histogram::Histogram)>>,
     preview_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     brightness: f32,
+    selection_adjustment_target: bool,
+    selection_brightness: f32,
+    selection_exposure: f32,
     export_rx: Option<std::sync::mpsc::Receiver<ExportEvent>>,
     export_progress: f32,
     export_stage: String,
@@ -352,6 +355,9 @@ impl Default for PixelForge {
             preview_rx: None,
             preview_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             brightness: 0.0,
+            selection_adjustment_target: false,
+            selection_brightness: 0.0,
+            selection_exposure: 0.0,
             export_rx: None,
             export_progress: 0.0,
             export_stage: String::new(),
@@ -1051,6 +1057,13 @@ impl PixelForge {
             gamma: self.gamma,
         };
 
+        let selection_mask = self.selection_mask.clone();
+        let local_settings = adjustments::Adjustments {
+            brightness: self.selection_brightness,
+            exposure: self.selection_exposure,
+            ..Default::default()
+        };
+
         let (tx, rx) = std::sync::mpsc::channel();
         self.preview_rx = Some(rx);
 
@@ -1060,13 +1073,29 @@ impl PixelForge {
             let mut adjusted = (*source).clone();
 
             // Process one row at a time, checking for newer requests.
-            for row in adjusted.rows_mut() {
+            let width = adjusted.width();
+            let height = adjusted.height();
+            for (y, row) in adjusted.rows_mut().enumerate() {
                 if generation_counter.load(Ordering::Relaxed) != generation {
                     return;
                 }
-
-                for pixel in row {
+                for (x, pixel) in row.enumerate() {
                     settings.apply_pixel(pixel);
+                    if let Some(mask) = &selection_mask {
+                        let (mw, mh) = mask.dimensions();
+                        if mw > 0 && mh > 0 {
+                            let mx = (x as u64 * mw as u64 / width as u64).min(mw as u64 - 1) as u32;
+                            let my = (y as u64 * mh as u64 / height as u64).min(mh as u64 - 1) as u32;
+                            let alpha = mask.get(mx, my).unwrap_or(0);
+                            if alpha > 0 {
+                                let before = *pixel;
+                                local_settings.apply_pixel(pixel);
+                                for c in 0..3 {
+                                    pixel[c] = ((before[c] as u16 * (255 - alpha) as u16 + pixel[c] as u16 * alpha as u16 + 127) / 255) as u8;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1171,6 +1200,12 @@ impl PixelForge {
         let blacks = self.blacks;
         let vibrance = self.vibrance;
         let gamma = self.gamma;
+        let selection_mask = self.selection_mask.clone();
+        let local_settings = adjustments::Adjustments {
+            brightness: self.selection_brightness,
+            exposure: self.selection_exposure,
+            ..Default::default()
+        };
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -1208,8 +1243,27 @@ impl PixelForge {
 
                 let total = adjusted.width() as usize * adjusted.height() as usize;
 
+                let width = adjusted.width();
+                let height = adjusted.height();
                 for (index, pixel) in adjusted.pixels_mut().enumerate() {
                     settings.apply_pixel(pixel);
+                    if let Some(mask) = &selection_mask {
+                        let (mw, mh) = mask.dimensions();
+                        if mw > 0 && mh > 0 {
+                            let x = index as u64 % width as u64;
+                            let y = index as u64 / width as u64;
+                            let mx = (x * mw as u64 / width as u64).min(mw as u64 - 1) as u32;
+                            let my = (y * mh as u64 / height as u64).min(mh as u64 - 1) as u32;
+                            let alpha = mask.get(mx, my).unwrap_or(0);
+                            if alpha > 0 {
+                                let before = *pixel;
+                                local_settings.apply_pixel(pixel);
+                                for c in 0..3 {
+                                    pixel[c] = ((before[c] as u16 * (255 - alpha) as u16 + pixel[c] as u16 * alpha as u16 + 127) / 255) as u8;
+                                }
+                            }
+                        }
+                    }
                     if index % 250_000 == 0 && total > 0 {
                         let fraction = 0.70 * index as f32 / total as f32;
 
@@ -2455,6 +2509,32 @@ impl PixelForge {
                 self.update_processed_image(ui.ctx());
             }
         });
+
+        ui.horizontal(|ui| {
+            ui.label("Adjustment target:");
+            ui.selectable_value(&mut self.selection_adjustment_target, false, "Global");
+            ui.selectable_value(&mut self.selection_adjustment_target, true, "Selection");
+        });
+        if self.selection_adjustment_target {
+            ui.small("Selection-only Exposure and Brightness (other controls remain global).");
+            if self.selection_mask.is_none() {
+                ui.colored_label(egui::Color32::YELLOW, "Paint or load a selection mask first.");
+            }
+            let mut local_changed = false;
+            ui.label("Selection Exposure (EV)");
+            local_changed |= ui.add(egui::Slider::new(&mut self.selection_exposure, -3.0..=3.0).step_by(0.1)).changed();
+            ui.label("Selection Brightness");
+            local_changed |= ui.add(egui::Slider::new(&mut self.selection_brightness, -100.0..=100.0)).changed();
+            if ui.button("Reset Selection Adjustments").clicked() {
+                self.selection_exposure = 0.0;
+                self.selection_brightness = 0.0;
+                local_changed = true;
+            }
+            if local_changed {
+                self.project_dirty = true;
+                self.update_processed_image(ui.ctx());
+            }
+        }
 
         ui.separator();
 
