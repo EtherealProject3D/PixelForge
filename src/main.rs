@@ -4472,7 +4472,7 @@ impl eframe::App for PixelForge {
                             if !self.generation_custom_size {
                                 let (_, w, h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
                                 (self.generation_width, self.generation_height) =
-                                    if self.generation_portrait { (*h, *w) } else { (*w, *h) };
+                                    if self.generation_portrait { (h, w) } else { (w, h) };
                             }
                             ui.horizontal(|ui| {
                                 ui.label("Batch");
