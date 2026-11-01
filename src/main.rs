@@ -270,6 +270,7 @@ struct PixelForge {
     install_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     install_status: String,
     install_folder: Option<PathBuf>,
+    install_folder_manual: bool,
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
     ai_denoise_level: u32,
@@ -440,6 +441,7 @@ impl Default for PixelForge {
             install_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             install_status: String::new(),
             install_folder: None,
+            install_folder_manual: false,
             ai_rx: None,
             ai_running: false,
             ai_denoise_level: 2,
@@ -723,7 +725,7 @@ impl PixelForge {
                         }
                         self.generation_status = format!("Found {} local checkpoints", models.len());
                         self.generation_checkpoints = models;
-                        if self.install_folder.is_none() {
+                        if !self.install_folder_manual {
                             self.install_folder = model_installer::detect_checkpoint_folder(&self.generation_checkpoints);
                         }
                     }
@@ -773,22 +775,24 @@ impl PixelForge {
         }
     }
 
+    fn refresh_generation_models(&mut self, ctx: &egui::Context) {
+        if self.generation_models_rx.is_some() { return; }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.generation_models_rx = Some(rx);
+        self.generation_status = "Connecting to local ComfyUI (starting backend if needed)...".into();
+        let repaint = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(ai_generation::checkpoints());
+            repaint.request_repaint();
+        });
+    }
+
     fn show_generation_sidebar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.heading("Image Generation");
         ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
         if ui.button("Connect / Refresh Models").clicked() {
-            if self.generation_models_rx.is_none() {
-                let (tx, rx) = std::sync::mpsc::channel();
-                self.generation_models_rx = Some(rx);
-                self.generation_status = "Connecting to local ComfyUI (starting backend if needed)...".into();
-                let ctx = ctx.clone();
-                std::thread::spawn(move || {
-                    let result = ai_generation::checkpoints();
-                    let _ = tx.send(result);
-                    ctx.request_repaint();
-                });
-            }
+            self.refresh_generation_models(&ctx);
         }
         egui::ComboBox::from_label("Checkpoint")
             .selected_text(if self.generation_checkpoint.is_empty() { "Select a checkpoint" } else { &self.generation_checkpoint })
@@ -803,7 +807,7 @@ impl PixelForge {
             .show(ui, |ui| {
                 ui.label("Local SDXL checkpoints for image generation.");
                 ui.label(format!("{} checkpoint(s) detected by ComfyUI", self.generation_checkpoints.len()));
-                if self.install_folder.is_none() {
+                if self.install_folder.is_none() && !self.install_folder_manual {
                     self.install_folder = model_installer::detect_checkpoint_folder(&self.generation_checkpoints);
                 }
                 if let Some(folder) = &self.install_folder {
@@ -816,6 +820,7 @@ impl PixelForge {
                         .set_title("Select ComfyUI models/checkpoints")
                         .pick_folder() {
                         self.install_folder = Some(folder);
+                        self.install_folder_manual = true;
                     }
                 }
                 let installed = |term: &str| self.generation_checkpoints.iter()
@@ -851,6 +856,7 @@ impl PixelForge {
                                 });
                                 if let Some(folder) = folder {
                                     self.install_folder = Some(folder.clone());
+                                    self.install_folder_manual = true;
                                     self.install_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
                                     self.install_progress.store(0, std::sync::atomic::Ordering::Relaxed);
                                     self.install_total.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1160,6 +1166,7 @@ impl PixelForge {
         std::mem::swap(&mut self.install_cancel, &mut other.install_cancel);
         std::mem::swap(&mut self.install_status, &mut other.install_status);
         std::mem::swap(&mut self.install_folder, &mut other.install_folder);
+        std::mem::swap(&mut self.install_folder_manual, &mut other.install_folder_manual);
         std::mem::swap(&mut self.generation_tools_tab, &mut other.generation_tools_tab);
     }
 
@@ -4778,7 +4785,12 @@ impl eframe::App for PixelForge {
                         self.selection_tools_tab = selection_clicked;
                         self.ai_tools_tab = ai_clicked;
                         self.generation_tools_tab = generation_clicked;
-                        if generation_clicked { self.generation_workspace = true; }
+                        if generation_clicked {
+                            self.generation_workspace = true;
+                            if self.generation_models_rx.is_none() && self.generation_checkpoints.is_empty() {
+                                self.refresh_generation_models(ctx);
+                            }
+                        }
                         if edit_clicked { self.generation_workspace = false; }
 
                         // Reveal the entire selected region on the adjusted (right) side
