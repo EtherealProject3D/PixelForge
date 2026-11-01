@@ -1644,7 +1644,7 @@ impl PixelForge {
                 self.ai_show_result = true;
             }
             Err(error) => {
-                self.ai_status = format!("AI upscale failed: {error}");
+                self.ai_status = format!("{} failed: {error}", if self.ai_is_denoise { "AI denoise" } else { "AI upscale" });
                 self.status = self.ai_status.clone();
             }
         }
@@ -1858,7 +1858,7 @@ impl PixelForge {
             });
 
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.ai_comparison, "Compare Lanczos / Result");
+                ui.checkbox(&mut self.ai_comparison, if self.ai_is_denoise { "Compare Original / Denoised" } else { "Compare Lanczos / Result" });
 
                 if self.ai_comparison {
                     ui.add(
@@ -2339,7 +2339,7 @@ impl PixelForge {
                     painter.text(
                         Pos2::new(rect.left() + 8.0, rect.top() + 8.0),
                         egui::Align2::LEFT_TOP,
-                        "Lanczos",
+                        if self.ai_is_denoise { "Original" } else { "Lanczos" },
                         egui::FontId::proportional(14.0),
                         Color32::WHITE,
                     );
@@ -2347,7 +2347,7 @@ impl PixelForge {
                     painter.text(
                         Pos2::new(rect.right() - 8.0, rect.top() + 8.0),
                         egui::Align2::RIGHT_TOP,
-                        "AI Result",
+                        if self.ai_is_denoise { "Denoised" } else { "AI Result" },
                         egui::FontId::proportional(14.0),
                         Color32::WHITE,
                     );
