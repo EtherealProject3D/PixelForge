@@ -768,25 +768,54 @@ impl PixelForge {
                 if !self.project_dirty { self.generation_workspace = false; }
             }
         });
-        let available = ui.available_size();
-        let thumbnail_height = 100.0;
-        let viewer_height = (available.y - thumbnail_height - 35.0).max(120.0);
         ui.horizontal(|ui| {
-            let indices = if self.generation_compare {
-                vec![self.generation_selected, self.generation_compare_index]
-            } else { vec![self.generation_selected] };
-            let cell_width = (ui.available_width() / indices.len() as f32 - 8.0).max(80.0);
-            for index in indices {
-                let item = &self.generation_gallery[index];
-                let aspect = item.pixels.width() as f32 / item.pixels.height().max(1) as f32;
-                let draw_width = cell_width.min(viewer_height * aspect);
-                let draw_height = draw_width / aspect;
-                ui.vertical(|ui| {
-                    ui.label(format!("Image {} | Seed {}", index+1, item.seed));
-                    ui.image((item.texture.id(), egui::vec2(draw_width, draw_height)));
-                });
+            if ui.button("Fit").clicked() {
+                self.generation_zoom = 1.0;
+                self.generation_pan = Vec2::ZERO;
             }
+            if ui.button("−").clicked() { self.generation_zoom = (self.generation_zoom / 1.25).max(0.1); }
+            if ui.button("+").clicked() { self.generation_zoom = (self.generation_zoom * 1.25).min(16.0); }
+            ui.label(format!("Zoom {:.0}% of fit | Scroll to zoom, drag to pan", self.generation_zoom * 100.0));
         });
+        let available = ui.available_size();
+        let thumbnail_height = 110.0;
+        let viewer_height = (available.y - thumbnail_height - 10.0).max(120.0);
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(available.x.max(100.0), viewer_height), egui::Sense::drag());
+        if response.dragged() {
+            self.generation_pan += response.drag_delta();
+        }
+        if response.hovered() {
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll.abs() > 0.0 {
+                self.generation_zoom = (self.generation_zoom * (scroll * 0.002).exp()).clamp(0.1, 16.0);
+            }
+        }
+        let painter = ui.painter().with_clip_rect(rect);
+        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+        let indices = if self.generation_compare {
+            vec![self.generation_selected, self.generation_compare_index]
+        } else { vec![self.generation_selected] };
+        let count = indices.len();
+        for (slot, index) in indices.into_iter().enumerate() {
+            let cell = egui::Rect::from_min_size(
+                egui::pos2(rect.min.x + rect.width() * slot as f32 / count as f32, rect.min.y),
+                egui::vec2(rect.width() / count as f32, rect.height()));
+            let item = &self.generation_gallery[index];
+            let fit = (cell.width() / item.pixels.width() as f32)
+                .min(cell.height() / item.pixels.height() as f32);
+            let size = egui::vec2(item.pixels.width() as f32, item.pixels.height() as f32)
+                * fit * self.generation_zoom;
+            let center = cell.center() + self.generation_pan;
+            let image_rect = egui::Rect::from_center_size(center, size);
+            let clipped = painter.with_clip_rect(cell);
+            clipped.image(item.texture.id(), image_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE);
+            clipped.text(cell.left_top() + egui::vec2(8.0, 8.0), egui::Align2::LEFT_TOP,
+                format!("Image {} | Seed {}", index+1, item.seed),
+                egui::FontId::proportional(13.0), egui::Color32::WHITE);
+        }
         egui::ScrollArea::horizontal().max_height(thumbnail_height).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (index, item) in self.generation_gallery.iter().enumerate() {
