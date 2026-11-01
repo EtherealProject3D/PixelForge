@@ -256,6 +256,8 @@ struct PixelForge {
     preview_rx: Option<std::sync::mpsc::Receiver<(u64, ColorImage, histogram::Histogram)>>,
     preview_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     brightness: f32,
+    selection_adjustment_target: bool,
+    selection_adjustments: adjustments::Adjustments,
     export_rx: Option<std::sync::mpsc::Receiver<ExportEvent>>,
     export_progress: f32,
     export_stage: String,
@@ -352,6 +354,8 @@ impl Default for PixelForge {
             preview_rx: None,
             preview_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             brightness: 0.0,
+            selection_adjustment_target: false,
+            selection_adjustments: adjustments::Adjustments::default(),
             export_rx: None,
             export_progress: 0.0,
             export_stage: String::new(),
@@ -457,6 +461,8 @@ impl PixelForge {
                 self.blacks = 0.0;
                 self.vibrance = 0.0;
                 self.gamma = 0.0;
+                self.selection_adjustments = adjustments::Adjustments::default();
+                self.selection_adjustment_target = false;
                 self.comparison_position = 0.5;
                 self.comparison_enabled = true;
                 self.divider_dragging = false;
@@ -539,6 +545,8 @@ impl PixelForge {
         self.blacks = 0.0;
         self.vibrance = 0.0;
         self.gamma = 0.0;
+        self.selection_adjustments = adjustments::Adjustments::default();
+        self.selection_adjustment_target = false;
         self.comparison_enabled = true;
         self.comparison_position = 0.5;
         self.divider_dragging = false;
@@ -700,6 +708,9 @@ impl PixelForge {
             gamma: self.gamma,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
+            selection_adjustments: [self.selection_adjustments.brightness, self.selection_adjustments.contrast, self.selection_adjustments.exposure, self.selection_adjustments.saturation, self.selection_adjustments.temperature, self.selection_adjustments.tint, self.selection_adjustments.highlights, self.selection_adjustments.shadows, self.selection_adjustments.whites, self.selection_adjustments.blacks, self.selection_adjustments.vibrance, self.selection_adjustments.gamma],
+            active_mask: self.selection_mask.as_ref().map(|mask| mask.pixels().to_vec()),
+            selection_target: self.selection_adjustment_target,
             saved_selections: self
                 .saved_selections
                 .iter()
@@ -760,6 +771,22 @@ impl PixelForge {
         self.gamma = data.gamma;
         self.comparison_enabled = data.comparison_enabled;
         self.comparison_position = data.comparison_position;
+        self.selection_adjustment_target = data.selection_target;
+        self.selection_adjustments = adjustments::Adjustments {
+            brightness: data.selection_adjustments[0],
+            contrast: data.selection_adjustments[1],
+            exposure: data.selection_adjustments[2],
+            saturation: data.selection_adjustments[3],
+            temperature: data.selection_adjustments[4],
+            tint: data.selection_adjustments[5],
+            highlights: data.selection_adjustments[6],
+            shadows: data.selection_adjustments[7],
+            whites: data.selection_adjustments[8],
+            blacks: data.selection_adjustments[9],
+            vibrance: data.selection_adjustments[10],
+            gamma: data.selection_adjustments[11],
+        };
+        let restored_active_mask = data.active_mask;
 
         let selection_dimensions = self
             .original_pixels
@@ -782,16 +809,14 @@ impl PixelForge {
         self.selected_saved_selection = None;
         self.active_saved_selection = None;
         self.selection_name_input.clear();
-        self.selection_mask = None;
+        self.selection_mask = selection_dimensions.and_then(|(width, height)| {
+            restored_active_mask.and_then(|pixels| masking::SelectionMask::from_pixels(width, height, pixels).ok())
+        });
         self.selection_texture = None;
         self.selection_undo.clear();
         self.selection_redo.clear();
 
-        self.selection_mask = None;
-        self.selection_texture = None;
         self.selection_last_point = None;
-        self.selection_undo.clear();
-        self.selection_redo.clear();
         self.selection_stroke_active = false;
         self.image_size = size;
         self.image_path = Some(PathBuf::from(data.image_name));
@@ -809,21 +834,7 @@ impl PixelForge {
         self.export_progress = 0.0;
         self.export_stage.clear();
 
-        if self.brightness != 0.0
-            || self.contrast != 0.0
-            || self.exposure != 0.0
-            || self.saturation != 0.0
-            || self.temperature != 0.0
-            || self.tint != 0.0
-            || self.highlights != 0.0
-            || self.shadows != 0.0
-            || self.whites != 0.0
-            || self.blacks != 0.0
-            || self.vibrance != 0.0
-            || self.gamma != 0.0
-        {
-            self.update_processed_image(ctx);
-        }
+        self.refresh_selection_overlay(ctx);
 
         self.status = format!("Project opened: {}", path.display());
     }
@@ -1051,6 +1062,9 @@ impl PixelForge {
             gamma: self.gamma,
         };
 
+        let selection_mask = self.selection_mask.clone();
+        let local_settings = self.selection_adjustments;
+
         let (tx, rx) = std::sync::mpsc::channel();
         self.preview_rx = Some(rx);
 
@@ -1060,13 +1074,29 @@ impl PixelForge {
             let mut adjusted = (*source).clone();
 
             // Process one row at a time, checking for newer requests.
-            for row in adjusted.rows_mut() {
+            let width = adjusted.width();
+            let height = adjusted.height();
+            for (y, row) in adjusted.rows_mut().enumerate() {
                 if generation_counter.load(Ordering::Relaxed) != generation {
                     return;
                 }
-
-                for pixel in row {
+                for (x, pixel) in row.enumerate() {
                     settings.apply_pixel(pixel);
+                    if let Some(mask) = &selection_mask {
+                        let (mw, mh) = mask.dimensions();
+                        if mw > 0 && mh > 0 {
+                            let mx = (x as u64 * mw as u64 / width as u64).min(mw as u64 - 1) as u32;
+                            let my = (y as u64 * mh as u64 / height as u64).min(mh as u64 - 1) as u32;
+                            let alpha = mask.get(mx, my).unwrap_or(0);
+                            if alpha > 0 {
+                                let before = *pixel;
+                                local_settings.apply_pixel(pixel);
+                                for c in 0..3 {
+                                    pixel[c] = ((before[c] as u32 * (255 - alpha) as u32 + pixel[c] as u32 * alpha as u32 + 127) / 255) as u8;
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -1171,6 +1201,8 @@ impl PixelForge {
         let blacks = self.blacks;
         let vibrance = self.vibrance;
         let gamma = self.gamma;
+        let selection_mask = self.selection_mask.clone();
+        let local_settings = self.selection_adjustments;
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -1208,8 +1240,27 @@ impl PixelForge {
 
                 let total = adjusted.width() as usize * adjusted.height() as usize;
 
+                let width = adjusted.width();
+                let height = adjusted.height();
                 for (index, pixel) in adjusted.pixels_mut().enumerate() {
                     settings.apply_pixel(pixel);
+                    if let Some(mask) = &selection_mask {
+                        let (mw, mh) = mask.dimensions();
+                        if mw > 0 && mh > 0 {
+                            let x = index as u64 % width as u64;
+                            let y = index as u64 / width as u64;
+                            let mx = (x * mw as u64 / width as u64).min(mw as u64 - 1) as u32;
+                            let my = (y * mh as u64 / height as u64).min(mh as u64 - 1) as u32;
+                            let alpha = mask.get(mx, my).unwrap_or(0);
+                            if alpha > 0 {
+                                let before = *pixel;
+                                local_settings.apply_pixel(pixel);
+                                for c in 0..3 {
+                                    pixel[c] = ((before[c] as u32 * (255 - alpha) as u32 + pixel[c] as u32 * alpha as u32 + 127) / 255) as u8;
+                                }
+                            }
+                        }
+                    }
                     if index % 250_000 == 0 && total > 0 {
                         let fraction = 0.70 * index as f32 / total as f32;
 
@@ -2404,6 +2455,23 @@ impl PixelForge {
             });
     }
     fn show_adjustments(&mut self, ui: &mut egui::Ui) {
+        // Temporarily bind the existing sliders to the selection adjustment bank.
+        // Restore global values before rendering the preview.
+        if self.selection_adjustment_target {
+            std::mem::swap(&mut self.brightness, &mut self.selection_adjustments.brightness);
+            std::mem::swap(&mut self.contrast, &mut self.selection_adjustments.contrast);
+            std::mem::swap(&mut self.exposure, &mut self.selection_adjustments.exposure);
+            std::mem::swap(&mut self.saturation, &mut self.selection_adjustments.saturation);
+            std::mem::swap(&mut self.temperature, &mut self.selection_adjustments.temperature);
+            std::mem::swap(&mut self.tint, &mut self.selection_adjustments.tint);
+            std::mem::swap(&mut self.highlights, &mut self.selection_adjustments.highlights);
+            std::mem::swap(&mut self.shadows, &mut self.selection_adjustments.shadows);
+            std::mem::swap(&mut self.whites, &mut self.selection_adjustments.whites);
+            std::mem::swap(&mut self.blacks, &mut self.selection_adjustments.blacks);
+            std::mem::swap(&mut self.vibrance, &mut self.selection_adjustments.vibrance);
+            std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
+        }
+        let mut preview_needs_refresh = false;
         let before_adjustments = [
             self.brightness,
             self.contrast,
@@ -2452,9 +2520,51 @@ impl PixelForge {
                 self.blacks = 0.0;
                 self.vibrance = 0.0;
                 self.gamma = 0.0;
-                self.update_processed_image(ui.ctx());
+                preview_needs_refresh = true;
             }
         });
+
+        ui.horizontal(|ui| {
+            ui.label("Adjustment target:");
+            ui.selectable_value(&mut self.selection_adjustment_target, false, "Global");
+            ui.selectable_value(&mut self.selection_adjustment_target, true, "Selection");
+        });
+        if let Some(mask) = &self.selection_mask {
+            let active_pixels = mask.pixels().iter().filter(|&&alpha| alpha > 0).count();
+            if active_pixels > 0 {
+                let label = self.active_saved_selection
+                    .and_then(|index| self.saved_selections.get(index))
+                    .map(|(name, _)| name.as_str())
+                    .unwrap_or("Unsaved selection");
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, "● Selection active");
+                    ui.label(label);
+                });
+                if ui.button("Clear Selection").on_hover_text("Clear the active mask without deleting saved selections").clicked() {
+                    self.selection_checkpoint();
+                    if let Some(mask) = self.selection_mask.as_mut() {
+                        mask.clear();
+                    }
+                    self.active_saved_selection = None;
+                    self.selected_saved_selection = None;
+                    self.selection_name_input.clear();
+                    self.selection_last_point = None;
+                    self.project_dirty = true;
+                    self.refresh_selection_overlay(ui.ctx());
+                    self.update_processed_image(ui.ctx());
+                }
+                if self.selection_adjustment_target {
+                    ui.small("Adjustments affect the active mask. Drag the before/after divider to compare.");
+                }
+            } else {
+                ui.label("Selection mask is empty.");
+            }
+        } else {
+            ui.label("No active selection mask.");
+            if self.selection_adjustment_target {
+                ui.colored_label(egui::Color32::YELLOW, "Paint or load a selection mask first.");
+            }
+        }
 
         ui.separator();
 
@@ -2663,7 +2773,7 @@ impl PixelForge {
             });
 
         if changed {
-            self.update_processed_image(ui.ctx());
+            preview_needs_refresh = true;
         }
 
         ui.separator();
@@ -2707,6 +2817,23 @@ impl PixelForge {
         {
             self.project_dirty = true;
         }
+        if self.selection_adjustment_target {
+            std::mem::swap(&mut self.brightness, &mut self.selection_adjustments.brightness);
+            std::mem::swap(&mut self.contrast, &mut self.selection_adjustments.contrast);
+            std::mem::swap(&mut self.exposure, &mut self.selection_adjustments.exposure);
+            std::mem::swap(&mut self.saturation, &mut self.selection_adjustments.saturation);
+            std::mem::swap(&mut self.temperature, &mut self.selection_adjustments.temperature);
+            std::mem::swap(&mut self.tint, &mut self.selection_adjustments.tint);
+            std::mem::swap(&mut self.highlights, &mut self.selection_adjustments.highlights);
+            std::mem::swap(&mut self.shadows, &mut self.selection_adjustments.shadows);
+            std::mem::swap(&mut self.whites, &mut self.selection_adjustments.whites);
+            std::mem::swap(&mut self.blacks, &mut self.selection_adjustments.blacks);
+            std::mem::swap(&mut self.vibrance, &mut self.selection_adjustments.vibrance);
+            std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
+        }
+        if preview_needs_refresh {
+            self.update_processed_image(ui.ctx());
+        }
     }
     fn selection_checkpoint(&mut self) {
         const MAX_HISTORY: usize = 20;
@@ -2739,6 +2866,10 @@ impl PixelForge {
         }
     }
     fn refresh_selection_overlay(&mut self, ctx: &egui::Context) {
+        // Any mask change invalidates the adjustment preview, including undo/redo and brush strokes.
+        if self.preview_source.is_some() {
+            self.update_processed_image(ctx);
+        }
         let Some(mask) = self.selection_mask.as_ref() else {
             self.selection_texture = None;
             return;
@@ -3698,6 +3829,25 @@ impl eframe::App for PixelForge {
                     if edit_clicked || ai_clicked || selection_clicked {
                         self.selection_tools_tab = selection_clicked;
                         self.ai_tools_tab = ai_clicked;
+
+                        // Reveal the entire selected region on the adjusted (right) side
+                        // when returning from Selection to Edit.
+                        if edit_clicked {
+                            if let Some(mask) = &self.selection_mask {
+                                let (width, _) = mask.dimensions();
+                                if width > 0 {
+                                    if let Some(first_x) = mask.pixels().iter().enumerate()
+                                        .filter(|(_, alpha)| **alpha > 0)
+                                        .map(|(index, _)| (index % width as usize) as u32)
+                                        .min()
+                                    {
+                                        self.comparison_position =
+                                            (first_x as f32 / width as f32 - 0.015).max(0.0);
+                                        self.comparison_enabled = true;
+                                    }
+                                }
+                            }
+                        }
 
                         // Enable painting only in Selection tab.
                         // Do not clear the existing selection.

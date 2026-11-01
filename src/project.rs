@@ -8,6 +8,7 @@ const MAGIC_V4: &[u8; 4] = b"PXF4";
 const MAGIC_V5: &[u8; 4] = b"PXF5";
 const MAGIC_V6: &[u8; 4] = b"PXF6";
 const MAGIC_V7: &[u8; 4] = b"PXF7";
+const MAGIC_V8: &[u8; 4] = b"PXF8";
 const MAX_SELECTIONS: usize = 128;
 const MAX_SELECTION_NAME: usize = 256;
 const MAX_BYTES: u64 = 1_073_741_824;
@@ -31,6 +32,9 @@ pub struct Project {
     pub comparison_enabled: bool,
     pub comparison_position: f32,
     pub saved_selections: Vec<(String, Vec<u8>)>,
+    pub selection_adjustments: [f32; 12],
+    pub active_mask: Option<Vec<u8>>,
+    pub selection_target: bool,
 }
 
 fn read<const N: usize>(reader: &mut impl Read) -> Result<[u8; N], String> {
@@ -54,7 +58,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
     }
 
     let mut data = Vec::new();
-    data.extend_from_slice(MAGIC_V7);
+    data.extend_from_slice(MAGIC_V8);
     data.extend_from_slice(&project.brightness.to_le_bytes());
     data.extend_from_slice(&project.contrast.to_le_bytes());
     data.extend_from_slice(&project.exposure.to_le_bytes());
@@ -113,6 +117,27 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
         data.extend_from_slice(name_bytes);
         data.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
         data.extend_from_slice(&encoded);
+    }
+
+    // PXF8 appends selection-targeted adjustments and the current working mask.
+    for value in project.selection_adjustments {
+        if !value.is_finite() { return Err("Invalid selection adjustment".into()); }
+        data.extend_from_slice(&value.to_le_bytes());
+    }
+    data.push(u8::from(project.selection_target));
+    if let Some(mask) = &project.active_mask {
+        if mask.len() != expected { return Err("Invalid active selection mask".into()); }
+        let gray = image::GrayImage::from_raw(project.pixels.width(), project.pixels.height(), mask.clone())
+            .ok_or("Invalid active selection mask")?;
+        let mut output = Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(gray).write_to(&mut output, image::ImageFormat::Png)
+            .map_err(|e| e.to_string())?;
+        let encoded = output.into_inner();
+        data.push(1);
+        data.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+        data.extend_from_slice(&encoded);
+    } else {
+        data.push(0);
     }
 
     if data.len() as u64 > MAX_BYTES {
@@ -210,6 +235,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         && &version != MAGIC_V5
         && &version != MAGIC_V6
         && &version != MAGIC_V7
+        && &version != MAGIC_V8
     {
         return Err("Unsupported PixelForge project format".into());
     }
@@ -219,7 +245,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let (exposure, saturation) = if matches!(
         &version,
-        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7
+        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V8 | MAGIC_V8 | MAGIC_V8
     ) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -231,7 +257,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let (temperature, tint) = if matches!(
         &version,
-        MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7
+        MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V8 | MAGIC_V8
     ) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -241,7 +267,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (highlights, shadows) = if matches!(&version, MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7) {
+    let (highlights, shadows) = if matches!(&version, MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V8) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -250,7 +276,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (whites, blacks) = if matches!(&version, MAGIC_V5 | MAGIC_V6 | MAGIC_V7) {
+    let (whites, blacks) = if matches!(&version, MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -259,7 +285,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (vibrance, gamma) = if &version == MAGIC_V6 || &version == MAGIC_V7 {
+    let (vibrance, gamma) = if &version == MAGIC_V6 || &version == MAGIC_V7 || &version == MAGIC_V8 {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -317,7 +343,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
     if image_length == 0
         || image_length > MAX_BYTES
         || image_length > bytes.len() as u64 - reader.position()
-        || (&version != MAGIC_V7 && image_length != bytes.len() as u64 - reader.position())
+        || (&version != MAGIC_V7 && &version != MAGIC_V8 && image_length != bytes.len() as u64 - reader.position())
     {
         return Err("Invalid or incomplete embedded image".into());
     }
@@ -335,7 +361,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let mut saved_selections = Vec::new();
 
-    if &version == MAGIC_V7 {
+    if &version == MAGIC_V7 || &version == MAGIC_V8 {
         reader.set_position(image_end as u64);
 
         let count = u32::from_le_bytes(read::<4>(&mut reader)?) as usize;
@@ -388,9 +414,40 @@ pub fn load(path: &Path) -> Result<Project, String> {
             reader.set_position(end as u64);
         }
 
-        if reader.position() != bytes.len() as u64 {
+        if &version == MAGIC_V7 && reader.position() != bytes.len() as u64 {
             return Err("Unexpected trailing project data".into());
         }
+    }
+
+    let mut selection_adjustments = [0.0_f32; 12];
+    let mut active_mask = None;
+    let mut selection_target = false;
+    if &version == MAGIC_V8 {
+        for value in &mut selection_adjustments {
+            *value = f32::from_le_bytes(read::<4>(&mut reader)?);
+            if !value.is_finite() { return Err("Invalid selection adjustment".into()); }
+        }
+        selection_target = match read::<1>(&mut reader)?[0] {
+            0 => false, 1 => true, _ => return Err("Invalid selection target".into()),
+        };
+        match read::<1>(&mut reader)?[0] {
+            0 => {},
+            1 => {
+                let length = u64::from_le_bytes(read::<8>(&mut reader)?);
+                if length == 0 || length > bytes.len() as u64 - reader.position() {
+                    return Err("Invalid active selection length".into());
+                }
+                let begin = reader.position() as usize;
+                let end = begin.checked_add(length as usize).ok_or("Invalid active selection length")?;
+                let gray = image::load_from_memory_with_format(&bytes[begin..end], image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?.to_luma8();
+                if gray.dimensions() != pixels.dimensions() { return Err("Active selection dimensions mismatch".into()); }
+                active_mask = Some(gray.into_raw());
+                reader.set_position(end as u64);
+            },
+            _ => return Err("Invalid active selection flag".into()),
+        }
+        if reader.position() != bytes.len() as u64 { return Err("Unexpected trailing project data".into()); }
     }
 
     Ok(Project {
@@ -411,6 +468,9 @@ pub fn load(path: &Path) -> Result<Project, String> {
         comparison_enabled: enabled == 1,
         comparison_position,
         saved_selections,
+        selection_adjustments,
+        active_mask,
+        selection_target,
     })
 }
 
@@ -447,6 +507,9 @@ mod tests {
             comparison_enabled: true,
             comparison_position: 0.3,
             saved_selections: vec![("Subject".into(), vec![0, 64, 128, 255])],
+            selection_adjustments: [1.0; 12],
+            active_mask: Some(vec![0, 64, 128, 255]),
+            selection_target: true,
         };
 
         save(&path, &original).expect("PXF save failed");
@@ -455,6 +518,9 @@ mod tests {
 
         assert_eq!(loaded.pixels, original.pixels);
         assert_eq!(loaded.saved_selections, original.saved_selections);
+        assert_eq!(loaded.selection_adjustments, original.selection_adjustments);
+        assert_eq!(loaded.active_mask, original.active_mask);
+        assert_eq!(loaded.selection_target, original.selection_target);
         assert_eq!(loaded.image_name, original.image_name);
         assert_eq!(loaded.brightness, original.brightness);
         assert_eq!(loaded.contrast, original.contrast);
