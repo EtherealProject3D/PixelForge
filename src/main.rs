@@ -554,6 +554,7 @@ impl PixelForge {
             return;
         };
 
+        self.create_project_tab();
         self.load_image_path(ctx, path);
     }
 
@@ -1135,10 +1136,6 @@ impl PixelForge {
     }
 
     fn open_generated_image(&mut self, ctx: &egui::Context) {
-        if self.project_dirty {
-            self.generation_status = "Save or close your current unsaved project before opening the generated image.".into();
-            return;
-        }
         let Some(image) = self.generation_image.as_ref() else { return; };
         let path = std::env::temp_dir().join(format!(
             "pixelforge-generated-{}.png",
@@ -1146,13 +1143,19 @@ impl PixelForge {
                 .unwrap_or_default().as_millis()
         ));
         match image.save(&path) {
-            Ok(()) => self.load_image_path(ctx, path),
+            Ok(()) => {
+                self.create_project_tab();
+                self.load_image_path(ctx, path);
+                self.generation_workspace = false;
+            },
             Err(error) => self.generation_status = format!("Cannot prepare generated image: {error}"),
         }
     }
 
     fn request_open(&mut self, action: PendingOpen, ctx: &egui::Context) {
-        if self.project_dirty {
+        if action != PendingOpen::Close {
+            self.perform_open(action, ctx);
+        } else if self.project_dirty {
             self.pending_open = Some(action);
         } else {
             self.perform_open(action, ctx);
@@ -1163,7 +1166,10 @@ impl PixelForge {
         match action {
             PendingOpen::Image => self.open_image(ctx),
             PendingOpen::Project => self.open_project(ctx),
-            PendingOpen::Close => self.close_image(),
+            PendingOpen::Close => {
+                if self.inactive_tabs.is_empty() { self.close_image(); }
+                else { self.close_project_tab(self.active_tab); }
+            },
         }
     }
 
@@ -1413,6 +1419,7 @@ impl PixelForge {
             }
         };
 
+        self.create_project_tab();
         let size = [data.pixels.width() as usize, data.pixels.height() as usize];
 
         let color = ColorImage::from_rgba_unmultiplied(size, data.pixels.as_raw());
@@ -4406,6 +4413,7 @@ impl eframe::App for PixelForge {
             }
         }
 
+        self.show_project_tabs(ctx);
         self.poll_export(ctx);
         self.poll_preview(ctx);
         self.poll_ai_upscale(ctx);
