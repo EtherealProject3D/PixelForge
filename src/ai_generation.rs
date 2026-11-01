@@ -22,7 +22,83 @@ fn client() -> Result<reqwest::blocking::Client, String> {
 
 const BASE: &str = "http://127.0.0.1:8188";
 
+use std::process::{Child, Command, Stdio};
+use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+
+static MANAGED: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
+fn managed() -> &'static Mutex<Option<Child>> { MANAGED.get_or_init(|| Mutex::new(None)) }
+
+fn server_ready() -> bool {
+    reqwest::blocking::Client::builder().timeout(Duration::from_secs(2)).build()
+        .and_then(|c| c.get(format!("{BASE}/system_stats")).send())
+        .map(|r| r.status().is_success()).unwrap_or(false)
+}
+
+/// Start only a PixelForge-owned local backend. Never terminate a server we did not start.
+pub fn ensure_server() -> Result<(), String> {
+    if server_ready() { return Ok(()); }
+    let mut owned = managed().lock().map_err(|e| e.to_string())?;
+    if let Some(child) = owned.as_mut() {
+        if child.try_wait().map_err(|e| e.to_string())?.is_some() { *owned = None; }
+    }
+    if owned.is_none() {
+        let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable")?;
+        let root = PathBuf::from(local).join("Comfy-Desktop/ComfyUI-Installs");
+        let roaming = std::env::var_os("APPDATA").ok_or("APPDATA is unavailable")?;
+        let configs = PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths");
+        let mut installs: Vec<_> = std::fs::read_dir(&root)
+            .map_err(|e| format!("ComfyUI Desktop installation not found: {e}"))?
+            .filter_map(Result::ok).map(|e| e.path())
+            .filter(|p| p.join("ComfyUI/main.py").is_file()
+                && p.join("ComfyUI/.venv/Scripts/python.exe").is_file()).collect();
+        installs.sort();
+        let install = installs.into_iter().next().ok_or(
+            "No ComfyUI Desktop Python backend found. Install ComfyUI Desktop first."
+        )?;
+        let mut command = Command::new(install.join("ComfyUI/.venv/Scripts/python.exe"));
+        command.current_dir(&install)
+            .arg("-s").arg("ComfyUI/main.py")
+            .arg("--listen").arg("127.0.0.1").arg("--port").arg("8188")
+            .stdout(Stdio::null()).stderr(Stdio::null())
+            .stdin(Stdio::null());
+        if let Ok(entries) = std::fs::read_dir(&configs) {
+            let mut files: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect();
+            files.sort();
+            if let Some(config) = files.first() {
+                command.arg("--extra-model-paths-config").arg(config);
+            }
+        }
+        *owned = Some(command.spawn().map_err(|e| format!("Cannot start ComfyUI backend: {e}"))?);
+    }
+    drop(owned);
+    for _ in 0..90 {
+        if server_ready() { return Ok(()); }
+        std::thread::sleep(Duration::from_secs(1));
+        let mut owned = managed().lock().map_err(|e| e.to_string())?;
+        if let Some(child) = owned.as_mut() {
+            if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                *owned = None;
+                return Err(format!("ComfyUI backend exited during startup ({status}). Start it in ComfyUI Desktop to inspect the error."));
+            }
+        }
+    }
+    Err("ComfyUI did not become ready within 90 seconds. Check ComfyUI Desktop.".into())
+}
+
+pub fn stop_managed_backend() {
+    if let Ok(mut guard) = managed().lock() {
+        if let Some(mut child) = guard.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+
 pub fn checkpoints() -> Result<Vec<String>, String> {
+    ensure_server()?;
     let value: Value = client()?.get(format!("{BASE}/object_info/CheckpointLoaderSimple"))
         .send().map_err(|e| format!("Cannot connect to local ComfyUI: {e}"))?
         .error_for_status().map_err(|e| e.to_string())?
@@ -33,6 +109,7 @@ pub fn checkpoints() -> Result<Vec<String>, String> {
 }
 
 pub fn generate(request: Request, cancel: Arc<AtomicBool>) -> Result<image::RgbaImage, String> {
+    ensure_server()?;
     if request.prompt.trim().is_empty() { return Err("Enter a generation prompt".into()); }
     if request.checkpoint.trim().is_empty() { return Err("Select a local checkpoint".into()); }
     if !(256..=2048).contains(&request.width) || !(256..=2048).contains(&request.height)
