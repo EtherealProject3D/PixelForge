@@ -1524,7 +1524,7 @@ impl PixelForge {
 
         let pixels = original.clone();
         let options = ai_upscale::UpscaleOptions {
-            model: ["realesrgan-x4plus", "realesrgan-x4plus-anime", "realesr-animevideov3"][self.ai_model.min(2)].into(),
+            model: ["realesrgan-x4plus", "realesrgan-x4plus-anime"][self.ai_model.min(1)].into(),
             gpu_id: self.ai_gpu_id,
             tile_size: self.ai_tile_size,
         };
@@ -3971,11 +3971,10 @@ impl eframe::App for PixelForge {
                             if self.ai_gpus.is_empty() && self.ai_gpu_error.is_none() { self.refresh_vulkan_gpus(); }
                             ui.add_enabled_ui(!self.ai_running, |ui| {
                                 egui::ComboBox::from_label("Upscaling model")
-                                    .selected_text(["Photo", "Illustration / Anime", "Anime Video"][self.ai_model.min(2)])
+                                    .selected_text(["Photo", "Illustration / Anime"][self.ai_model.min(1)])
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(&mut self.ai_model, 0, "Photo");
                                         ui.selectable_value(&mut self.ai_model, 1, "Illustration / Anime");
-                                        ui.selectable_value(&mut self.ai_model, 2, "Anime Video");
                                     });
                                 let gpu_name = self.ai_gpus.iter().find(|gpu| gpu.id == self.ai_gpu_id)
                                     .map(|gpu| format!("{} (GPU {})", gpu.name, gpu.id))
