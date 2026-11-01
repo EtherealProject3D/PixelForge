@@ -166,6 +166,8 @@ struct PixelForge {
     contrast: f32,
     exposure: f32,
     saturation: f32,
+    temperature: f32,
+    tint: f32,
     comparison_enabled: bool,
     comparison_position: f32,
     divider_dragging: bool,
@@ -203,6 +205,8 @@ impl Default for PixelForge {
             contrast: 0.0,
             exposure: 0.0,
             saturation: 0.0,
+            temperature: 0.0,
+            tint: 0.0,
             comparison_enabled: true,
             comparison_position: 0.5,
             divider_dragging: false,
@@ -257,6 +261,8 @@ impl PixelForge {
                 self.contrast = 0.0;
                 self.exposure = 0.0;
                 self.saturation = 0.0;
+                self.temperature = 0.0;
+                self.tint = 0.0;
                 self.comparison_position = 0.5;
                 self.comparison_enabled = true;
                 self.divider_dragging = false;
@@ -306,6 +312,8 @@ impl PixelForge {
         self.contrast = 0.0;
         self.exposure = 0.0;
         self.saturation = 0.0;
+        self.temperature = 0.0;
+        self.tint = 0.0;
         self.comparison_enabled = true;
         self.comparison_position = 0.5;
         self.divider_dragging = false;
@@ -451,6 +459,8 @@ impl PixelForge {
             contrast: self.contrast,
             exposure: self.exposure,
             saturation: self.saturation,
+            temperature: self.temperature,
+            tint: self.tint,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
         };
@@ -497,6 +507,8 @@ impl PixelForge {
         self.contrast = data.contrast;
         self.exposure = data.exposure;
         self.saturation = data.saturation;
+        self.temperature = data.temperature;
+        self.tint = data.tint;
         self.comparison_enabled = data.comparison_enabled;
         self.comparison_position = data.comparison_position;
 
@@ -520,6 +532,8 @@ impl PixelForge {
             || self.contrast != 0.0
             || self.exposure != 0.0
             || self.saturation != 0.0
+            || self.temperature != 0.0
+            || self.tint != 0.0
         {
             self.update_processed_image(ctx);
         }
@@ -665,6 +679,8 @@ impl PixelForge {
             contrast: self.contrast,
             exposure: self.exposure,
             saturation: self.saturation,
+            temperature: self.temperature,
+            tint: self.tint,
         }
         .apply(&mut adjusted);
         let size = [adjusted.width() as usize, adjusted.height() as usize];
@@ -721,6 +737,8 @@ impl PixelForge {
         let contrast = self.contrast;
         let exposure = self.exposure;
         let saturation = self.saturation;
+        let temperature = self.temperature;
+        let tint = self.tint;
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -745,6 +763,8 @@ impl PixelForge {
                     contrast,
                     exposure,
                     saturation,
+                    temperature,
+                    tint,
                 };
 
                 let total = adjusted.width() as usize * adjusted.height() as usize;
@@ -966,6 +986,8 @@ impl PixelForge {
             self.contrast,
             self.exposure,
             self.saturation,
+            self.temperature,
+            self.tint,
             self.comparison_enabled,
             self.comparison_position,
         );
@@ -975,7 +997,9 @@ impl PixelForge {
             let can_reset = self.brightness != 0.0
                 || self.contrast != 0.0
                 || self.exposure != 0.0
-                || self.saturation != 0.0;
+                || self.saturation != 0.0
+                || self.temperature != 0.0
+                || self.tint != 0.0;
 
             if ui
                 .add_enabled(can_reset, egui::Button::new("Reset All"))
@@ -985,6 +1009,8 @@ impl PixelForge {
                 self.contrast = 0.0;
                 self.exposure = 0.0;
                 self.saturation = 0.0;
+                self.temperature = 0.0;
+                self.tint = 0.0;
                 self.update_processed_image(ui.ctx());
             }
         });
@@ -1061,6 +1087,40 @@ impl PixelForge {
             }
         });
 
+        ui.add_space(6.0);
+
+        ui.label("Temperature (Cool / Warm)");
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.temperature, -100.0..=100.0))
+                .changed();
+
+            if ui
+                .add_enabled(self.temperature != 0.0, egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.temperature = 0.0;
+                changed = true;
+            }
+        });
+
+        ui.add_space(6.0);
+
+        ui.label("Tint (Green / Magenta)");
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.tint, -100.0..=100.0))
+                .changed();
+
+            if ui
+                .add_enabled(self.tint != 0.0, egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.tint = 0.0;
+                changed = true;
+            }
+        });
+
         if changed {
             self.update_processed_image(ui.ctx());
         }
@@ -1085,6 +1145,8 @@ impl PixelForge {
                 self.contrast,
                 self.exposure,
                 self.saturation,
+                self.temperature,
+                self.tint,
                 self.comparison_enabled,
                 self.comparison_position,
             )
@@ -1416,7 +1478,9 @@ impl eframe::App for PixelForge {
                                 && (self.brightness != 0.0
                                     || self.contrast != 0.0
                                     || self.exposure != 0.0
-                                    || self.saturation != 0.0),
+                                    || self.saturation != 0.0
+                                    || self.temperature != 0.0
+                                    || self.tint != 0.0),
                             egui::Button::new("Reset All Adjustments"),
                         )
                         .clicked()
@@ -1426,6 +1490,8 @@ impl eframe::App for PixelForge {
                         self.contrast = 0.0;
                         self.exposure = 0.0;
                         self.saturation = 0.0;
+                        self.temperature = 0.0;
+                        self.tint = 0.0;
                         self.project_dirty = true;
                         self.update_processed_image(ctx);
                     }
@@ -1606,7 +1672,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.2.0")
+            .with_title("PixelForge v0.2.1")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
