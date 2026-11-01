@@ -156,6 +156,9 @@ struct PixelForge {
     texture: Option<TextureHandle>,
     processed_texture: Option<TextureHandle>,
     original_pixels: Option<image::RgbaImage>,
+    preview_source: Option<std::sync::Arc<image::RgbaImage>>,
+    preview_rx: Option<std::sync::mpsc::Receiver<(u64, ColorImage)>>,
+    preview_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
     brightness: f32,
     export_rx: Option<std::sync::mpsc::Receiver<ExportEvent>>,
     export_progress: f32,
@@ -168,6 +171,8 @@ struct PixelForge {
     saturation: f32,
     temperature: f32,
     tint: f32,
+    highlights: f32,
+    shadows: f32,
     comparison_enabled: bool,
     comparison_position: f32,
     divider_dragging: bool,
@@ -195,6 +200,9 @@ impl Default for PixelForge {
             texture: None,
             processed_texture: None,
             original_pixels: None,
+            preview_source: None,
+            preview_rx: None,
+            preview_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             brightness: 0.0,
             export_rx: None,
             export_progress: 0.0,
@@ -207,6 +215,8 @@ impl Default for PixelForge {
             saturation: 0.0,
             temperature: 0.0,
             tint: 0.0,
+            highlights: 0.0,
+            shadows: 0.0,
             comparison_enabled: true,
             comparison_position: 0.5,
             divider_dragging: false,
@@ -252,6 +262,7 @@ impl PixelForge {
                 self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
 
                 self.original_pixels = Some(rgba);
+                self.prepare_preview_source();
                 self.project_path = None;
                 self.project_dirty = true;
                 self.export_result = None;
@@ -263,6 +274,8 @@ impl PixelForge {
                 self.saturation = 0.0;
                 self.temperature = 0.0;
                 self.tint = 0.0;
+                self.highlights = 0.0;
+                self.shadows = 0.0;
                 self.comparison_position = 0.5;
                 self.comparison_enabled = true;
                 self.divider_dragging = false;
@@ -300,6 +313,10 @@ impl PixelForge {
         self.texture = None;
         self.processed_texture = None;
         self.original_pixels = None;
+        self.preview_source = None;
+        self.preview_rx = None;
+        self.preview_generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         // Clear image and project references.
         self.image_path = None;
@@ -314,6 +331,8 @@ impl PixelForge {
         self.saturation = 0.0;
         self.temperature = 0.0;
         self.tint = 0.0;
+        self.highlights = 0.0;
+        self.shadows = 0.0;
         self.comparison_enabled = true;
         self.comparison_position = 0.5;
         self.divider_dragging = false;
@@ -461,6 +480,8 @@ impl PixelForge {
             saturation: self.saturation,
             temperature: self.temperature,
             tint: self.tint,
+            highlights: self.highlights,
+            shadows: self.shadows,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
         };
@@ -501,6 +522,7 @@ impl PixelForge {
         self.texture = Some(ctx.load_texture("current_image", color, TextureOptions::LINEAR));
 
         self.original_pixels = Some(data.pixels);
+        self.prepare_preview_source();
         self.processed_texture = None;
 
         self.brightness = data.brightness;
@@ -509,6 +531,8 @@ impl PixelForge {
         self.saturation = data.saturation;
         self.temperature = data.temperature;
         self.tint = data.tint;
+        self.highlights = data.highlights;
+        self.shadows = data.shadows;
         self.comparison_enabled = data.comparison_enabled;
         self.comparison_position = data.comparison_position;
 
@@ -534,6 +558,8 @@ impl PixelForge {
             || self.saturation != 0.0
             || self.temperature != 0.0
             || self.tint != 0.0
+            || self.highlights != 0.0
+            || self.shadows != 0.0
         {
             self.update_processed_image(ctx);
         }
@@ -667,36 +693,139 @@ impl PixelForge {
         }
     }
 
-    fn update_processed_image(&mut self, ctx: &egui::Context) {
+    fn prepare_preview_source(&mut self) {
+        use std::sync::atomic::Ordering;
+
+        // Invalidate results from the previous image.
+        self.preview_generation.fetch_add(1, Ordering::Relaxed);
+        self.preview_rx = None;
+        self.preview_source = None;
+        self.processed_texture = None;
+
         let Some(original) = &self.original_pixels else {
             return;
         };
 
-        let mut adjusted = original.clone();
+        // Limit interactive processing to approximately 1600px
+        // on the longest side. Original pixels remain untouched.
+        const MAX_PREVIEW_EDGE: u32 = 1600;
 
-        adjustments::Adjustments {
+        let width = original.width();
+        let height = original.height();
+        let longest = width.max(height);
+
+        let preview = if longest > MAX_PREVIEW_EDGE {
+            let scale = MAX_PREVIEW_EDGE as f64 / longest as f64;
+
+            let new_width = ((width as f64 * scale).round() as u32).max(1);
+            let new_height = ((height as f64 * scale).round() as u32).max(1);
+
+            image::imageops::resize(
+                original,
+                new_width,
+                new_height,
+                image::imageops::FilterType::Triangle,
+            )
+        } else {
+            original.clone()
+        };
+
+        self.preview_source = Some(std::sync::Arc::new(preview));
+    }
+
+    fn update_processed_image(&mut self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+
+        let Some(original) = &self.preview_source else {
+            return;
+        };
+
+        let source = std::sync::Arc::clone(original);
+        let generation_counter = std::sync::Arc::clone(&self.preview_generation);
+
+        let generation = generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
+
+        let settings = adjustments::Adjustments {
             brightness: self.brightness,
             contrast: self.contrast,
             exposure: self.exposure,
             saturation: self.saturation,
             temperature: self.temperature,
             tint: self.tint,
-        }
-        .apply(&mut adjusted);
-        let size = [adjusted.width() as usize, adjusted.height() as usize];
+            highlights: self.highlights,
+            shadows: self.shadows,
+        };
 
-        let color_image = ColorImage::from_rgba_unmultiplied(size, adjusted.as_raw());
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.preview_rx = Some(rx);
 
-        if let Some(texture) = &mut self.processed_texture {
-            texture.set(color_image, TextureOptions::LINEAR);
-        } else {
-            self.processed_texture =
-                Some(ctx.load_texture("processed_image", color_image, TextureOptions::LINEAR));
-        }
+        let ctx = ctx.clone();
 
-        self.status = "Preview updated".into();
+        std::thread::spawn(move || {
+            let mut adjusted = (*source).clone();
+
+            // Process one row at a time, checking for newer requests.
+            for row in adjusted.rows_mut() {
+                if generation_counter.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+
+                for pixel in row {
+                    settings.apply_pixel(pixel);
+                }
+            }
+
+            if generation_counter.load(Ordering::Relaxed) != generation {
+                return;
+            }
+
+            let size = [adjusted.width() as usize, adjusted.height() as usize];
+
+            let color = ColorImage::from_rgba_unmultiplied(size, adjusted.as_raw());
+
+            if generation_counter.load(Ordering::Relaxed) != generation {
+                return;
+            }
+
+            if tx.send((generation, color)).is_ok() {
+                ctx.request_repaint();
+            }
+        });
     }
 
+    fn poll_preview(&mut self, ctx: &egui::Context) {
+        use std::sync::atomic::Ordering;
+
+        let Some(rx) = &self.preview_rx else {
+            return;
+        };
+
+        let result = rx.try_recv();
+
+        match result {
+            Ok((generation, color)) => {
+                if generation == self.preview_generation.load(Ordering::Relaxed) {
+                    if let Some(texture) = &mut self.processed_texture {
+                        texture.set(color, TextureOptions::LINEAR);
+                    } else {
+                        self.processed_texture = Some(ctx.load_texture(
+                            "processed_image",
+                            color,
+                            TextureOptions::LINEAR,
+                        ));
+                    }
+                }
+
+                self.preview_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.preview_rx = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                // Worker will request a repaint when finished.
+            }
+        }
+    }
     fn start_export(&mut self, format: ExportFormat) {
         if self.exporting {
             self.status = "An export is already running".into();
@@ -739,6 +868,8 @@ impl PixelForge {
         let saturation = self.saturation;
         let temperature = self.temperature;
         let tint = self.tint;
+        let highlights = self.highlights;
+        let shadows = self.shadows;
 
         let (tx, rx) = std::sync::mpsc::channel();
 
@@ -765,6 +896,8 @@ impl PixelForge {
                     saturation,
                     temperature,
                     tint,
+                    highlights,
+                    shadows,
                 };
 
                 let total = adjusted.width() as usize * adjusted.height() as usize;
@@ -988,6 +1121,8 @@ impl PixelForge {
             self.saturation,
             self.temperature,
             self.tint,
+            self.highlights,
+            self.shadows,
             self.comparison_enabled,
             self.comparison_position,
         );
@@ -999,7 +1134,9 @@ impl PixelForge {
                 || self.exposure != 0.0
                 || self.saturation != 0.0
                 || self.temperature != 0.0
-                || self.tint != 0.0;
+                || self.tint != 0.0
+                || self.highlights != 0.0
+                || self.shadows != 0.0;
 
             if ui
                 .add_enabled(can_reset, egui::Button::new("Reset All"))
@@ -1011,6 +1148,8 @@ impl PixelForge {
                 self.saturation = 0.0;
                 self.temperature = 0.0;
                 self.tint = 0.0;
+                self.highlights = 0.0;
+                self.shadows = 0.0;
                 self.update_processed_image(ui.ctx());
             }
         });
@@ -1121,6 +1260,40 @@ impl PixelForge {
             }
         });
 
+        ui.add_space(6.0);
+
+        ui.label("Highlights");
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.highlights, -100.0..=100.0))
+                .changed();
+
+            if ui
+                .add_enabled(self.highlights != 0.0, egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.highlights = 0.0;
+                changed = true;
+            }
+        });
+
+        ui.add_space(6.0);
+
+        ui.label("Shadows");
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(egui::Slider::new(&mut self.shadows, -100.0..=100.0))
+                .changed();
+
+            if ui
+                .add_enabled(self.shadows != 0.0, egui::Button::new("Reset"))
+                .clicked()
+            {
+                self.shadows = 0.0;
+                changed = true;
+            }
+        });
+
         if changed {
             self.update_processed_image(ui.ctx());
         }
@@ -1147,6 +1320,8 @@ impl PixelForge {
                 self.saturation,
                 self.temperature,
                 self.tint,
+                self.highlights,
+                self.shadows,
                 self.comparison_enabled,
                 self.comparison_position,
             )
@@ -1391,6 +1566,7 @@ impl eframe::App for PixelForge {
         }
 
         self.poll_export(ctx);
+        self.poll_preview(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
@@ -1480,7 +1656,9 @@ impl eframe::App for PixelForge {
                                     || self.exposure != 0.0
                                     || self.saturation != 0.0
                                     || self.temperature != 0.0
-                                    || self.tint != 0.0),
+                                    || self.tint != 0.0
+                                    || self.highlights != 0.0
+                                    || self.shadows != 0.0),
                             egui::Button::new("Reset All Adjustments"),
                         )
                         .clicked()
@@ -1492,6 +1670,8 @@ impl eframe::App for PixelForge {
                         self.saturation = 0.0;
                         self.temperature = 0.0;
                         self.tint = 0.0;
+                        self.highlights = 0.0;
+                        self.shadows = 0.0;
                         self.project_dirty = true;
                         self.update_processed_image(ctx);
                     }
@@ -1672,7 +1852,7 @@ impl eframe::App for PixelForge {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.2.1")
+            .with_title("PixelForge v0.2.3")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()

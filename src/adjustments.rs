@@ -6,6 +6,8 @@ pub struct Adjustments {
     pub saturation: f32,
     pub temperature: f32,
     pub tint: f32,
+    pub highlights: f32,
+    pub shadows: f32,
 }
 
 impl Adjustments {
@@ -38,8 +40,20 @@ impl Adjustments {
 
         let saturation_factor = 1.0 + self.saturation / 100.0;
 
+        // Smooth tonal weighting:
+        // shadows affect darker pixels most;
+        // highlights affect brighter pixels most.
+        let tone = (luminance / 255.0).clamp(0.0, 1.0);
+        let shadow_weight = (1.0 - tone).powi(2);
+        let highlight_weight = tone.powi(2);
+
+        // Positive shadows brighten dark regions.
+        // Negative highlights darken bright regions.
+        let tonal_offset =
+            self.shadows * 1.2 * shadow_weight + self.highlights * 1.2 * highlight_weight;
+
         for channel in 0..3 {
-            let value = luminance + (rgb[channel] - luminance) * saturation_factor;
+            let value = luminance + (rgb[channel] - luminance) * saturation_factor + tonal_offset;
 
             pixel[channel] = value.clamp(0.0, 255.0).round() as u8;
         }
@@ -122,6 +136,60 @@ mod tests {
         assert!(magenta[2] > magenta[1]);
         assert!(green[1] > green[0]);
         assert!(green[1] > green[2]);
+    }
+
+    #[test]
+    fn positive_shadows_affect_dark_pixels_more() {
+        let mut dark = image::Rgba([40, 40, 40, 255]);
+        let mut bright = image::Rgba([210, 210, 210, 255]);
+
+        Adjustments {
+            shadows: 50.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut dark);
+
+        Adjustments {
+            shadows: 50.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut bright);
+
+        assert!(dark[0] as i32 - 40 > bright[0] as i32 - 210);
+    }
+
+    #[test]
+    fn negative_highlights_affect_bright_pixels_more() {
+        let mut dark = image::Rgba([40, 40, 40, 255]);
+        let mut bright = image::Rgba([210, 210, 210, 255]);
+
+        Adjustments {
+            highlights: -50.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut dark);
+
+        Adjustments {
+            highlights: -50.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut bright);
+
+        assert!(210 - bright[0] as i32 > 40 - dark[0] as i32);
+    }
+
+    #[test]
+    fn tonal_adjustments_preserve_alpha() {
+        let mut pixel = image::Rgba([80, 120, 180, 77]);
+
+        Adjustments {
+            highlights: -35.0,
+            shadows: 45.0,
+            ..Default::default()
+        }
+        .apply_pixel(&mut pixel);
+
+        assert_eq!(pixel[3], 77);
     }
 
     #[test]
