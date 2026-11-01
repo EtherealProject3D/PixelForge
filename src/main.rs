@@ -798,9 +798,36 @@ impl PixelForge {
             .selected_text(if self.generation_checkpoint.is_empty() { "Select a checkpoint" } else { &self.generation_checkpoint })
             .show_ui(ui, |ui| {
                 for checkpoint in &self.generation_checkpoints {
-                    ui.selectable_value(&mut self.generation_checkpoint, checkpoint.clone(), checkpoint);
+                    let lower = checkpoint.to_ascii_lowercase();
+                    let best_for = if lower.contains("realvis") {
+                        "Natural photography, portraits, landscapes"
+                    } else if lower.contains("juggernaut") {
+                        "Detailed images, cinematic scenes, dramatic lighting"
+                    } else if lower.contains("sd_xl_base") || lower.contains("sdxl_base") {
+                        "General-purpose images, illustration, prompt testing"
+                    } else {
+                        "Custom checkpoint"
+                    };
+                    ui.selectable_value(
+                        &mut self.generation_checkpoint,
+                        checkpoint.clone(),
+                        format!("{checkpoint} — {best_for}"),
+                    );
                 }
             });
+        let selected = self.generation_checkpoint.to_ascii_lowercase();
+        let best_for = if selected.contains("realvis") {
+            "Best for: Natural-looking photography, portraits, landscapes, and everyday scenes."
+        } else if selected.contains("juggernaut") {
+            "Best for: Highly detailed images, cinematic photography, dramatic lighting, and polished compositions."
+        } else if selected.contains("sd_xl_base") || selected.contains("sdxl_base") {
+            "Best for: General-purpose generation, creative experimentation, illustrations, and prompt testing."
+        } else if selected.is_empty() {
+            "Connect to ComfyUI and select a model to see its strengths."
+        } else {
+            "Custom model: Results depend on the checkpoint's training and recommended settings."
+        };
+        ui.small(best_for);
         ui.separator();
         egui::CollapsingHeader::new("Model Library")
             .default_open(false)
