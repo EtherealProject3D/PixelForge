@@ -1635,10 +1635,8 @@ impl PixelForge {
                     result.preview.height() as usize,
                 ];
 
-                self.ai_status = format!(
-                    if self.ai_is_denoise { "AI denoise complete: {} x {}. Not saved." } else { "AI upscale complete: {} x {}. Not saved." },
-                    result.dimensions[0], result.dimensions[1]
-                );
+                let operation = if self.ai_is_denoise { "AI denoise" } else { "AI upscale" };
+                self.ai_status = format!("{operation} complete: {} x {}. Not saved.", result.dimensions[0], result.dimensions[1]);
 
                 self.status = self.ai_status.clone();
                 self.ai_result = Some(std::sync::Arc::new(result));
