@@ -754,6 +754,8 @@ impl PixelForge {
                     ui.selectable_value(&mut self.generation_checkpoint, checkpoint.clone(), checkpoint);
                 }
             });
+        let previous_ratio = self.generation_size;
+        let previous_orientation = self.generation_portrait;
         egui::ComboBox::from_label("Style preset")
             .selected_text(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0)
             .show_ui(ui, |ui| {
@@ -783,6 +785,10 @@ impl PixelForge {
                 }
             });
         ui.checkbox(&mut self.generation_custom_size, "Custom proportional resolution");
+        if previous_ratio != self.generation_size || previous_orientation != self.generation_portrait {
+            let (_, w, h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
+            (self.generation_width, self.generation_height) = if self.generation_portrait { (h, w) } else { (w, h) };
+        }
         let (_, base_w, base_h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
         let (base_w, base_h) = if self.generation_portrait { (base_h, base_w) } else { (base_w, base_h) };
         let scale = [0.75_f32, 1.0, 1.25][self.generation_resolution.min(2)];
@@ -830,7 +836,7 @@ impl PixelForge {
         ui.horizontal(|ui| {
             if ui.add_enabled(!self.generation_running && !self.generation_checkpoint.is_empty(),
                 egui::Button::new("Generate")).clicked() {
-                self.start_generation(ctx);
+                self.start_generation(&ctx);
             }
             if ui.add_enabled(self.generation_running, egui::Button::new("Cancel")).clicked() {
                 self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -857,7 +863,7 @@ impl PixelForge {
             let ratio = texture.size()[1] as f32 / texture.size()[0].max(1) as f32;
             ui.image((texture.id(), egui::vec2(width, width * ratio)));
             if ui.button("Open Generated Image in Editor").clicked() {
-                self.open_generated_image(ctx);
+                self.open_generated_image(&ctx);
             }
         }
         ui.separator();
