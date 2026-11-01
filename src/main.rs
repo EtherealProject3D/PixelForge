@@ -1,6 +1,7 @@
 mod adjustments;
 mod ai_upscale;
 mod ai_denoise;
+mod ai_restoration;
 mod analysis;
 mod auto_enhance;
 mod histogram;
@@ -193,6 +194,7 @@ struct PixelForge {
     ai_running: bool,
     ai_denoise_level: u32,
     ai_is_denoise: bool,
+    ai_restoration: Option<ai_restoration::Operation>,
     ai_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ai_model: usize,
     ai_gpu_id: i32,
@@ -315,6 +317,7 @@ impl Default for PixelForge {
             ai_running: false,
             ai_denoise_level: 2,
             ai_is_denoise: false,
+            ai_restoration: None,
             ai_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             ai_model: 0,
             ai_gpu_id: -1,
@@ -1508,6 +1511,10 @@ impl PixelForge {
     }
 
     fn start_ai_job(&mut self, ctx: &egui::Context, scale: u32, denoise: bool) {
+        self.start_restoration_job(ctx, scale, denoise, None);
+    }
+
+    fn start_restoration_job(&mut self, ctx: &egui::Context, scale: u32, denoise: bool, restoration: Option<ai_restoration::Operation>) {
         if self.ai_running || self.ai_saving || self.exporting {
             self.ai_status = "Another operation is running".into();
             return;
@@ -1518,7 +1525,7 @@ impl PixelForge {
             return;
         };
 
-        if !denoise {
+        if !denoise && restoration.is_none() {
         if let Err(error) = ai_upscale::validate_upscale_size(original.width(), original.height(), scale) {
             self.ai_status = error;
             return;
@@ -1557,7 +1564,8 @@ impl PixelForge {
         self.ai_rx = Some(rx);
         self.ai_running = true;
         self.ai_is_denoise = denoise;
-        self.ai_status = if denoise { "Running AI photo denoise...".into() } else { format!("Running Real-ESRGAN {scale}x on GPU...") };
+        self.ai_restoration = restoration;
+        self.ai_status = if let Some(operation) = restoration { format!("Running AI {}...", operation.name()) } else if denoise { "Running AI photo denoise...".into() } else { format!("Running Real-ESRGAN {scale}x on GPU...") };
 
         self.ai_detail_rx = None;
         self.ai_detail_key = None;
@@ -1584,7 +1592,9 @@ impl PixelForge {
 
         let denoise_level = self.ai_denoise_level;
         std::thread::spawn(move || {
-            let result = if denoise {
+            let result = if let Some(operation) = restoration {
+                ai_restoration::run(pixels, settings, operation, cancel)
+            } else if denoise {
                 ai_denoise::denoise(pixels, settings, denoise_level, options.gpu_id, options.tile_size, cancel)
             } else {
                 ai_upscale::upscale(pixels, settings, scale, options, cancel)
@@ -1635,7 +1645,7 @@ impl PixelForge {
                     result.preview.height() as usize,
                 ];
 
-                let operation = if self.ai_is_denoise { "AI denoise" } else { "AI upscale" };
+                let operation = if let Some(kind) = self.ai_restoration { kind.name() } else if self.ai_is_denoise { "AI denoise" } else { "AI upscale" };
                 self.ai_status = format!("{operation} complete: {} x {}. Not saved.", result.dimensions[0], result.dimensions[1]);
 
                 self.status = self.ai_status.clone();
@@ -1644,7 +1654,7 @@ impl PixelForge {
                 self.ai_show_result = true;
             }
             Err(error) => {
-                self.ai_status = format!("{} failed: {error}", if self.ai_is_denoise { "AI denoise" } else { "AI upscale" });
+                self.ai_status = format!("{} failed: {error}", if let Some(kind) = self.ai_restoration { kind.name() } else if self.ai_is_denoise { "AI denoise" } else { "AI upscale" });
                 self.status = self.ai_status.clone();
             }
         }
@@ -1707,7 +1717,7 @@ impl PixelForge {
             })
             .unwrap_or(4);
 
-        let suggested = if self.ai_is_denoise { format!("{stem}_AI_Denoised.png") } else { format!("{stem}_AI_{scale}x.png") };
+        let suggested = if let Some(kind) = self.ai_restoration { format!("{stem}_AI_{}.png", kind.name()) } else if self.ai_is_denoise { format!("{stem}_AI_Denoised.png") } else { format!("{stem}_AI_{scale}x.png") };
 
         let Some(mut destination) = rfd::FileDialog::new()
             .add_filter("PNG Image", &["png"])
@@ -1858,7 +1868,7 @@ impl PixelForge {
             });
 
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.ai_comparison, if self.ai_is_denoise { "Compare Original / Denoised" } else { "Compare Lanczos / Result" });
+                ui.checkbox(&mut self.ai_comparison, if let Some(kind) = self.ai_restoration { match kind { ai_restoration::Operation::Sharpen => "Compare Original / Sharpened", ai_restoration::Operation::Deblur => "Compare Original / Deblurred" } } else if self.ai_is_denoise { "Compare Original / Denoised" } else { "Compare Lanczos / Result" });
 
                 if self.ai_comparison {
                     ui.add(
@@ -2339,7 +2349,7 @@ impl PixelForge {
                     painter.text(
                         Pos2::new(rect.left() + 8.0, rect.top() + 8.0),
                         egui::Align2::LEFT_TOP,
-                        if self.ai_is_denoise { "Original" } else { "Lanczos" },
+                        if self.ai_is_denoise || self.ai_restoration.is_some() { "Original" } else { "Lanczos" },
                         egui::FontId::proportional(14.0),
                         Color32::WHITE,
                     );
@@ -2347,7 +2357,7 @@ impl PixelForge {
                     painter.text(
                         Pos2::new(rect.right() - 8.0, rect.top() + 8.0),
                         egui::Align2::RIGHT_TOP,
-                        if self.ai_is_denoise { "Denoised" } else { "AI Result" },
+                        if let Some(kind) = self.ai_restoration { match kind { ai_restoration::Operation::Sharpen => "Sharpened", ai_restoration::Operation::Deblur => "Deblurred" } } else if self.ai_is_denoise { "Denoised" } else { "AI Result" },
                         egui::FontId::proportional(14.0),
                         Color32::WHITE,
                     );
@@ -4161,7 +4171,17 @@ impl eframe::App for PixelForge {
                             });
                             ui.small("Requires waifu2x-ncnn-vulkan and its models-cunet folder in tools/waifu2x.");
 
-                            ui.add_enabled(false, egui::Button::new("Deblur"));
+                            ui.separator();
+                            ui.label("Neural Sharpen / Deblur (external model runner)");
+                            ui.add_enabled_ui(!self.ai_running && !self.ai_saving, |ui| {
+                                if ui.button("AI Sharpen").clicked() {
+                                    self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Sharpen));
+                                }
+                                if ui.button("AI Deblur").clicked() {
+                                    self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Deblur));
+                                }
+                            });
+                            ui.small("Requires compatible neural runners at tools/restoration/sharpen.exe and deblur.exe. Models not bundled.");
 
                             ui.add_enabled(false, egui::Button::new("Restore Faces"));
                         }
