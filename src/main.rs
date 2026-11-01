@@ -1532,7 +1532,11 @@ impl PixelForge {
         let pixels = original.clone();
         let options = ai_upscale::UpscaleOptions {
             model: ["realesrgan-x4plus", "realesrgan-x4plus-anime"][self.ai_model.min(1)].into(),
-            gpu_id: self.ai_gpu_id,
+            gpu_id: if self.ai_gpu_id == -1 {
+                ai_upscale::preferred_gpu_id(&self.ai_gpus).unwrap_or(-1)
+            } else {
+                self.ai_gpu_id
+            },
             tile_size: self.ai_tile_size,
         };
         let (tx, rx) = std::sync::mpsc::channel();
@@ -3988,7 +3992,12 @@ impl eframe::App for PixelForge {
                                     });
                                 let gpu_name = self.ai_gpus.iter().find(|gpu| gpu.id == self.ai_gpu_id)
                                     .map(|gpu| format!("{} (GPU {})", gpu.name, gpu.id))
-                                    .unwrap_or_else(|| "Automatic (Recommended)".to_owned());
+                                    .unwrap_or_else(|| {
+                                        ai_upscale::preferred_gpu_id(&self.ai_gpus)
+                                            .and_then(|id| self.ai_gpus.iter().find(|gpu| gpu.id == id))
+                                            .map(|gpu| format!("Automatic — {}", gpu.name))
+                                            .unwrap_or_else(|| "Automatic (Recommended)".to_owned())
+                                    });
                                 egui::ComboBox::from_label("Vulkan GPU").selected_text(gpu_name)
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(&mut self.ai_gpu_id, -1, "Automatic (Recommended)");
