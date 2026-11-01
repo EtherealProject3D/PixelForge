@@ -185,3 +185,28 @@ pub fn run(
     if result.is_err() { let _ = std::fs::remove_dir_all(&work); }
     result
 }
+
+#[cfg(test)]
+mod sharpening_tests {
+    use super::*;
+
+    #[test]
+    fn flat_image_keeps_original_color_and_alpha() {
+        let original = RgbaImage::from_pixel(48, 48, image::Rgba([145, 102, 58, 173]));
+        let neural = RgbaImage::from_pixel(48, 48, image::Rgba([210, 210, 210, 255]));
+        assert_eq!(preserve_color_sharpen(&original, &neural), original);
+    }
+
+    #[test]
+    fn edge_sharpening_preserves_alpha_and_changes_luminance() {
+        let original = RgbaImage::from_fn(64, 64, |x, _| {
+            if x < 32 { image::Rgba([70, 110, 150, 99]) }
+            else { image::Rgba([140, 180, 220, 99]) }
+        });
+        let output = preserve_color_sharpen(&original, &original);
+        assert!(output.pixels().all(|p| p[3] == 99));
+        assert_ne!(output, original);
+        // Away from edges the input color is preserved.
+        assert_eq!(output.get_pixel(10, 10), original.get_pixel(10, 10));
+    }
+}
