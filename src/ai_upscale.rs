@@ -109,7 +109,7 @@ pub fn upscale(
     options: UpscaleOptions,
 ) -> Result<UpscaleResult, String> {
     let expected = expected_dimensions(original.width(), original.height(), scale)?;
-    if !matches!(options.model.as_str(), "realesrgan-x4plus" | "realesrgan-x4plus-anime" | "realesr-animevideov3") { return Err("Unsupported upscale model".into()); }
+    if !matches!(options.model.as_str(), "realesrgan-x4plus" | "realesrgan-x4plus-anime") { return Err("Unsupported upscale model".into()); }
     if options.gpu_id < -1 || options.gpu_id > 32 { return Err("Invalid GPU ID".into()); }
     if options.tile_size != 0 && !(32..=1024).contains(&options.tile_size) { return Err("Invalid tile size".into()); }
 
