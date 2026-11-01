@@ -3058,6 +3058,8 @@ impl PixelForge {
                         mask.clear();
                     }
                     self.active_saved_selection = None;
+                    self.selected_saved_selection = None;
+                    self.selection_name_input.clear();
 
                     self.refresh_selection_overlay(&ctx);
                 }
