@@ -763,6 +763,59 @@ impl PixelForge {
                     ui.selectable_value(&mut self.generation_checkpoint, checkpoint.clone(), checkpoint);
                 }
             });
+        ui.separator();
+        egui::CollapsingHeader::new("Model Library")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label("Local SDXL checkpoints for image generation.");
+                ui.label(format!("{} checkpoint(s) detected by ComfyUI", self.generation_checkpoints.len()));
+                let installed = |term: &str| self.generation_checkpoints.iter()
+                    .any(|name| name.to_lowercase().contains(term));
+                for (title, keyword, description, url) in [
+                    ("SDXL Base 1.0", "sd_xl_base", "General-purpose baseline; useful for comparisons.",
+                     "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0"),
+                    ("RealVisXL", "realvis", "Photography-focused SDXL checkpoint; recommended for natural-looking photos.",
+                     "https://huggingface.co/SG161222/RealVisXL_V5.0"),
+                    ("Juggernaut XL", "juggernaut", "Detailed SDXL photography and cinematic imagery.",
+                     "https://huggingface.co/RunDiffusion/Juggernaut-XL-v9"),
+                ] {
+                    ui.group(|ui| {
+                        ui.horizontal(|ui| {
+                            ui.strong(title);
+                            if installed(keyword) {
+                                ui.label("Installed");
+                            } else {
+                                ui.label("Not detected");
+                            }
+                        });
+                        ui.small(description);
+                        ui.hyperlink_to("View model / download", url);
+                        if installed(keyword) {
+                            if ui.small_button("Select checkpoint").clicked() {
+                                if let Some(found) = self.generation_checkpoints.iter()
+                                    .find(|name| name.to_lowercase().contains(keyword)) {
+                                    self.generation_checkpoint = found.clone();
+                                }
+                            }
+                        }
+                    });
+                }
+                ui.separator();
+                ui.label("To install: download the SDXL .safetensors checkpoint from the model page, place it in a ComfyUI models/checkpoints folder, then select Refresh Models.");
+                ui.small("Models are third-party files. Check each model's license and download source. PixelForge does not upload prompts or images.");
+                if ui.button("Refresh Installed Checkpoints").clicked() && self.generation_models_rx.is_none() {
+                    let (tx, rx) = std::sync::mpsc::channel();
+                    self.generation_models_rx = Some(rx);
+                    self.generation_status = "Refreshing installed ComfyUI checkpoints...".into();
+                    let repaint = ctx.clone();
+                    std::thread::spawn(move || {
+                        let result = ai_generation::checkpoints();
+                        let _ = tx.send(result);
+                        repaint.request_repaint();
+                    });
+                }
+            });
+        ui.separator();
         let previous_ratio = self.generation_size;
         let previous_orientation = self.generation_portrait;
         egui::ComboBox::from_label("Style preset")
