@@ -269,6 +269,7 @@ struct PixelForge {
     install_total: std::sync::Arc<std::sync::atomic::AtomicU64>,
     install_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     install_status: String,
+    install_folder: Option<PathBuf>,
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
     ai_denoise_level: u32,
@@ -438,6 +439,7 @@ impl Default for PixelForge {
             install_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             install_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             install_status: String::new(),
+            install_folder: None,
             ai_rx: None,
             ai_running: false,
             ai_denoise_level: 2,
@@ -721,6 +723,9 @@ impl PixelForge {
                         }
                         self.generation_status = format!("Found {} local checkpoints", models.len());
                         self.generation_checkpoints = models;
+                        if self.install_folder.is_none() {
+                            self.install_folder = model_installer::detect_checkpoint_folder(&self.generation_checkpoints);
+                        }
                     }
                     Err(error) => self.generation_status = error,
                 }
@@ -798,6 +803,21 @@ impl PixelForge {
             .show(ui, |ui| {
                 ui.label("Local SDXL checkpoints for image generation.");
                 ui.label(format!("{} checkpoint(s) detected by ComfyUI", self.generation_checkpoints.len()));
+                if self.install_folder.is_none() {
+                    self.install_folder = model_installer::detect_checkpoint_folder(&self.generation_checkpoints);
+                }
+                if let Some(folder) = &self.install_folder {
+                    ui.small(format!("Install destination: {}", folder.display()));
+                } else {
+                    ui.small("Install destination: not automatically detected; choose a folder on first install.");
+                }
+                if ui.small_button("Change install location...").clicked() {
+                    if let Some(folder) = rfd::FileDialog::new()
+                        .set_title("Select ComfyUI models/checkpoints")
+                        .pick_folder() {
+                        self.install_folder = Some(folder);
+                    }
+                }
                 let installed = |term: &str| self.generation_checkpoints.iter()
                     .any(|name| name.to_lowercase().contains(term));
                 for (title, keyword, description, url, install_index) in [
@@ -824,9 +844,13 @@ impl PixelForge {
                             }
                         } else if let Some(index) = install_index {
                             if ui.add_enabled(self.install_rx.is_none(), egui::Button::new("Install checkpoint...")).clicked() {
-                                if let Some(folder) = rfd::FileDialog::new()
-                                    .set_title("Select the ComfyUI models/checkpoints folder")
-                                    .pick_folder() {
+                                let folder = self.install_folder.clone().or_else(|| {
+                                    rfd::FileDialog::new()
+                                        .set_title("Select the ComfyUI models/checkpoints folder")
+                                        .pick_folder()
+                                });
+                                if let Some(folder) = folder {
+                                    self.install_folder = Some(folder.clone());
                                     self.install_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
                                     self.install_progress.store(0, std::sync::atomic::Ordering::Relaxed);
                                     self.install_total.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -1135,6 +1159,7 @@ impl PixelForge {
         std::mem::swap(&mut self.install_total, &mut other.install_total);
         std::mem::swap(&mut self.install_cancel, &mut other.install_cancel);
         std::mem::swap(&mut self.install_status, &mut other.install_status);
+        std::mem::swap(&mut self.install_folder, &mut other.install_folder);
         std::mem::swap(&mut self.generation_tools_tab, &mut other.generation_tools_tab);
     }
 
