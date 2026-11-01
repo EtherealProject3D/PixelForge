@@ -461,6 +461,8 @@ impl PixelForge {
                 self.blacks = 0.0;
                 self.vibrance = 0.0;
                 self.gamma = 0.0;
+                self.selection_adjustments = adjustments::Adjustments::default();
+                self.selection_adjustment_target = false;
                 self.comparison_position = 0.5;
                 self.comparison_enabled = true;
                 self.divider_dragging = false;
@@ -543,6 +545,8 @@ impl PixelForge {
         self.blacks = 0.0;
         self.vibrance = 0.0;
         self.gamma = 0.0;
+        self.selection_adjustments = adjustments::Adjustments::default();
+        self.selection_adjustment_target = false;
         self.comparison_enabled = true;
         self.comparison_position = 0.5;
         self.divider_dragging = false;
@@ -812,11 +816,7 @@ impl PixelForge {
         self.selection_undo.clear();
         self.selection_redo.clear();
 
-        // Keep the restored working mask for selection-targeted edits.
-        self.selection_texture = None;
         self.selection_last_point = None;
-        self.selection_undo.clear();
-        self.selection_redo.clear();
         self.selection_stroke_active = false;
         self.image_size = size;
         self.image_path = Some(PathBuf::from(data.image_name));
@@ -834,24 +834,7 @@ impl PixelForge {
         self.export_progress = 0.0;
         self.export_stage.clear();
 
-        if self.brightness != 0.0
-            || self.contrast != 0.0
-            || self.exposure != 0.0
-            || self.saturation != 0.0
-            || self.temperature != 0.0
-            || self.tint != 0.0
-            || self.highlights != 0.0
-            || self.shadows != 0.0
-            || self.whites != 0.0
-            || self.blacks != 0.0
-            || self.vibrance != 0.0
-            || self.gamma != 0.0
-        {
-            self.update_processed_image(ctx);
-        }
-
         self.refresh_selection_overlay(ctx);
-        self.update_processed_image(ctx);
 
         self.status = format!("Project opened: {}", path.display());
     }
