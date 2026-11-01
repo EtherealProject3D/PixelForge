@@ -9,6 +9,7 @@ mod histogram;
 #[allow(dead_code)]
 mod masking;
 mod project;
+mod model_installer;
 
 use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
@@ -263,6 +264,11 @@ struct PixelForge {
     generation_image: Option<image::RgbaImage>,
     generation_texture: Option<TextureHandle>,
     generation_status: String,
+    install_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    install_progress: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    install_total: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    install_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    install_status: String,
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
     ai_denoise_level: u32,
@@ -427,6 +433,11 @@ impl Default for PixelForge {
             generation_image: None,
             generation_texture: None,
             generation_status: "Connect to local ComfyUI to begin".into(),
+            install_rx: None,
+            install_progress: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            install_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            install_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            install_status: String::new(),
             ai_rx: None,
             ai_running: false,
             ai_denoise_level: 2,
@@ -682,6 +693,24 @@ impl PixelForge {
     }
 
     fn poll_generation(&mut self, ctx: &egui::Context) {
+        if let Some(rx) = &self.install_rx {
+            if let Ok(result) = rx.try_recv() {
+                self.install_rx = None;
+                match result {
+                    Ok(path) => {
+                        self.install_status = format!("Installed: {}", path.display());
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.generation_models_rx = Some(rx);
+                        let repaint = ctx.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(ai_generation::checkpoints());
+                            repaint.request_repaint();
+                        });
+                    }
+                    Err(error) => self.install_status = format!("Install failed: {error}"),
+                }
+            } else { ctx.request_repaint_after(std::time::Duration::from_millis(200)); }
+        }
         if let Some(rx) = &self.generation_models_rx {
             if let Ok(result) = rx.try_recv() {
                 self.generation_models_rx = None;
@@ -765,31 +794,27 @@ impl PixelForge {
             });
         ui.separator();
         egui::CollapsingHeader::new("Model Library")
-            .default_open(true)
+            .default_open(false)
             .show(ui, |ui| {
                 ui.label("Local SDXL checkpoints for image generation.");
                 ui.label(format!("{} checkpoint(s) detected by ComfyUI", self.generation_checkpoints.len()));
                 let installed = |term: &str| self.generation_checkpoints.iter()
                     .any(|name| name.to_lowercase().contains(term));
-                for (title, keyword, description, url) in [
+                for (title, keyword, description, url, install_index) in [
                     ("SDXL Base 1.0", "sd_xl_base", "General-purpose baseline; useful for comparisons.",
-                     "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0"),
+                     "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0", None),
                     ("RealVisXL", "realvis", "Photography-focused SDXL checkpoint; recommended for natural-looking photos.",
-                     "https://huggingface.co/SG161222/RealVisXL_V5.0"),
+                     "https://huggingface.co/SG161222/RealVisXL_V5.0", Some(0)),
                     ("Juggernaut XL", "juggernaut", "Detailed SDXL photography and cinematic imagery.",
-                     "https://huggingface.co/RunDiffusion/Juggernaut-XL-v9"),
+                     "https://huggingface.co/RunDiffusion/Juggernaut-XL-v9", Some(1)),
                 ] {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
                             ui.strong(title);
-                            if installed(keyword) {
-                                ui.label("Installed");
-                            } else {
-                                ui.label("Not detected");
-                            }
+                            ui.label(if installed(keyword) { "Installed" } else { "Not detected" });
                         });
                         ui.small(description);
-                        ui.hyperlink_to("View model / download", url);
+                        ui.hyperlink_to("Model page and license", url);
                         if installed(keyword) {
                             if ui.small_button("Select checkpoint").clicked() {
                                 if let Some(found) = self.generation_checkpoints.iter()
@@ -797,9 +822,41 @@ impl PixelForge {
                                     self.generation_checkpoint = found.clone();
                                 }
                             }
+                        } else if let Some(index) = install_index {
+                            if ui.add_enabled(self.install_rx.is_none(), egui::Button::new("Install checkpoint...")).clicked() {
+                                if let Some(folder) = rfd::FileDialog::new()
+                                    .set_title("Select the ComfyUI models/checkpoints folder")
+                                    .pick_folder() {
+                                    self.install_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    self.install_progress.store(0, std::sync::atomic::Ordering::Relaxed);
+                                    self.install_total.store(0, std::sync::atomic::Ordering::Relaxed);
+                                    let progress = self.install_progress.clone();
+                                    let total = self.install_total.clone();
+                                    let cancel = self.install_cancel.clone();
+                                    let (tx, rx) = std::sync::mpsc::channel();
+                                    self.install_rx = Some(rx);
+                                    self.install_status = format!("Downloading {title}...");
+                                    let repaint = ctx.clone();
+                                    std::thread::spawn(move || {
+                                        let result = model_installer::install(index, folder, progress, total, cancel);
+                                        let _ = tx.send(result);
+                                        repaint.request_repaint();
+                                    });
+                                }
+                            }
                         }
                     });
                 }
+                if self.install_rx.is_some() {
+                    let bytes = self.install_progress.load(std::sync::atomic::Ordering::Relaxed);
+                    let total = self.install_total.load(std::sync::atomic::Ordering::Relaxed);
+                    ui.add(egui::ProgressBar::new(if total > 0 { bytes as f32 / total as f32 } else { 0.0 })
+                        .text(format!("{:.2} / {:.2} GB", bytes as f64 / 1e9, total as f64 / 1e9)));
+                    if ui.button("Cancel download").clicked() {
+                        self.install_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                if !self.install_status.is_empty() { ui.label(&self.install_status); }
                 ui.separator();
                 ui.label("To install: download the SDXL .safetensors checkpoint from the model page, place it in a ComfyUI models/checkpoints folder, then select Refresh Models.");
                 ui.small("Models are third-party files. Check each model's license and download source. PixelForge does not upload prompts or images.");
@@ -1073,6 +1130,11 @@ impl PixelForge {
         std::mem::swap(&mut self.generation_image, &mut other.generation_image);
         std::mem::swap(&mut self.generation_texture, &mut other.generation_texture);
         std::mem::swap(&mut self.generation_status, &mut other.generation_status);
+        std::mem::swap(&mut self.install_rx, &mut other.install_rx);
+        std::mem::swap(&mut self.install_progress, &mut other.install_progress);
+        std::mem::swap(&mut self.install_total, &mut other.install_total);
+        std::mem::swap(&mut self.install_cancel, &mut other.install_cancel);
+        std::mem::swap(&mut self.install_status, &mut other.install_status);
         std::mem::swap(&mut self.generation_tools_tab, &mut other.generation_tools_tab);
     }
 
