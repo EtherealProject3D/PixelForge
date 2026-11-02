@@ -9,7 +9,7 @@ Base: `dev/stage-3-5-local-generation`
 
 ## Architecture and behavior
 
-The conversation composer uses the existing asynchronous ComfyUI request path.
+The single conversation composer sits below the canvas and uses the existing asynchronous ComfyUI request path. Apply Edit changes the viewed version; Create New Image starts a separate image (and respects batch settings). Version thumbnails and prompts live in the right sidebar. Generation settings and image details are collapsed by default. Import, Save Project and Export Image are in the Studio toolbar. Edit Area reveals mask painting controls; Cancel Area Edit returns to whole-image editing. Less common actions are in More.
 The first message creates one image; subsequent messages use the selected gallery
 image as img2img input. Each successful result appends an immutable image/settings
 snapshot with its parent index and editing prompt. Failed or cancelled requests
@@ -71,8 +71,7 @@ Validation performed: Windows Rust debug build and 58 automated tests passed,
 including new prompt/metadata and branched gallery project roundtrip tests.
 Cargo.lock was synchronized with the already-declared backend dependencies;
 the previous lock omitted several required packages. Existing compiler warnings
-remain. Interactive GUI, real ComfyUI/GPU generation, model quality, VRAM usage,
-and release execution were not verified. Keep the feature branch unmerged until
+remain. The rebuilt Windows app was launched and the empty Studio layout was visually checked: a single bottom composer, right-side versions/settings and no misleading editor image status. Populated layout, real ComfyUI/GPU generation, model quality, VRAM usage, and release execution were not verified. Keep the feature branch unmerged until
 those manual checks pass.
 
 ## Continue development or return to the saved version

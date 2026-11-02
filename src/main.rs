@@ -1431,43 +1431,46 @@ impl PixelForge {
 
     fn show_generation_sidebar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        ui.heading("Image Generation");
-        ui.push_id("sidebar_conversation", |ui| self.show_conversation(ui));
-        ui.separator();
-        if let Some(index)=self.refinement_source {
-            ui.group(|ui| {
-                ui.strong(format!("Refine Image {}",index+1));
-                ui.radio_value(&mut self.refinement_masked,false,"Refine Entire Image");
-                ui.radio_value(&mut self.refinement_masked,true,"Edit Selected Area (Inpainting)");
-                ui.label("Editing Prompt (separate from original)");
-                ui.add(egui::TextEdit::multiline(&mut self.refinement_prompt).desired_rows(4));
-                ui.add(egui::Slider::new(&mut self.refinement_strength,0.05..=1.0).text("Change Strength"));
-                if self.refinement_masked {
-                    ui.add(egui::Slider::new(&mut self.refinement_brush,4.0..=150.0).text("Brush size (pixels)"));
-                    ui.small("Paint the entire unwanted object plus a little surrounding background. Inpainting uses at least 75% change strength to rebuild the selected region.");
-                    if ui.button("Clear Painted Area").clicked() {
-                        self.refinement_mask.fill(0);
-                        self.refinement_mask_texture=None;
-                    }
-                }
-                ui.separator();
-                if ui.add_enabled(
-                    !self.generation_running && !self.generation_checkpoint.is_empty(),
-                    egui::Button::new("Generate Refinement")
-                ).clicked() {
-                    self.start_generation(&ctx);
-                }
-                if self.generation_running && ui.button("Cancel Refinement").clicked() {
-                    self.generation_cancel.store(true,std::sync::atomic::Ordering::Relaxed);
-                    self.generation_status="Cancelling refinement...".into();
-                }
-                if ui.button("Cancel Refinement Mode").clicked() {
-                    self.refinement_source=None;
-                    self.refinement_mask.clear();
-                    self.refinement_mask_texture=None;
-                }
-            });
+        if !self.generation_workspace {
+            if ui.button("Open Image Studio").clicked() { self.generation_workspace = true; }
         }
+        ui.heading("Versions");
+        ui.small("Select a version to view it and continue editing. Later versions are kept.");
+        if self.generation_gallery.is_empty() { ui.label("Your images will appear here."); }
+        egui::ScrollArea::vertical().id_salt("studio_versions").max_height(300.0).show(ui, |ui| {
+            for index in (0..self.generation_gallery.len()).rev() {
+                let item = &self.generation_gallery[index];
+                ui.group(|ui| {
+                    ui.horizontal(|ui| {
+                        let size = item.texture.size_vec2();
+                        let thumb = size * (64.0 / size.x.max(size.y));
+                        if ui.add(egui::Button::image(egui::Image::new((item.texture.id(), thumb)))
+                            .selected(self.generation_selected == index)).clicked() {
+                            self.generation_selected = index;
+                            self.refinement_source = None;
+                            self.refinement_mask.clear();
+                            self.refinement_mask_texture = None;
+                            self.generation_zoom = 1.0;
+                            self.generation_pan = Vec2::ZERO;
+                        }
+                        ui.vertical(|ui| {
+                            ui.strong(format!("Version {}{}", index+1, if self.generation_selected == index { " · Viewing" } else { "" }));
+                            if let Some(parent) = item.settings.refine_parent.filter(|&p| p < self.generation_gallery.len()) {
+                                ui.small(format!("Edited from version {}", parent+1));
+                                if ui.small_button("Compare with source").clicked() {
+                                    self.generation_selected = index;
+                                    self.generation_compare_index = parent;
+                                    self.generation_compare = true;
+                                }
+                            }
+                        });
+                    });
+                    ui.add(egui::Label::new(item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt)).wrap());
+                });
+            }
+        });
+        ui.separator();
+        ui.collapsing("Generation settings", |ui| {
         ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
         if ui.button("Connect / Refresh Models").clicked() {
             self.refresh_generation_models(&ctx);
@@ -1761,8 +1764,6 @@ impl PixelForge {
         });
         ui.checkbox(&mut self.generation_random_seeds, "Random seeds per image");
         ui.label("When disabled, seeds increment from the starting seed.");
-        ui.label("Prompt");
-        ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).desired_rows(3));
         ui.checkbox(&mut self.generation_auto_negative,"Use automatic negative prompt for selected style");
         if self.generation_auto_negative {
             let style=GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0;
@@ -1777,61 +1778,20 @@ impl PixelForge {
             ui.label("Seed");
             ui.add(egui::DragValue::new(&mut self.generation_seed));
         });
-        // Always expose ordinary generation. Refinement mode must never block
-        // preset aspect-ratio generation or silently redirect the Generate button.
-        ui.horizontal(|ui| {
-            if ui.add_enabled(
-                !self.generation_running && !self.generation_checkpoint.is_empty(),
-                egui::Button::new("Generate New Image")
-            ).clicked() {
-                self.refinement_source=None;
-                self.refinement_mask.clear();
-                self.refinement_mask_texture=None;
-                self.start_generation(&ctx);
-            }
-            if self.generation_running && ui.button("Cancel").clicked() {
-                self.generation_cancel.store(true,std::sync::atomic::Ordering::Relaxed);
-                self.generation_status="Cancelling generation...".into();
-            }
         });
-        if !self.generation_gallery.is_empty() && ui.button("Open Generation Gallery").clicked() {
-            self.generation_workspace = true;
+        if self.generation_checkpoint.is_empty() {
+            ui.label("Connect a local model to begin.");
+            if ui.button("Connect Models").clicked() { self.refresh_generation_models(&ctx); }
         }
-        if let Some(started) = self.generation_started {
-            let step = self
-                .generation_progress
-                .load(std::sync::atomic::Ordering::Relaxed);
-            if step > 0 {
-                ui.add(
-                    egui::ProgressBar::new(
-                        (step as f32 / self.generation_steps.max(1) as f32).clamp(0.0, 1.0),
-                    )
-                    .text(format!(
-                        "Sampling step {}/{} ({:.0}%)",
-                        step,
-                        self.generation_steps,
-                        100.0 * step as f32 / self.generation_steps.max(1) as f32
-                    )),
-                );
-            } else {
-                ui.spinner();
-                ui.label("Waiting for sampling progress...");
-            }
-            ui.label(format!(
-                "Generation elapsed: {:.1}s",
-                started.elapsed().as_secs_f32()
-            ));
+        if let Some(item) = self.generation_gallery.get(self.generation_selected) {
+            ui.collapsing("Image details", |ui| {
+                ui.label(format!("{} × {} pixels", item.pixels.width(), item.pixels.height()));
+                ui.label(format!("Model: {}", item.settings.checkpoint));
+                ui.label(format!("Seed: {} · Steps: {} · CFG: {}", item.seed, item.settings.steps, item.settings.cfg));
+                ui.label(format!("Original prompt: {}", item.settings.prompt));
+                ui.label(format!("Negative: {}", item.settings.negative));
+            });
         }
-        ui.label(&self.generation_status);
-        if let Some(texture) = &self.generation_texture {
-            let width = ui.available_width().max(80.0);
-            let ratio = texture.size()[1] as f32 / texture.size()[0].max(1) as f32;
-            ui.image((texture.id(), egui::vec2(width, width * ratio)));
-            if ui.button("Open Generated Image in Editor").clicked() {
-                self.open_generated_image(&ctx);
-            }
-        }
-        ui.separator();
     }
 
     fn save_generation_project(&mut self, save_as:bool) {
@@ -1874,145 +1834,104 @@ impl PixelForge {
         }
     }
 
-    fn show_conversation(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Image conversation");
-        ui.small("Local SDXL editing: describe the desired result. Accuracy depends on the checkpoint.");
-        ui.add(egui::TextEdit::multiline(&mut self.conversation_draft).hint_text("Describe an image or a change to the selected version").desired_rows(2));
-        ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Edit strength"));
-        let label = if self.generation_gallery.is_empty() { "Send: Create Image" } else { "Send: Edit Selected Version" };
-        if ui.add_enabled(!self.generation_running && !self.conversation_draft.trim().is_empty() && !self.generation_checkpoint.is_empty(), egui::Button::new(label)).clicked() {
-            if let Some(source) = self.generation_gallery.get(self.generation_selected) {
-                self.refinement_source = Some(self.generation_selected);
-                self.generation_prompt = conversation_context(&source.settings);
-                self.refinement_prompt = self.conversation_draft.trim().to_owned();
-                self.generation_negative = source.settings.negative.clone();
-                self.generation_auto_negative = source.settings.auto_negative;
-                self.generation_width = ((source.pixels.width().clamp(256,4096)+32)/64*64).clamp(256,4096);
-                self.generation_height = ((source.pixels.height().clamp(256,4096)+32)/64*64).clamp(256,4096);
-                self.generation_custom_size = true;
-                self.generation_unlock_dimensions = true;
-                self.refinement_masked = false;
-            } else {
-                self.refinement_source = None;
-                self.generation_prompt = self.conversation_draft.trim().to_owned();
-                self.generation_batch_count = 1;
-            }
-            self.refinement_mask.clear();
-            self.refinement_mask_texture = None;
-            self.start_generation(ui.ctx());
-            // Retain the draft so failed or cancelled requests can be retried.
+    fn submit_conversation(&mut self, ctx: &egui::Context, edit: bool) {
+        if self.generation_running || self.conversation_draft.trim().is_empty() || self.generation_checkpoint.is_empty() { return; }
+        if edit {
+            let Some(source) = self.generation_gallery.get(self.generation_selected) else { return; };
+            let painted = self.refinement_source == Some(self.generation_selected) && self.refinement_masked;
+            self.refinement_source = Some(self.generation_selected);
+            self.generation_prompt = conversation_context(&source.settings);
+            self.refinement_prompt = self.conversation_draft.trim().to_owned();
+            self.generation_negative = source.settings.negative.clone();
+            self.generation_auto_negative = source.settings.auto_negative;
+            self.generation_width = ((source.pixels.width().clamp(256,4096)+32)/64*64).clamp(256,4096);
+            self.generation_height = ((source.pixels.height().clamp(256,4096)+32)/64*64).clamp(256,4096);
+            self.generation_custom_size = true;
+            self.generation_unlock_dimensions = true;
+            self.refinement_masked = painted;
+        } else {
+            self.refinement_source = None;
+            self.refinement_masked = false;
+            self.generation_prompt = self.conversation_draft.trim().to_owned();
         }
-        ui.collapsing("Conversation history / Revert", |ui| {
-            ui.small("Select a version to revert and continue. Later versions remain. Save the Studio project to retain history.");
-            egui::ScrollArea::vertical().id_salt("conversation_history").max_height(120.0).show(ui, |ui| {
-                for (index, item) in self.generation_gallery.iter().enumerate() {
-                    let parent = item.settings.refine_parent.filter(|&p| p < self.generation_gallery.len());
-                    let action = item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt);
-                    let origin = parent.map(|p| format!("from v{}", p + 1)).unwrap_or_else(|| "original / import".into());
-                    ui.horizontal(|ui| {
-                        if ui.selectable_label(self.generation_selected == index, format!("v{} ({origin}): {action}", index + 1)).clicked() {
-                            self.generation_selected = index;
-                            self.refinement_source = None;
-                            self.refinement_mask.clear();
-                            self.refinement_mask_texture = None;
-                            self.generation_zoom = 1.0;
-                            self.generation_pan = Vec2::ZERO;
-                        }
-                        if let Some(parent) = parent {
-                            if ui.small_button("Compare parent").clicked() {
-                                self.generation_selected = index;
-                                self.generation_compare_index = parent;
-                                self.generation_compare = true;
-                            }
-                        }
-                    });
-                }
-            });
+        self.start_generation(ctx);
+    }
+
+    fn show_conversation(&mut self, ui: &mut egui::Ui) {
+        let has_image = self.generation_gallery.get(self.generation_selected).is_some();
+        ui.strong(if has_image { "What would you like to change?" } else { "What would you like to create?" });
+        ui.add(egui::TextEdit::multiline(&mut self.conversation_draft)
+            .hint_text("Describe the result you want…").desired_width(f32::INFINITY).desired_rows(2));
+        ui.horizontal_wrapped(|ui| {
+            let ready = !self.generation_running && !self.conversation_draft.trim().is_empty() && !self.generation_checkpoint.is_empty();
+            if has_image && ui.add_enabled(ready, egui::Button::new("Apply Edit").fill(ui.visuals().selection.bg_fill)).clicked() {
+                self.submit_conversation(ui.ctx(), true);
+            }
+            if ui.add_enabled(ready, egui::Button::new("Create New Image")).clicked() {
+                self.submit_conversation(ui.ctx(), false);
+            }
+            if has_image {
+                ui.label(format!("Editing version {}", self.generation_selected+1));
+                ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Change strength"));
+            }
+            if self.generation_running {
+                ui.spinner();
+                let step = self.generation_progress.load(std::sync::atomic::Ordering::Relaxed);
+                ui.label(format!("Step {step} / {}", self.generation_steps));
+                if ui.button("Cancel").clicked() { self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
+            }
         });
+        if self.generation_checkpoint.is_empty() {
+            ui.horizontal(|ui| {
+                ui.label("Choose a local model in Generation settings to start.");
+                if ui.button("Connect Models").clicked() { self.refresh_generation_models(ui.ctx()); }
+            });
+        }
+        ui.small(&self.generation_status);
     }
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
-        ui.push_id("workspace_conversation", |ui| self.show_conversation(ui));
-        ui.horizontal(|ui| {
-            ui.heading("AI Generation Studio");
-            if ui.button("Return to Editor").clicked() {
-                self.generation_workspace = false;
-            }
-            ui.checkbox(&mut self.generation_compare, "Compare A/B");
-        });
-        ui.horizontal(|ui| {
-            if ui.add_enabled(!self.generation_gallery.is_empty() && !self.generation_running,
-                egui::Button::new("Remove Selected from Gallery")).clicked()
-            {
-                let removed=self.generation_selected;
-                self.generation_gallery.remove(removed);
-                if self.refinement_source==Some(removed) {self.refinement_mask.clear();self.refinement_mask_texture=None;}
-                self.refinement_source=match self.refinement_source {Some(index) if index==removed=>None,Some(index) if index>removed=>Some(index-1),other=>other};
-                for item in &mut self.generation_gallery {item.settings.refine_parent=match item.settings.refine_parent {Some(index) if index==removed=>None,Some(index) if index>removed=>Some(index-1),other=>other};}
-                self.generation_selected = self.generation_selected.min(self.generation_gallery.len().saturating_sub(1));
-                self.generation_compare_index = self.generation_compare_index.min(self.generation_gallery.len().saturating_sub(1));
-                self.generation_compare = self.generation_compare && self.generation_gallery.len() > 1;
-                self.generation_status = "Removed image from gallery (original files were not deleted)".into();
-            }
+        ui.horizontal_wrapped(|ui| {
+            ui.heading("Image Studio");
+            if ui.button("Import").clicked() { self.import_generation_images(ui.ctx()); }
+            if ui.add_enabled(!self.generation_running, egui::Button::new("Save Project")).clicked() { self.save_generation_project(false); }
+            if ui.add_enabled(!self.generation_gallery.is_empty(), egui::Button::new("Export Image")).clicked() { self.export_generation_selected(image::ImageFormat::Png, "png"); }
+            if ui.button("Return to Editor").clicked() { self.generation_workspace = false; }
         });
         if self.generation_gallery.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label("Generate images to populate the gallery.");
-            });
+            ui.centered_and_justified(|ui| { ui.label("Describe an image below, or import one to start editing."); });
             return;
         }
         let count = self.generation_gallery.len();
-        self.generation_selected = self.generation_selected.min(count - 1);
-        self.generation_compare_index = self.generation_compare_index.min(count - 1);
-        ui.horizontal(|ui| {
-            ui.label("Selected");
-            egui::ComboBox::from_id_salt("generation_selected")
-                .selected_text(format!(
-                    "Image {} (seed {})",
-                    self.generation_selected + 1,
-                    self.generation_gallery[self.generation_selected].seed
-                ))
-                .show_ui(ui, |ui| {
-                    for (i, item) in self.generation_gallery.iter().enumerate() {
-                        ui.selectable_value(
-                            &mut self.generation_selected,
-                            i,
-                            format!("Image {} - seed {}", i + 1, item.seed),
-                        );
-                    }
-                });
+        self.generation_selected = self.generation_selected.min(count-1);
+        self.generation_compare_index = self.generation_compare_index.min(count-1);
+        ui.horizontal_wrapped(|ui| {
+            ui.strong(format!("Version {}", self.generation_selected+1));
+            ui.add_enabled(count > 1, egui::Checkbox::new(&mut self.generation_compare, "Compare"));
             if self.generation_compare {
-                ui.label("Compare with");
-                egui::ComboBox::from_id_salt("generation_compare")
-                    .selected_text(format!("Image {}", self.generation_compare_index + 1))
-                    .show_ui(ui, |ui| {
-                        for i in 0..count {
-                            ui.selectable_value(
-                                &mut self.generation_compare_index,
-                                i,
-                                format!("Image {}", i + 1),
-                            );
-                        }
-                    });
+                egui::ComboBox::from_id_salt("compare_version").selected_text(format!("Version {}", self.generation_compare_index+1)).show_ui(ui, |ui| {
+                    for index in 0..count { ui.selectable_value(&mut self.generation_compare_index, index, format!("Version {}", index+1)); }
+                });
             }
-            if ui.add_enabled(!self.generation_running,egui::Button::new("Refine Selected Image")).clicked() {
-                let index=self.generation_selected;
-                let selected=&self.generation_gallery[index];
-                self.refinement_source=Some(index);
-                self.refinement_mask=vec![0; (selected.pixels.width() as usize)*(selected.pixels.height() as usize)];
-                self.refinement_mask_texture=None;
-                self.generation_prompt=selected.settings.prompt.clone();
-                self.generation_negative=selected.settings.negative.clone();
-                self.generation_auto_negative=selected.settings.auto_negative;
-                if selected.settings.checkpoint!="Imported image" && !selected.settings.checkpoint.is_empty() {
-                    self.generation_checkpoint=selected.settings.checkpoint.clone();
+            let painting = self.refinement_source == Some(self.generation_selected) && self.refinement_masked;
+            if ui.add_enabled(!self.generation_running, egui::Button::new(if painting { "Cancel Area Edit" } else { "Edit Area" })).clicked() {
+                if painting { self.refinement_masked = false; }
+                else {
+                    let item = &self.generation_gallery[self.generation_selected];
+                    self.refinement_source = Some(self.generation_selected);
+                    self.refinement_masked = true;
+                    self.refinement_mask = vec![0; item.pixels.width() as usize * item.pixels.height() as usize];
+                    self.refinement_mask_texture = None;
+                    self.generation_compare = false;
                 }
-                self.generation_width=((selected.pixels.width().clamp(256,4096)+32)/64*64).clamp(256,4096);
-                self.generation_height=((selected.pixels.height().clamp(256,4096)+32)/64*64).clamp(256,4096);
-                self.generation_custom_size=true;
-                self.generation_status=format!("Refining image {}. Edit the prompt and strength, then click Generate Refinement.",index+1);
             }
-            if ui.button("Reuse Settings").clicked() {
+            ui.menu_button("More", |ui| {
+                if ui.button("Open in Editor").clicked() {
+                    self.generation_image = Some(self.generation_gallery[self.generation_selected].pixels.clone());
+                    self.open_generated_image(ui.ctx());
+                    ui.close();
+                }
+                if ui.button("Reuse generation settings").clicked() {
                 let s = self.generation_gallery[self.generation_selected].settings.clone();
                 self.generation_prompt = s.prompt;
                 self.generation_negative = s.negative;
@@ -2030,28 +1949,30 @@ impl PixelForge {
                 self.generation_seed = s.seed;
                 self.generation_random_seeds = false;
                 self.generation_status = "Restored settings from gallery image".into();
-            }
-            if ui.button("Open Selected in Editor").clicked() {
-                self.generation_image = Some(
-                    self.generation_gallery[self.generation_selected]
-                        .pixels
-                        .clone(),
-                );
-                self.open_generated_image(ui.ctx());
-            }
+                    ui.close();
+                }
+                if ui.add_enabled(!self.generation_running, egui::Button::new("Remove this version")).clicked() {
+                let removed=self.generation_selected;
+                self.generation_gallery.remove(removed);
+                if self.refinement_source==Some(removed) {self.refinement_mask.clear();self.refinement_mask_texture=None;}
+                self.refinement_source=match self.refinement_source {Some(index) if index==removed=>None,Some(index) if index>removed=>Some(index-1),other=>other};
+                for item in &mut self.generation_gallery {item.settings.refine_parent=match item.settings.refine_parent {Some(index) if index==removed=>None,Some(index) if index>removed=>Some(index-1),other=>other};}
+                self.generation_selected = self.generation_selected.min(self.generation_gallery.len().saturating_sub(1));
+                self.generation_compare_index = self.generation_compare_index.min(self.generation_gallery.len().saturating_sub(1));
+                self.generation_compare = self.generation_compare && self.generation_gallery.len() > 1;
+                self.generation_status = "Removed image from gallery (original files were not deleted)".into();
+                    ui.close();
+                }
+            });
         });
-        ui.collapsing("Selected Image Details", |ui| {
-            let s = &self.generation_gallery[self.generation_selected].settings;
-            ui.label(format!("Model: {}", s.checkpoint));
-            ui.label(format!("Style: {}", GENERATION_STYLES[s.style.min(GENERATION_STYLES.len()-1)].0));
-            ui.label(format!("Seed: {}", s.seed));
-            ui.label(format!("Resolution: {} x {}", s.width, s.height));
-            ui.label(format!("Steps: {} | CFG: {:.1}", s.steps, s.cfg));
-            ui.label(format!("Prompt: {}", s.prompt));
-            if let Some(parent)=s.refine_parent {ui.label(format!("Refined from image {} | Strength {:.2}",parent+1,s.refine_strength.unwrap_or(0.35)));}
-            if let Some(prompt)=&s.refine_prompt {ui.label(format!("Editing prompt: {prompt}"));}
-            ui.label(format!("Negative: {}", if s.auto_negative { "Automatic" } else { &s.negative }));
-        });
+        if self.generation_gallery.is_empty() { return; }
+        if self.refinement_source == Some(self.generation_selected) && self.refinement_masked {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Paint the area to change, then describe the result below and Apply Edit.");
+                ui.add(egui::Slider::new(&mut self.refinement_brush, 4.0..=150.0).text("Brush size"));
+                if ui.button("Clear Area").clicked() { self.refinement_mask.fill(0); self.refinement_mask_texture = None; }
+            });
+        }
         ui.horizontal(|ui| {
             if ui.button("Fit").clicked() {
                 self.generation_zoom = 1.0;
@@ -2069,10 +1990,8 @@ impl PixelForge {
             ));
         });
         let available = ui.available_size();
-        // Reserve a fixed footer: thumbnails (80 px) and prompt panel (up to 90 px).
-        // The viewer fills everything above that footer.
-        let footer_height = 95.0;
-        let viewer_height = (available.y - footer_height).max(120.0);
+        // The composer is reserved by the bottom panel before the canvas.
+        let viewer_height = available.y.max(1.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::drag(),
@@ -2167,25 +2086,12 @@ impl PixelForge {
             clipped.text(
                 cell.left_top() + egui::vec2(8.0, 8.0),
                 egui::Align2::LEFT_TOP,
-                format!("Image {} | Seed {}", index + 1, item.seed),
+                format!("Version {}", index + 1),
                 egui::FontId::proportional(13.0),
                 egui::Color32::WHITE,
             );
         }
-        // Thumbnails occupy the bottom of the viewer, directly above the status panel.
-        egui::ScrollArea::horizontal()
-            .max_height(82.0)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    for (index, item) in self.generation_gallery.iter().enumerate() {
-                        let selected = index == self.generation_selected;
-                        let image = egui::Image::new((item.texture.id(), egui::vec2(90.0, 70.0)));
-                        if ui.add(egui::Button::image(image).selected(selected)).clicked() {
-                            self.generation_selected = index;
-                        }
-                    }
-                });
-            });
+
     }
 
     // Keep Generation Studio alive across document changes; editor state belongs to each tab.
@@ -6378,6 +6284,7 @@ impl eframe::App for PixelForge {
                 });
                 ui.separator();
 
+                if !self.generation_workspace {
                 // Image information remains visible in both tabs.
                 ui.heading("Image Information");
 
@@ -6398,11 +6305,12 @@ impl eframe::App for PixelForge {
 
                 ui.separator();
 
+                }
                 egui::ScrollArea::vertical()
                     .id_salt("pixelforge_tools_scroll")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        if self.generation_tools_tab {
+                        if self.generation_workspace || self.generation_tools_tab {
                             self.show_generation_sidebar(ui);
                         } else if self.selection_tools_tab {
                             self.show_selection_sidebar(ui);
@@ -6626,22 +6534,7 @@ impl eframe::App for PixelForge {
             });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             if self.generation_workspace {
-                ui.set_min_height(90.0);
-                if let Some(item) = self.generation_gallery.get(self.generation_selected) {
-                    ui.strong("Selected Image Prompt");
-                    egui::ScrollArea::vertical().max_height(65.0).show(ui, |ui| {
-                        if item.settings.prompt.trim().is_empty() {
-                            ui.label("No prompt recorded (imported image)");
-                        } else {
-                            ui.label(&item.settings.prompt);
-                        }
-                        if !item.settings.negative.trim().is_empty() {
-                            ui.label(format!("Additional negative: {}", item.settings.negative));
-                        }
-                    });
-                } else {
-                    ui.label("Select a gallery image to view its prompt");
-                }
+                self.show_conversation(ui);
                 return;
             }
             ui.allocate_ui_with_layout(
