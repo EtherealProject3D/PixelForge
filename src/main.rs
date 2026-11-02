@@ -1759,6 +1759,33 @@ impl PixelForge {
                     }
                 }
             }
+            ui.menu_button("Export Selected...", |ui| {
+                if self.generation_gallery.is_empty() {
+                    ui.label("Select an image first");
+                }
+                for (label, ext, format) in [
+                    ("PNG (lossless)", "png", image::ImageFormat::Png),
+                    ("JPEG", "jpg", image::ImageFormat::Jpeg),
+                    ("WebP", "webp", image::ImageFormat::WebP),
+                ] {
+                    if ui.add_enabled(!self.generation_gallery.is_empty(), egui::Button::new(label)).clicked() {
+                        ui.close();
+                        let selected = &self.generation_gallery[self.generation_selected];
+                        let filename = format!("PixelForge_{}_{}.{}", self.generation_selected + 1, selected.seed, ext);
+                        if let Some(path) = rfd::FileDialog::new()
+                            .add_filter(label, &[ext])
+                            .set_file_name(&filename)
+                            .save_file()
+                        {
+                            let result = selected.pixels.save_with_format(&path, format);
+                            self.generation_status = match result {
+                                Ok(()) => format!("Exported selected image: {}", path.display()),
+                                Err(error) => format!("Export failed: {error}"),
+                            };
+                        }
+                    }
+                }
+            });
             if ui.add_enabled(!self.generation_gallery.is_empty() && !self.generation_running,
                 egui::Button::new("Remove Selected from Gallery")).clicked()
             {
