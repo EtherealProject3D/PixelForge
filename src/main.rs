@@ -1404,6 +1404,21 @@ impl PixelForge {
         });
     }
 
+    fn recommended_generation_settings(checkpoint: &str) -> (u32, f32, &'static str) {
+        let name = checkpoint.to_ascii_lowercase();
+        if name.contains("cyberrealisticpony") || name.contains("pony") {
+            (30, 5.0, "Pony-based checkpoint: start at 30 steps, CFG 5.")
+        } else if name.contains("realvis") {
+            (30, 5.0, "RealVisXL: start at 30 steps, CFG 5; adjust for the checkpoint version.")
+        } else if name.contains("juggernaut") {
+            (30, 5.0, "Juggernaut XL: start at 30 steps, CFG 5; adjust for the checkpoint version.")
+        } else if name.contains("sd_xl_base") || name.contains("sdxl_base") {
+            (30, 7.0, "SDXL Base: start at 30 steps, CFG 7.")
+        } else {
+            (30, 6.0, "Unknown checkpoint: conservative SDXL starting point, 30 steps and CFG 6.")
+        }
+    }
+
     fn show_generation_sidebar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.heading("Image Generation");
@@ -1445,6 +1460,7 @@ impl PixelForge {
         if ui.button("Connect / Refresh Models").clicked() {
             self.refresh_generation_models(&ctx);
         }
+        let checkpoint_before_selection = self.generation_checkpoint.clone();
         egui::ComboBox::from_label("Checkpoint")
             .selected_text(if self.generation_checkpoint.is_empty() {
                 "Select a checkpoint"
@@ -1470,6 +1486,19 @@ impl PixelForge {
                     );
                 }
             });
+        if self.generation_checkpoint != checkpoint_before_selection {
+            let (steps, cfg, _) = Self::recommended_generation_settings(&self.generation_checkpoint);
+            self.generation_steps = steps;
+            self.generation_cfg = cfg;
+            self.generation_status = format!("Applied recommended settings: {steps} steps, CFG {cfg:.1}. You can still adjust them manually.");
+        }
+        let (recommended_steps, recommended_cfg, recommendation) =
+            Self::recommended_generation_settings(&self.generation_checkpoint);
+        ui.small(recommendation);
+        if ui.small_button("Apply recommended Steps / CFG").clicked() {
+            self.generation_steps = recommended_steps;
+            self.generation_cfg = recommended_cfg;
+        }
         let selected = self.generation_checkpoint.to_ascii_lowercase();
         let best_for = if selected.contains("realvis") {
             "Best for: Natural-looking photography, portraits, landscapes, and everyday scenes."
