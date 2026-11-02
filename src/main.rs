@@ -1942,7 +1942,34 @@ impl PixelForge {
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::drag(),
         );
-        if response.dragged() {
+        let painting = self.refinement_masked
+            && self.refinement_source == Some(self.generation_selected)
+            && !self.generation_compare && !self.generation_running;
+        if painting && (response.dragged() || response.clicked()) {
+            if let Some(pointer) = response.interact_pointer_pos() {
+                let item=&self.generation_gallery[self.generation_selected];
+                let fit=(rect.width()/item.pixels.width() as f32).min(rect.height()/item.pixels.height() as f32);
+                let size=egui::vec2(item.pixels.width() as f32,item.pixels.height() as f32)*fit*self.generation_zoom;
+                let image_rect=egui::Rect::from_center_size(rect.center()+self.generation_pan,size);
+                if image_rect.contains(pointer) {
+                    let x=((pointer.x-image_rect.left())/image_rect.width()*item.pixels.width() as f32) as i32;
+                    let y=((pointer.y-image_rect.top())/image_rect.height()*item.pixels.height() as f32) as i32;
+                    let radius=self.refinement_brush as i32;
+                    let width=item.pixels.width() as i32;
+                    let height=item.pixels.height() as i32;
+                    if self.refinement_mask.len()==(width as usize)*(height as usize) {
+                        for py in (y-radius).max(0)..=(y+radius).min(height-1) {
+                            for px in (x-radius).max(0)..=(x+radius).min(width-1) {
+                                if (px-x)*(px-x)+(py-y)*(py-y)<=radius*radius {
+                                    self.refinement_mask[py as usize*width as usize+px as usize]=255;
+                                }
+                            }
+                        }
+                        self.refinement_mask_texture=None;
+                    }
+                }
+            }
+        } else if response.dragged() {
             self.generation_pan += response.drag_delta();
         }
         if response.hovered() {
@@ -1950,6 +1977,18 @@ impl PixelForge {
             if scroll.abs() > 0.0 {
                 self.generation_zoom =
                     (self.generation_zoom * (scroll * 0.002).exp()).clamp(0.1, 16.0);
+            }
+        }
+        if painting && self.refinement_mask_texture.is_none() {
+            let item=&self.generation_gallery[self.generation_selected];
+            let width=item.pixels.width() as usize;
+            let height=item.pixels.height() as usize;
+            if self.refinement_mask.len()==width*height {
+                let preview=egui::ColorImage::from_rgba_unmultiplied(
+                    [width,height],
+                    &self.refinement_mask.iter().flat_map(|&v| [255u8,35u8,35u8,v/2]).collect::<Vec<u8>>(),
+                );
+                self.refinement_mask_texture=Some(ui.ctx().load_texture("refinement_mask_preview",preview,TextureOptions::NEAREST));
             }
         }
         let painter = ui.painter().with_clip_rect(rect);
@@ -1983,6 +2022,13 @@ impl PixelForge {
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );
+            if painting && index==self.generation_selected {
+                if let Some(mask_texture)=&self.refinement_mask_texture {
+                    clipped.image(mask_texture.id(),image_rect,
+                        egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),
+                        egui::Color32::WHITE);
+                }
+            }
             clipped.text(
                 cell.left_top() + egui::vec2(8.0, 8.0),
                 egui::Align2::LEFT_TOP,
