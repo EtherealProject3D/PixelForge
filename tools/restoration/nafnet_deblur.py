@@ -35,6 +35,7 @@ def main():
     height, width = bgr.shape[:2]
 
     options = ort.SessionOptions()
+    options.log_severity_level = 3
     options.intra_op_num_threads = 2
     options.inter_op_num_threads = 1
     options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
@@ -47,10 +48,12 @@ def main():
     input_name = session.get_inputs()[0].name
     output_name = session.get_outputs()[0].name
 
-    # Each inference is 256x256, divisible by NAFNet's 32-pixel stride.
-    # 32-pixel context on every side limits seams at tile boundaries.
-    tile = 256
-    context = 32
+    # This NAFNet model has deeper downsampling than a 256px tile permits.
+    # Use a fixed 512px input to avoid zero-sized encoder tensors while
+    # keeping memory bounded independently of source-image dimensions.
+    # Keep 64px context to reduce visible seams between neighboring tiles.
+    tile = 512
+    context = 64
     step = tile - 2 * context
     result = np.empty((height, width, 3), dtype=np.uint8)
     for y in range(0, height, step):
