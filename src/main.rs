@@ -1166,7 +1166,13 @@ impl PixelForge {
             return;
         }
         let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].1;
-        let prompt = if self.refinement_source.is_some() {self.refinement_prompt.clone()} else if style.is_empty() {
+        let prompt = if self.refinement_source.is_some() {
+            // CLIP is not an instruction-following editor: retain scene context,
+            // then append the requested correction as guidance.
+            let base = self.generation_prompt.trim();
+            let edit = self.refinement_prompt.trim();
+            if base.is_empty() {edit.to_owned()} else {format!("{base}, {edit}")}
+        } else if style.is_empty() {
             self.generation_prompt.clone()
         } else {
             format!("{}, {}", self.generation_prompt, style)
@@ -1246,7 +1252,9 @@ impl PixelForge {
                         if let (Some(source),Some(mask))=(source_for_composite,mask_for_composite) {
                             if let Some(mask_image)=image::GrayImage::from_raw(source.width(),source.height(),mask) {
                                 let original=image::imageops::resize(&source,image.width(),image.height(),image::imageops::FilterType::Lanczos3);
+                                // Feather the final seam; never paste the raw latent mask boundary.
                                 let scaled_mask=image::imageops::resize(&mask_image,image.width(),image.height(),image::imageops::FilterType::Nearest);
+                                let scaled_mask=image::imageops::blur(&scaled_mask,3.0);
                                 for (x,y,pixel) in image.enumerate_pixels_mut() {
                                     let alpha=scaled_mask.get_pixel(x,y)[0] as f32/255.0;
                                     let old=original.get_pixel(x,y);
@@ -1409,7 +1417,7 @@ impl PixelForge {
                 ui.add(egui::Slider::new(&mut self.refinement_strength,0.05..=1.0).text("Change Strength"));
                 if self.refinement_masked {
                     ui.add(egui::Slider::new(&mut self.refinement_brush,4.0..=150.0).text("Brush size (pixels)"));
-                    ui.small("Paint on the image in the center viewer. Red marks the area to regenerate.");
+                    ui.small("Paint the entire unwanted object plus a little surrounding background. Inpainting uses at least 75% change strength to rebuild the selected region.");
                     if ui.button("Clear Painted Area").clicked() {
                         self.refinement_mask.fill(0);
                         self.refinement_mask_texture=None;
