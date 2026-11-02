@@ -1907,8 +1907,8 @@ impl PixelForge {
                 if selected.settings.checkpoint!="Imported image" && !selected.settings.checkpoint.is_empty() {
                     self.generation_checkpoint=selected.settings.checkpoint.clone();
                 }
-                self.generation_width=((selected.pixels.width().clamp(256,2048)+32)/64*64).clamp(256,2048);
-                self.generation_height=((selected.pixels.height().clamp(256,2048)+32)/64*64).clamp(256,2048);
+                self.generation_width=((selected.pixels.width().clamp(256,4096)+32)/64*64).clamp(256,4096);
+                self.generation_height=((selected.pixels.height().clamp(256,4096)+32)/64*64).clamp(256,4096);
                 self.generation_custom_size=true;
                 self.generation_status=format!("Refining image {}. Edit the prompt and strength, then click Generate Refinement.",index+1);
             }
