@@ -4161,29 +4161,6 @@ impl PixelForge {
         ];
 
         let before_comparison = (self.comparison_enabled, self.comparison_position);
-        ui.collapsing("Original Image (Protected)", |ui| {
-            if let Some(original) = &self.original_pixels {
-                ui.label(format!("Untouched source: {} x {} pixels", original.width(), original.height()));
-                ui.label("Adjustments and previews do not overwrite the original pixels.");
-                if ui.button("Save Untouched Original as PNG...").clicked() {
-                    let stem = self.image_path.as_ref()
-                        .and_then(|path| path.file_stem())
-                        .map(|name| name.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "image".into());
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("PNG Image", &["png"])
-                        .set_file_name(format!("{stem}_original.png"))
-                        .save_file()
-                    {
-                        let path = path.with_extension("png");
-                        match original.save_with_format(&path, image::ImageFormat::Png) {
-                            Ok(()) => self.status = format!("Untouched original saved: {}", path.display()),
-                            Err(error) => self.status = format!("Saving original failed: {error}"),
-                        }
-                    }
-                }
-            }
-        });
         ui.horizontal(|ui| {
             ui.heading("Image Adjustments");
 
