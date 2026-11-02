@@ -73,12 +73,12 @@ impl WindowPlacement {
         Some(Self { x: nums[0], y: nums[1], width: nums[2], height: nums[3], maximized: values[4] == "true" })
     }
 
-    fn save(self) {
-        let Some(path) = Self::path() else { return; };
+    fn save(self) -> std::io::Result<()> {
+        let path = Self::path().ok_or_else(|| std::io::Error::other("APPDATA is unavailable"))?;
         if let Some(parent) = path.parent() {
-            if std::fs::create_dir_all(parent).is_err() { return; }
+            std::fs::create_dir_all(parent)?;
         }
-        let _ = std::fs::write(path, format!("{} {} {} {} {}", self.x, self.y, self.width, self.height, self.maximized));
+        std::fs::write(path, format!("{} {} {} {} {}", self.x, self.y, self.width, self.height, self.maximized))
     }
 }
 
@@ -787,7 +787,9 @@ impl Default for PixelForge {
             preview_source: None,
             preview_rx: None,
             preview_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            window_placement: WindowPlacement::load(),
+            window_placement: Some(WindowPlacement::load().unwrap_or(WindowPlacement {
+                x: 100.0, y: 100.0, width: 1400.0, height: 900.0, maximized: false,
+            })),
             last_window_save: std::time::Instant::now(),
             brightness: 0.0,
             selection_adjustment_target: false,
@@ -5594,27 +5596,31 @@ impl eframe::App for PixelForge {
             }
         }
 
-        // Persist the last normal window bounds, even if the user closes
-        // while maximized. Save at most once per second during dragging.
+        // Always keep a fallback placement so saving never depends on the
+        // backend reporting a rectangle during shutdown.
         let viewport = ctx.input(|i| i.viewport().clone());
-        if let Some(rect) = viewport.inner_rect.or(viewport.outer_rect) {
-            let maximized = viewport.maximized.unwrap_or(false);
-            let previous = self.window_placement;
-            if !maximized && rect.width() >= 800.0 && rect.height() >= 500.0 {
-                self.window_placement = Some(WindowPlacement {
-                    x: rect.min.x, y: rect.min.y,
-                    width: rect.width(), height: rect.height(), maximized,
-                });
-            } else if let Some(mut placement) = previous {
-                placement.maximized = maximized;
-                self.window_placement = Some(placement);
+        let maximized = viewport.maximized.unwrap_or(false);
+        if let Some(mut placement) = self.window_placement {
+            if let Some(rect) = viewport.inner_rect.or(viewport.outer_rect) {
+                if !maximized && rect.width() >= 800.0 && rect.height() >= 500.0 {
+                    placement.x = rect.min.x;
+                    placement.y = rect.min.y;
+                    placement.width = rect.width();
+                    placement.height = rect.height();
+                }
             }
-            if self.last_window_save.elapsed() >= std::time::Duration::from_secs(1)
-                || viewport.close_requested()
-            {
-                if let Some(placement) = self.window_placement { placement.save(); }
-                self.last_window_save = std::time::Instant::now();
+            placement.maximized = maximized;
+            self.window_placement = Some(placement);
+        }
+        if self.last_window_save.elapsed() >= std::time::Duration::from_secs(1)
+            || viewport.close_requested()
+        {
+            if let Some(placement) = self.window_placement {
+                if let Err(err) = placement.save() {
+                    eprintln!("PixelForge window placement save failed: {err}");
+                }
             }
+            self.last_window_save = std::time::Instant::now();
         }
 
         self.show_project_tabs(ctx);
@@ -6265,7 +6271,11 @@ fn main() -> eframe::Result {
 
 impl Drop for PixelForge {
     fn drop(&mut self) {
-        if let Some(placement) = self.window_placement { placement.save(); }
+        if let Some(placement) = self.window_placement {
+            if let Err(err) = placement.save() {
+                eprintln!("PixelForge window placement save failed: {err}");
+            }
+        }
         self.generation_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
         ai_generation::stop_managed_backend();
