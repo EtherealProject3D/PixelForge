@@ -10,6 +10,7 @@ mod histogram;
 mod masking;
 mod model_installer;
 mod project;
+mod generation_project;
 
 use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
@@ -321,6 +322,9 @@ struct GenerationSettings {
     seed: u64,
 }
 
+fn settings_json(s:&GenerationSettings)->serde_json::Value {serde_json::json!({"prompt":s.prompt,"negative":s.negative,"auto_negative":s.auto_negative,"checkpoint":s.checkpoint,"style":s.style,"ratio":s.ratio,"custom_size":s.custom_size,"unlock_dimensions":s.unlock_dimensions,"resolution":s.resolution,"width":s.width,"height":s.height,"steps":s.steps,"cfg":s.cfg,"seed":s.seed})}
+fn settings_from_json(v:&serde_json::Value)->GenerationSettings {GenerationSettings {prompt:v["prompt"].as_str().unwrap_or("").into(),negative:v["negative"].as_str().unwrap_or("").into(),auto_negative:v["auto_negative"].as_bool().unwrap_or(false),checkpoint:v["checkpoint"].as_str().unwrap_or("").into(),style:v["style"].as_u64().unwrap_or(0) as usize,ratio:v["ratio"].as_u64().unwrap_or(0) as usize,custom_size:v["custom_size"].as_bool().unwrap_or(false),unlock_dimensions:v["unlock_dimensions"].as_bool().unwrap_or(false),resolution:v["resolution"].as_u64().unwrap_or(0) as usize,width:v["width"].as_u64().unwrap_or(1024) as u32,height:v["height"].as_u64().unwrap_or(1024) as u32,steps:v["steps"].as_u64().unwrap_or(30) as u32,cfg:v["cfg"].as_f64().unwrap_or(7.0) as f32,seed:v["seed"].as_u64().unwrap_or(0)}}
+
 struct GeneratedItem {
     settings: GenerationSettings,
     pixels: image::RgbaImage,
@@ -591,6 +595,7 @@ struct PixelForge {
     generation_batch_done: usize,
     generation_random_seeds: bool,
     generation_gallery: Vec<GeneratedItem>,
+    generation_project_path: Option<PathBuf>,
     generation_batch_settings: Option<GenerationSettings>,
     generation_selected: usize,
     generation_compare: bool,
@@ -775,6 +780,7 @@ impl Default for PixelForge {
             generation_batch_done: 0,
             generation_random_seeds: true,
             generation_gallery: Vec::new(),
+            generation_project_path: None,
             generation_batch_settings: None,
             generation_selected: 0,
             generation_compare: false,
@@ -1710,6 +1716,42 @@ impl PixelForge {
         ui.separator();
     }
 
+    fn save_generation_project(&mut self, save_as:bool) {
+        let Some(mut path)=(!save_as).then(||self.generation_project_path.clone()).flatten().or_else(||rfd::FileDialog::new().add_filter("PixelForge Project",&["pxf"]).set_file_name("Generation.pxf").save_file()) else {return};
+        path.set_extension("pxf");
+        let current=GenerationSettings {prompt:self.generation_prompt.clone(),negative:self.generation_negative.clone(),auto_negative:self.generation_auto_negative,checkpoint:self.generation_checkpoint.clone(),style:self.generation_style,ratio:self.generation_size,custom_size:self.generation_custom_size,unlock_dimensions:self.generation_unlock_dimensions,resolution:self.generation_resolution,width:self.generation_width,height:self.generation_height,steps:self.generation_steps,cfg:self.generation_cfg,seed:self.generation_seed};
+        let project=generation_project::GalleryProject {items:self.generation_gallery.iter().map(|i|generation_project::GalleryImage {settings:settings_json(&i.settings),pixels:i.pixels.clone(),seed:i.seed}).collect(),selected:self.generation_selected,compare_index:self.generation_compare_index,compare:self.generation_compare,current:settings_json(&current)};
+        match generation_project::save(&path,&project) {Ok(())=>{self.generation_project_path=Some(path.clone());self.generation_status=format!("Saved {}",path.display());},Err(e)=>self.generation_status=format!("Save failed: {e}")}
+    }
+    fn open_generation_project(&mut self,path:&std::path::Path,ctx:&egui::Context) {
+        let project=match generation_project::load(path) {Ok(p)=>p,Err(e)=>{self.generation_status=format!("Open failed: {e}");return}};
+        let gallery:Vec<GeneratedItem>=project.items.into_iter().enumerate().map(|(n,i)|{
+            let size=[i.pixels.width() as usize,i.pixels.height() as usize];
+            let texture=ctx.load_texture(format!("loaded_generation_{n}"),ColorImage::from_rgba_unmultiplied(size,i.pixels.as_raw()),TextureOptions::LINEAR);
+            GeneratedItem {settings:settings_from_json(&i.settings),pixels:i.pixels,texture,seed:i.seed}
+        }).collect();
+        let current=settings_from_json(&project.current);
+        self.generation_prompt=current.prompt;self.generation_negative=current.negative;self.generation_auto_negative=current.auto_negative;self.generation_checkpoint=current.checkpoint;self.generation_style=current.style;self.generation_size=current.ratio;self.generation_custom_size=current.custom_size;self.generation_unlock_dimensions=current.unlock_dimensions;self.generation_resolution=current.resolution;self.generation_width=current.width;self.generation_height=current.height;self.generation_steps=current.steps;self.generation_cfg=current.cfg;self.generation_seed=current.seed;
+        self.generation_gallery=gallery;self.generation_selected=project.selected.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare_index=project.compare_index.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare=project.compare && self.generation_gallery.len()>1;self.generation_project_path=Some(path.to_path_buf());self.generation_workspace=true;self.generation_status=format!("Opened {} ({} images)",path.display(),self.generation_gallery.len());
+    }
+    fn import_generation_images(&mut self,ctx:&egui::Context) {
+        if let Some(paths)=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","webp"]).pick_files() {
+            let mut count=0;
+            for path in paths {match image::open(&path) {
+                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0};self.generation_gallery.push(GeneratedItem {settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
+                Err(e)=>self.generation_status=format!("Import failed: {e}"),
+            }}
+            if count>0 {self.generation_status=format!("Imported {count} image(s)");}
+        }
+    }
+    fn export_generation_selected(&mut self,format:image::ImageFormat,ext:&str) {
+        let Some(item)=self.generation_gallery.get(self.generation_selected) else {return};
+        let filename=format!("PixelForge_{}_{}.{}",self.generation_selected+1,item.seed,ext);
+        if let Some(path)=rfd::FileDialog::new().add_filter(ext,&[ext]).set_file_name(&filename).save_file() {
+            self.generation_status=match item.pixels.save_with_format(&path,format) {Ok(())=>format!("Exported {}",path.display()),Err(e)=>format!("Export failed: {e}")};
+        }
+    }
+
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("AI Generation Studio");
@@ -1719,56 +1761,7 @@ impl PixelForge {
             ui.checkbox(&mut self.generation_compare, "Compare A/B");
         });
         ui.horizontal(|ui| {
-            if ui.button("Import Images...").clicked() {
-                if let Some(paths) = rfd::FileDialog::new()
-                    .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
-                    .pick_files()
-                {
-                    let mut imported = 0usize;
-                    for path in paths {
-                        match image::open(&path) {
-                            Ok(img) => {
-                                let pixels = img.to_rgba8();
-                                let size = [pixels.width() as usize, pixels.height() as usize];
-                                let texture = ui.ctx().load_texture(
-                                    format!("imported_gallery_{}_{}", self.generation_gallery.len(), imported),
-                                    ColorImage::from_rgba_unmultiplied(size, pixels.as_raw()),
-                                    TextureOptions::LINEAR,
-                                );
-                                let settings = GenerationSettings {
-                                    prompt: String::new(), negative: String::new(),
-                                    auto_negative: false, checkpoint: "Imported image".into(),
-                                    style: 0, ratio: 0, custom_size: true,
-                                    unlock_dimensions: true, resolution: 0,
-                                    width: pixels.width(), height: pixels.height(),
-                                    steps: 0, cfg: 0.0, seed: 0,
-                                };
-                                self.generation_gallery.push(GeneratedItem {
-                                    settings, pixels, texture, seed: 0,
-                                });
-                                self.generation_selected = self.generation_gallery.len() - 1;
-                                imported += 1;
-                            }
-                            Err(error) => {
-                                self.generation_status = format!("Could not import {}: {error}", path.display());
-                            }
-                        }
-                    }
-                    if imported > 0 {
-                        self.generation_status = format!("Imported {imported} image(s). Save important images separately until generation projects are available.");
-                    }
-                }
-            }
-            ui.menu_button("Export Selected...", |ui| {
-                if self.generation_gallery.is_empty() {
-                    ui.label("Select an image first");
-                }
-                for (label, ext, format) in [
-                    ("PNG (lossless)", "png", image::ImageFormat::Png),
-                    ("JPEG", "jpg", image::ImageFormat::Jpeg),
-                    ("WebP", "webp", image::ImageFormat::WebP),
-                ] {
-                    if ui.add_enabled(!self.generation_gallery.is_empty(), egui::Button::new(label)).clicked() {
+            if ui.add_enabled(!self.generation_gallery.is_empty(), egui::Button::new(label)).clicked() {
                         ui.close();
                         let selected = &self.generation_gallery[self.generation_selected];
                         let filename = format!("PixelForge_{}_{}.{}", self.generation_selected + 1, selected.seed, ext);
@@ -1995,6 +1988,7 @@ impl PixelForge {
             &mut other.generation_random_seeds,
         );
         std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
+        std::mem::swap(&mut self.generation_project_path, &mut other.generation_project_path);
         std::mem::swap(&mut self.generation_batch_settings, &mut other.generation_batch_settings);
         std::mem::swap(
             &mut self.generation_selected,
@@ -2193,7 +2187,7 @@ impl PixelForge {
                         if ui.button("Save").clicked() {
                             let current = self.active_tab;
                             self.switch_project_tab(id);
-                            self.save_project(false);
+                            if self.generation_workspace {self.save_generation_project(false);} else {self.save_project(false);}
                             if !self.project_dirty {
                                 self.close_project_tab(id);
                             } else if current != id {
@@ -5880,12 +5874,14 @@ impl eframe::App for PixelForge {
 
                     if ui.button("Open Project...").clicked() {
                         ui.close();
-                        self.request_open(PendingOpen::Project, ctx);
+                        if self.generation_workspace {
+                            if let Some(path)=rfd::FileDialog::new().add_filter("PixelForge Project",&["pxf"]).pick_file() {self.open_generation_project(&path,ctx);}
+                        } else {self.request_open(PendingOpen::Project, ctx);}
                     }
 
                     ui.separator();
 
-                    let can_save = self.original_pixels.is_some() && !self.exporting;
+                    let can_save = (self.generation_workspace || self.original_pixels.is_some()) && !self.exporting;
 
                     if ui
                         .add_enabled(can_save, egui::Button::new("Save Project"))
@@ -5900,7 +5896,7 @@ impl eframe::App for PixelForge {
                         .clicked()
                     {
                         ui.close();
-                        self.save_project(true);
+                        if self.generation_workspace {self.save_generation_project(true);} else {self.save_project(true);}
                     }
 
                     ui.separator();
@@ -5994,15 +5990,16 @@ impl eframe::App for PixelForge {
                     }
                 });
 
+                ui.add_enabled_ui(self.generation_workspace, |ui| {ui.menu_button("Import", |ui| {if ui.button("Import Images...").clicked() {ui.close();self.import_generation_images(ctx);}});});
                 ui.menu_button("Export", |ui| {
-                    let can_export = self.original_pixels.is_some() && !self.exporting;
+                    let can_export = (if self.generation_workspace {!self.generation_gallery.is_empty()} else {self.original_pixels.is_some()}) && !self.exporting;
 
                     if ui
                         .add_enabled(can_export, egui::Button::new("Export as PNG..."))
                         .clicked()
                     {
                         ui.close();
-                        self.start_export(ExportFormat::Png);
+                        if self.generation_workspace {self.export_generation_selected(image::ImageFormat::Png,"png");} else {self.start_export(ExportFormat::Png);}
                     }
 
                     if ui
@@ -6010,7 +6007,7 @@ impl eframe::App for PixelForge {
                         .clicked()
                     {
                         ui.close();
-                        self.start_export(ExportFormat::Jpeg);
+                        if self.generation_workspace {self.export_generation_selected(image::ImageFormat::Jpeg,"jpg");} else {self.start_export(ExportFormat::Jpeg);}
                     }
 
                     if ui
@@ -6018,7 +6015,7 @@ impl eframe::App for PixelForge {
                         .clicked()
                     {
                         ui.close();
-                        self.start_export(ExportFormat::WebP);
+                        if self.generation_workspace {self.export_generation_selected(image::ImageFormat::WebP,"webp");} else {self.start_export(ExportFormat::WebP);}
                     }
                 });
 
