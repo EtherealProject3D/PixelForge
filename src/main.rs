@@ -1168,13 +1168,10 @@ impl PixelForge {
             checkpoint: self.generation_checkpoint.clone(),
             prompt,
             negative: if self.generation_auto_negative {
-                automatic_negative_prompt(
-                    GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].0,
-                )
-                .to_owned()
-            } else {
-                self.generation_negative.clone()
-            },
+                let base=automatic_negative_prompt(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0);
+                if self.generation_negative.trim().is_empty() {base.to_owned()}
+                else {format!("{base}, {}",self.generation_negative.trim())}
+            } else {self.generation_negative.clone()},
             width: self.generation_width,
             height: self.generation_height,
             steps: self.generation_steps,
@@ -1635,22 +1632,14 @@ impl PixelForge {
         ui.label("When disabled, seeds increment from the starting seed.");
         ui.label("Prompt");
         ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).desired_rows(3));
-        ui.label("Negative prompt");
+        ui.checkbox(&mut self.generation_auto_negative,"Use automatic negative prompt for selected style");
         if self.generation_auto_negative {
-            let style_name =
-                GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].0;
-            let mut automatic = automatic_negative_prompt(style_name).to_owned();
-            ui.add_enabled(
-                false,
-                egui::TextEdit::multiline(&mut automatic).desired_rows(2),
-            );
-        } else {
-            ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
-        }
-        ui.checkbox(
-            &mut self.generation_auto_negative,
-            "Automatically fill negative prompt for selected style",
-        );
+            let style=GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0;
+            ui.label("Automatic negative prompt (included):");
+            ui.label(automatic_negative_prompt(style));
+            ui.label("Additional negative terms (editable):");
+        } else {ui.label("Negative prompt:");}
+        ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
         ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
         ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0).text("CFG"));
         ui.horizontal(|ui| {
@@ -1839,6 +1828,15 @@ impl PixelForge {
                 self.open_generated_image(ui.ctx());
             }
         });
+        {
+            let s=&self.generation_gallery[self.generation_selected].settings;
+            ui.group(|ui| {
+                ui.strong("Selected Image Prompt");
+                if s.prompt.trim().is_empty() {ui.label("No prompt recorded (imported image)");}
+                else {ui.label(&s.prompt);}
+                if !s.negative.trim().is_empty() {ui.label(format!("Additional negative: {}",s.negative));}
+            });
+        }
         ui.collapsing("Selected Image Details", |ui| {
             let s = &self.generation_gallery[self.generation_selected].settings;
             ui.label(format!("Model: {}", s.checkpoint));
@@ -2486,13 +2484,16 @@ impl PixelForge {
     }
 
     fn open_project(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PixelForge Project", &["pxf"])
-            .pick_file()
-        else {
-            return;
-        };
+        let Some(path) = rfd::FileDialog::new().add_filter("PixelForge Project", &["pxf"]).pick_file() else {return};
+        match generation_project::is_generation(&path) {
+            Ok(true) => {self.open_generation_project(&path,ctx);return;}
+            Ok(false) => {},
+            Err(e) => {self.status=format!("Project open failed: {e}");return;}
+        }
+        self.open_editor_project_at(ctx, path);
+    }
 
+    fn open_editor_project_at(&mut self, ctx: &egui::Context, path: PathBuf) {
         // Load and validate before changing the current image.
         let data = match project::load(&path) {
             Ok(data) => data,
@@ -5856,9 +5857,7 @@ impl eframe::App for PixelForge {
 
                     if ui.button("Open Project...").clicked() {
                         ui.close();
-                        if self.generation_workspace {
-                            if let Some(path)=rfd::FileDialog::new().add_filter("PixelForge Project",&["pxf"]).pick_file() {self.open_generation_project(&path,ctx);}
-                        } else {self.request_open(PendingOpen::Project, ctx);}
+                        self.request_open(PendingOpen::Project, ctx);
                     }
 
                     ui.separator();
@@ -5870,7 +5869,7 @@ impl eframe::App for PixelForge {
                         .clicked()
                     {
                         ui.close();
-                        self.save_project(false);
+                        if self.generation_workspace {self.save_generation_project(false);} else {self.save_project(false);}
                     }
 
                     if ui
