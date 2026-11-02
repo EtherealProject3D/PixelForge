@@ -610,6 +610,11 @@ struct PixelForge {
     project_path: Option<PathBuf>,
     project_dirty: bool,
     edit_versions: Vec<EditVersion>,
+    compare_version_a: usize,
+    compare_version_b: usize,
+    version_comparison: bool,
+    version_texture_a: Option<TextureHandle>,
+    version_texture_b: Option<TextureHandle>,
     pending_open: Option<PendingOpen>,
     exit_confirmation: bool,
     exit_allowed: bool,
@@ -776,6 +781,11 @@ impl Default for PixelForge {
             project_path: None,
             project_dirty: false,
             edit_versions: Vec::new(),
+            compare_version_a: 0,
+            compare_version_b: 0,
+            version_comparison: false,
+            version_texture_a: None,
+            version_texture_b: None,
             pending_open: None,
             exit_confirmation: false,
             exit_allowed: false,
@@ -784,6 +794,55 @@ impl Default for PixelForge {
 }
 
 impl PixelForge {
+    fn render_edit_version(
+        &self,
+        ctx: &egui::Context,
+        version: &EditVersion,
+        name: &str,
+    ) -> Option<TextureHandle> {
+        let source = self.preview_source.as_ref()?;
+        let mut pixels = (**source).clone();
+        let (width, height) = pixels.dimensions();
+        for (y, row) in pixels.rows_mut().enumerate() {
+            for (x, pixel) in row.enumerate() {
+                version.global.apply_pixel(pixel);
+                if let Some(mask) = &version.mask {
+                    let (mw, mh) = mask.dimensions();
+                    if mw > 0 && mh > 0 {
+                        let mx = (x as u64 * mw as u64 / width as u64).min(mw as u64 - 1) as u32;
+                        let my = (y as u64 * mh as u64 / height as u64).min(mh as u64 - 1) as u32;
+                        let alpha = mask.get(mx, my).unwrap_or(0);
+                        if alpha > 0 {
+                            let before = *pixel;
+                            version.local.apply_pixel(pixel);
+                            for c in 0..3 {
+                                pixel[c] = ((before[c] as u32 * (255 - alpha) as u32
+                                    + pixel[c] as u32 * alpha as u32 + 127) / 255) as u8;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let color = ColorImage::from_rgba_unmultiplied(
+            [width as usize, height as usize], pixels.as_raw()
+        );
+        Some(ctx.load_texture(name, color, TextureOptions::LINEAR))
+    }
+
+    fn start_version_comparison(&mut self, ctx: &egui::Context) {
+        let a = self.edit_versions.get(self.compare_version_a);
+        let b = self.edit_versions.get(self.compare_version_b);
+        if let (Some(a), Some(b)) = (a, b) {
+            let left = self.render_edit_version(ctx, a, "version_compare_left");
+            let right = self.render_edit_version(ctx, b, "version_compare_right");
+            self.version_comparison = left.is_some() && right.is_some();
+            self.version_texture_a = left;
+            self.version_texture_b = right;
+            self.comparison_enabled = true;
+        }
+    }
+
     fn current_adjustments(&self) -> adjustments::Adjustments {
         adjustments::Adjustments {
             brightness: self.brightness, contrast: self.contrast,
@@ -846,6 +905,12 @@ impl PixelForge {
                 self.ai_result_path = None;
                 self.original_pixels = Some(rgba);
                 self.edit_versions.clear();
+        self.version_comparison = false;
+        self.version_texture_a = None;
+        self.version_texture_b = None;
+                self.version_comparison = false;
+                self.version_texture_a = None;
+                self.version_texture_b = None;
                 self.prepare_preview_source();
                 self.project_path = None;
                 self.saved_selections.clear();
@@ -4194,6 +4259,9 @@ impl PixelForge {
                 self.edit_versions.push(EditVersion {
                     global, local, mask: self.selection_mask.clone(),
                 });
+                self.version_comparison = false;
+                self.version_texture_a = None;
+                self.version_texture_b = None;
                 self.project_dirty = true;
             }
             let mut restore = None;
@@ -4219,9 +4287,40 @@ impl PixelForge {
                     version.local
                 };
                 self.selection_mask = version.mask;
+                self.version_comparison = false;
                 self.project_dirty = true;
                 self.update_processed_image(ui.ctx());
                 self.refresh_selection_overlay(ui.ctx());
+            }
+            if self.edit_versions.len() >= 2 {
+                ui.separator();
+                ui.label("Compare saved versions");
+                let last = self.edit_versions.len() - 1;
+                self.compare_version_a = self.compare_version_a.min(last);
+                self.compare_version_b = self.compare_version_b.min(last);
+                egui::ComboBox::from_label("Left version")
+                    .selected_text(format!("Version {}", self.compare_version_a + 1))
+                    .show_ui(ui, |ui| {
+                        for i in 0..self.edit_versions.len() {
+                            ui.selectable_value(&mut self.compare_version_a, i, format!("Version {}", i + 1));
+                        }
+                    });
+                egui::ComboBox::from_label("Right version")
+                    .selected_text(format!("Version {}", self.compare_version_b + 1))
+                    .show_ui(ui, |ui| {
+                        for i in 0..self.edit_versions.len() {
+                            ui.selectable_value(&mut self.compare_version_b, i, format!("Version {}", i + 1));
+                        }
+                    });
+                if ui.button("Compare Versions").clicked() {
+                    self.start_version_comparison(ui.ctx());
+                }
+                if self.version_comparison {
+                    if ui.button("Stop Comparing").clicked() {
+                        self.version_comparison = false;
+                    }
+                    ui.label("Drag the divider on the image to compare versions.");
+                }
             }
             ui.small("Session-only history; project persistence is planned for Stage 3.6.5.");
         });
@@ -5125,11 +5224,11 @@ impl PixelForge {
             self.divider_dragging = false;
         }
 
-        if self.comparison_enabled && primary_pressed && !self.selection_brush_enabled {
+        if (self.comparison_enabled || self.version_comparison) && primary_pressed && !self.selection_brush_enabled {
             if let Some(pos) = ui.ctx().input(|i| i.pointer.interact_pos()) {
                 if canvas.contains(pos)
                     && image_rect.contains(pos)
-                    && self.processed_texture.is_some()
+                    && (self.processed_texture.is_some() || self.version_comparison)
                     && (pos.x - divider_x).abs() <= 12.0
                 {
                     self.divider_dragging = true;
@@ -5285,7 +5384,28 @@ impl PixelForge {
             }
         }
 
-        if let Some(original) = &self.texture {
+        if self.version_comparison {
+            if let (Some(left), Some(right)) = (&self.version_texture_a, &self.version_texture_b) {
+                let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
+                painter.image(right.id(), image_rect, uv, Color32::WHITE);
+                let split = image_rect.left() + image_rect.width() * self.comparison_position;
+                let clip = Rect::from_min_max(
+                    canvas.min,
+                    Pos2::new(split.clamp(canvas.left(), canvas.right()), canvas.bottom()),
+                );
+                painter.with_clip_rect(clip).image(left.id(), image_rect, uv, Color32::WHITE);
+                if split >= canvas.left() && split <= canvas.right() && image_rect.intersects(canvas) {
+                    let top = image_rect.top().max(canvas.top());
+                    let bottom = image_rect.bottom().min(canvas.bottom());
+                    if top < bottom {
+                        painter.line_segment(
+                            [Pos2::new(split, top), Pos2::new(split, bottom)],
+                            egui::Stroke::new(2.0_f32, Color32::WHITE),
+                        );
+                    }
+                }
+            }
+        } else if let Some(original) = &self.texture {
             let uv = Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(1.0, 1.0));
 
             if let Some(processed) = &self.processed_texture {
@@ -5349,7 +5469,7 @@ impl PixelForge {
             }
         }
 
-        let over_divider = self.comparison_enabled
+        let over_divider = (self.comparison_enabled || self.version_comparison)
             && self.processed_texture.is_some()
             && pointer_position
                 .map(|pos| {
