@@ -1148,6 +1148,11 @@ impl PixelForge {
         if self.generation_running {
             return;
         }
+        if self.refinement_source.is_some_and(|index|index >= self.generation_gallery.len()) {
+            self.refinement_source=None;
+            self.generation_status="Refinement source is no longer available".into();
+            return;
+        }
         let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].1;
         let prompt = if style.is_empty() {
             self.generation_prompt.clone()
@@ -1668,7 +1673,7 @@ impl PixelForge {
             if ui
                 .add_enabled(
                     !self.generation_running && !self.generation_checkpoint.is_empty(),
-                    egui::Button::new("Generate"),
+                    egui::Button::new(if self.refinement_source.is_some() {"Generate Refinement"} else {"Generate"}),
                 )
                 .clicked()
             {
