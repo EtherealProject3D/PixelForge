@@ -191,7 +191,26 @@ enum PendingOpen {
     Close,
 }
 
+#[derive(Clone)]
+struct GenerationSettings {
+    prompt: String,
+    negative: String,
+    auto_negative: bool,
+    checkpoint: String,
+    style: usize,
+    ratio: usize,
+    custom_size: bool,
+    unlock_dimensions: bool,
+    resolution: usize,
+    width: u32,
+    height: u32,
+    steps: u32,
+    cfg: f32,
+    seed: u64,
+}
+
 struct GeneratedItem {
+    settings: GenerationSettings,
     pixels: image::RgbaImage,
     texture: TextureHandle,
     seed: u64,
@@ -433,6 +452,7 @@ struct PixelForge {
     generation_batch_done: usize,
     generation_random_seeds: bool,
     generation_gallery: Vec<GeneratedItem>,
+    generation_batch_settings: Option<GenerationSettings>,
     generation_selected: usize,
     generation_compare: bool,
     generation_compare_index: usize,
@@ -605,6 +625,7 @@ impl Default for PixelForge {
             generation_batch_done: 0,
             generation_random_seeds: true,
             generation_gallery: Vec::new(),
+            generation_batch_settings: None,
             generation_selected: 0,
             generation_compare: false,
             generation_compare_index: 0,
@@ -849,6 +870,22 @@ impl PixelForge {
         } else {
             format!("{}, {}", self.generation_prompt, style)
         };
+        self.generation_batch_settings = Some(GenerationSettings {
+            prompt: self.generation_prompt.clone(),
+            negative: self.generation_negative.clone(),
+            auto_negative: self.generation_auto_negative,
+            checkpoint: self.generation_checkpoint.clone(),
+            style: self.generation_style,
+            ratio: self.generation_size,
+            custom_size: self.generation_custom_size,
+            unlock_dimensions: self.generation_unlock_dimensions,
+            resolution: self.generation_resolution,
+            width: self.generation_width,
+            height: self.generation_height,
+            steps: self.generation_steps,
+            cfg: self.generation_cfg,
+            seed: self.generation_seed,
+        });
         let request = ai_generation::Request {
             checkpoint: self.generation_checkpoint.clone(),
             prompt,
@@ -972,7 +1009,11 @@ impl PixelForge {
                 );
                 self.generation_texture = Some(texture.clone());
                 self.generation_image = Some(image.clone());
+                let mut settings = self.generation_batch_settings.clone()
+                    .expect("running batch has generation settings");
+                settings.seed = seed;
                 self.generation_gallery.push(GeneratedItem {
+                    settings,
                     pixels: image,
                     texture,
                     seed,
@@ -1443,6 +1484,25 @@ impl PixelForge {
                         }
                     });
             }
+            if ui.button("Reuse Settings").clicked() {
+                let s = self.generation_gallery[self.generation_selected].settings.clone();
+                self.generation_prompt = s.prompt;
+                self.generation_negative = s.negative;
+                self.generation_auto_negative = s.auto_negative;
+                self.generation_checkpoint = s.checkpoint;
+                self.generation_style = s.style;
+                self.generation_size = s.ratio;
+                self.generation_custom_size = s.custom_size;
+                self.generation_unlock_dimensions = s.unlock_dimensions;
+                self.generation_resolution = s.resolution;
+                self.generation_width = s.width;
+                self.generation_height = s.height;
+                self.generation_steps = s.steps;
+                self.generation_cfg = s.cfg;
+                self.generation_seed = s.seed;
+                self.generation_random_seeds = false;
+                self.generation_status = "Restored settings from gallery image".into();
+            }
             if ui.button("Open Selected in Editor").clicked() {
                 self.generation_image = Some(
                     self.generation_gallery[self.generation_selected]
@@ -1451,6 +1511,16 @@ impl PixelForge {
                 );
                 self.open_generated_image(ui.ctx());
             }
+        });
+        ui.collapsing("Selected Image Details", |ui| {
+            let s = &self.generation_gallery[self.generation_selected].settings;
+            ui.label(format!("Model: {}", s.checkpoint));
+            ui.label(format!("Style: {}", GENERATION_STYLES[s.style.min(GENERATION_STYLES.len()-1)].0));
+            ui.label(format!("Seed: {}", s.seed));
+            ui.label(format!("Resolution: {} x {}", s.width, s.height));
+            ui.label(format!("Steps: {} | CFG: {:.1}", s.steps, s.cfg));
+            ui.label(format!("Prompt: {}", s.prompt));
+            ui.label(format!("Negative: {}", if s.auto_negative { "Automatic" } else { &s.negative }));
         });
         ui.horizontal(|ui| {
             if ui.button("Fit").clicked() {
@@ -1573,6 +1643,7 @@ impl PixelForge {
             &mut other.generation_random_seeds,
         );
         std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
+        std::mem::swap(&mut self.generation_batch_settings, &mut other.generation_batch_settings);
         std::mem::swap(
             &mut self.generation_selected,
             &mut other.generation_selected,
