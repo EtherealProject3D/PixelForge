@@ -28,8 +28,14 @@ pub fn save(path: &Path, project: &GalleryProject) -> Result<(), String> {
     let mut temp = path.to_path_buf(); temp.set_extension("pxf.tmp");
     { let mut file = std::fs::File::create(&temp).map_err(|e|e.to_string())?;
       file.write_all(&data).map_err(|e|e.to_string())?; file.sync_all().map_err(|e|e.to_string())?; }
-    if path.exists() { std::fs::remove_file(path).map_err(|e|e.to_string())?; }
-    std::fs::rename(&temp,path).map_err(|e|e.to_string())
+    if !path.exists() { return std::fs::rename(&temp,path).map_err(|e|e.to_string()); }
+    let mut backup=path.to_path_buf(); backup.set_extension("pxf.backup");
+    if backup.exists() { return Err("A previous project backup exists; move it before overwriting".into()); }
+    std::fs::rename(path,&backup).map_err(|e|e.to_string())?;
+    match std::fs::rename(&temp,path) {
+        Ok(()) => {let _=std::fs::remove_file(&backup);Ok(())}
+        Err(e) => {let _=std::fs::rename(&backup,path);Err(format!("Project replacement failed: {e}"))}
+    }
 }
 pub fn load(path: &Path) -> Result<GalleryProject, String> {
     let file = std::fs::File::open(path).map_err(|e|e.to_string())?;
