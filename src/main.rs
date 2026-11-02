@@ -945,7 +945,12 @@ impl PixelForge {
         name: &str,
     ) -> Option<TextureHandle> {
         let source = self.original_pixels.as_ref()?;
-        let mut pixels = version.raster.clone().unwrap_or_else(|| source.clone());
+        let mut pixels = version.raster.clone().unwrap_or_else(|| {
+            self.edit_versions.iter().position(|entry| std::ptr::eq(entry, version))
+                .and_then(|index| self.edit_versions[..index].iter().rev()
+                    .find_map(|entry| entry.raster.as_ref()))
+                .cloned().unwrap_or_else(|| source.clone())
+        });
         let (width, height) = pixels.dimensions();
         for (y, row) in pixels.rows_mut().enumerate() {
             for (x, pixel) in row.enumerate() {
@@ -4454,8 +4459,8 @@ impl PixelForge {
             std::mem::swap(&mut self.vibrance, &mut self.selection_adjustments.vibrance);
             std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
         }
-        ui.collapsing("Edit Versions", |ui| {
-            ui.label("Save adjustments or full-resolution image snapshots. The original stays unchanged.");
+        ui.collapsing("Version History", |ui| {
+            ui.label("Save a version of your edits. AI results are stored as image snapshots automatically.");
             if ui
                 .add_enabled(
                     self.edit_versions.len() < project::MAX_VERSIONS,
@@ -4476,28 +4481,12 @@ impl PixelForge {
                 self.version_texture_a = None;
                 self.version_texture_b = None;
                 self.project_dirty = true;
-            }
-            if ui.add_enabled(self.edit_versions.len() < project::MAX_VERSIONS,
-                egui::Button::new("Save Image Snapshot")).clicked() {
-                if let Some(raster) = self.preview_source.as_ref().map(|p| (**p).clone()) {
-                    let current = self.current_adjustments();
-                    let (global, local) = if self.selection_adjustment_target {
-                        (self.selection_adjustments, current)
-                    } else { (current, self.selection_adjustments) };
-                    self.edit_versions.push(EditVersion {
-                        global, local, mask: self.selection_mask.clone(), raster: Some(raster),
-                    });
-                    self.active_raster_version = Some(self.edit_versions.len() - 1);
-                    self.project_dirty = true;
-                    self.version_comparison = false;
-                    self.status = "Image snapshot saved in project history".into();
-                }
+                self.status = "Version saved to project history".into();
             }
             let mut restore = None;
             for index in 0..self.edit_versions.len() {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Version {} ({})", index + 1,
-                        if self.edit_versions[index].raster.is_some() { "Image" } else { "Adjustments" }));
+                    ui.label(format!("Version {}", index + 1));
                     if ui.button("Restore").clicked() {
                         restore = Some(index);
                     }
@@ -4517,7 +4506,8 @@ impl PixelForge {
                     version.local
                 };
                 self.selection_mask = version.mask;
-                self.active_raster_version = if version.raster.is_some() { Some(index) } else { None };
+                self.active_raster_version = (0..=index).rev()
+                    .find(|&i| self.edit_versions[i].raster.is_some());
                 self.activate_version_source(ui.ctx());
                 self.version_comparison = false;
                 self.project_dirty = true;
