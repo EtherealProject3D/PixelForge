@@ -10,6 +10,10 @@ pub struct Model {
     pub size: u64,
 }
 pub const MODELS: &[Model] = &[
+    Model { name: "CyberRealistic Pony v18 CoreShift fp16", keyword: "cyberrealisticpony",
+        file: "CyberRealisticPony_V18.0_F16.safetensors",
+        url: "https://huggingface.co/cyberdelia/CyberRealisticPony/resolve/main/CyberRealisticPony_V18.0_F16.safetensors",
+        description: "Pony XL character realism, poses and anatomy; 30+ steps, CFG 5", size: 6_940_000_000 },
     Model { name: "RealVisXL V5 fp16", keyword: "realvis", file: "RealVisXL_V5.0_fp16.safetensors",
         url: "https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/main/RealVisXL_V5.0_fp16.safetensors",
         description: "Natural photography, portraits and landscapes", size: 6_940_000_000 },
