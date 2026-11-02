@@ -1,3 +1,5 @@
+Current update: see [SHARED_WORKSPACE.md](SHARED_WORKSPACE.md) for the unified Generate/Edit/AI Tools/Selection canvas, current v0.5.2-shared run instructions and validation.
+
 # Stage 1: conversational image editing
 
 Rollback branch (created on GitHub before code changes):
