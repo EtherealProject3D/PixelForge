@@ -1718,6 +1718,57 @@ impl PixelForge {
             }
             ui.checkbox(&mut self.generation_compare, "Compare A/B");
         });
+        ui.horizontal(|ui| {
+            if ui.button("Import Images...").clicked() {
+                if let Some(paths) = rfd::FileDialog::new()
+                    .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+                    .pick_files()
+                {
+                    let mut imported = 0usize;
+                    for path in paths {
+                        match image::open(&path) {
+                            Ok(img) => {
+                                let pixels = img.to_rgba8();
+                                let size = [pixels.width() as usize, pixels.height() as usize];
+                                let texture = ui.ctx().load_texture(
+                                    format!("imported_gallery_{}_{}", self.generation_gallery.len(), imported),
+                                    ColorImage::from_rgba_unmultiplied(size, pixels.as_raw()),
+                                    TextureOptions::LINEAR,
+                                );
+                                let settings = GenerationSettings {
+                                    prompt: String::new(), negative: String::new(),
+                                    auto_negative: false, checkpoint: "Imported image".into(),
+                                    style: 0, ratio: 0, custom_size: true,
+                                    unlock_dimensions: true, resolution: 0,
+                                    width: pixels.width(), height: pixels.height(),
+                                    steps: 0, cfg: 0.0, seed: 0,
+                                };
+                                self.generation_gallery.push(GeneratedItem {
+                                    settings, pixels, texture, seed: 0,
+                                });
+                                self.generation_selected = self.generation_gallery.len() - 1;
+                                imported += 1;
+                            }
+                            Err(error) => {
+                                self.generation_status = format!("Could not import {}: {error}", path.display());
+                            }
+                        }
+                    }
+                    if imported > 0 {
+                        self.generation_status = format!("Imported {imported} image(s). Save important images separately until generation projects are available.");
+                    }
+                }
+            }
+            if ui.add_enabled(!self.generation_gallery.is_empty() && !self.generation_running,
+                egui::Button::new("Remove Selected from Gallery")).clicked()
+            {
+                self.generation_gallery.remove(self.generation_selected);
+                self.generation_selected = self.generation_selected.min(self.generation_gallery.len().saturating_sub(1));
+                self.generation_compare_index = self.generation_compare_index.min(self.generation_gallery.len().saturating_sub(1));
+                self.generation_compare = self.generation_compare && self.generation_gallery.len() > 1;
+                self.generation_status = "Removed image from gallery (original files were not deleted)".into();
+            }
+        });
         if self.generation_gallery.is_empty() {
             ui.centered_and_justified(|ui| {
                 ui.label("Generate images to populate the gallery.");
