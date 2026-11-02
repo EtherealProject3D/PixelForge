@@ -14,6 +14,7 @@ pub struct Request {
     pub seed: u64,
     pub source: Option<image::RgbaImage>,
     pub denoise: f32,
+    pub mask: Option<Vec<u8>>,
 }
 
 fn client() -> Result<reqwest::blocking::Client, String> {
@@ -142,7 +143,18 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         if !(0.01..=1.0).contains(&request.denoise) {
             return Err("Refinement strength must be between 0.01 and 1.0".into());
         }
-        let resized = image::imageops::resize(source, request.width, request.height, image::imageops::FilterType::Lanczos3);
+        let mut resized = image::imageops::resize(source, request.width, request.height, image::imageops::FilterType::Lanczos3);
+        if let Some(mask) = request.mask.as_ref() {
+            if mask.len() != (source.width() as usize) * (source.height() as usize) || !mask.iter().any(|&v|v>0) {
+                return Err("Paint an area to edit before starting inpainting".into());
+            }
+            let original_mask = image::GrayImage::from_raw(source.width(),source.height(),mask.clone())
+                .ok_or("Invalid inpainting mask dimensions")?;
+            let resized_mask = image::imageops::resize(&original_mask,request.width,request.height,image::imageops::FilterType::Nearest);
+            for (x,y,pixel) in resized.enumerate_pixels_mut() {
+                pixel[3] = 255u8.saturating_sub(resized_mask.get_pixel(x,y)[0]);
+            }
+        }
         let mut png = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(resized)
             .write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
@@ -158,7 +170,11 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         let stored = uploaded["name"].as_str().ok_or("ComfyUI did not return an uploaded filename")?;
         let subfolder = uploaded["subfolder"].as_str().unwrap_or("");
         workflow["4"] = json!({"class_type":"LoadImage","inputs":{"image": if subfolder.is_empty(){stored.to_owned()}else{format!("{subfolder}/{stored}")}}});
-        workflow["8"] = json!({"class_type":"VAEEncode","inputs":{"pixels":["4",0],"vae":["1",2]}});
+        workflow["8"] = if request.mask.is_some() {
+            json!({"class_type":"VAEEncodeForInpaint","inputs":{"pixels":["4",0],"vae":["1",2],"mask":["4",1],"grow_mask_by":6}})
+        } else {
+            json!({"class_type":"VAEEncode","inputs":{"pixels":["4",0],"vae":["1",2]}})
+        };
         workflow["5"]["inputs"]["latent_image"] = json!(["8",0]);
         workflow["5"]["inputs"]["denoise"] = json!(request.denoise);
     }
