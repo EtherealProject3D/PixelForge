@@ -5597,7 +5597,7 @@ impl eframe::App for PixelForge {
         // Persist the last normal window bounds, even if the user closes
         // while maximized. Save at most once per second during dragging.
         let viewport = ctx.input(|i| i.viewport().clone());
-        if let Some(rect) = viewport.outer_rect {
+        if let Some(rect) = viewport.inner_rect.or(viewport.outer_rect) {
             let maximized = viewport.maximized.unwrap_or(false);
             let previous = self.window_placement;
             if !maximized && rect.width() >= 800.0 && rect.height() >= 500.0 {
@@ -6239,7 +6239,8 @@ fn main() -> eframe::Result {
             .with_inner_size([saved.width, saved.height])
             .with_maximized(saved.maximized);
     } else {
-        viewport = viewport.with_maximized(true);
+        // A fresh install starts in a movable window so its placement can be saved.
+        viewport = viewport.with_inner_size([1400.0, 900.0]);
     }
     let options = eframe::NativeOptions {
         viewport,
@@ -6264,6 +6265,7 @@ fn main() -> eframe::Result {
 
 impl Drop for PixelForge {
     fn drop(&mut self) {
+        if let Some(placement) = self.window_placement { placement.save(); }
         self.generation_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
         ai_generation::stop_managed_backend();
