@@ -1,10 +1,15 @@
-"""NAFNet ONNX neural deblur adapter for PixelForge.
-Install: py -m pip install opencv-python numpy
-Model: https://huggingface.co/opencv/deblurring_nafnet
+"""PixelForge NAFNet deblur using ONNX Runtime CPU.
+
+The official quantized ONNX model is not compatible with OpenCV DNN's
+dynamic-shape importer or the CUDA DequantizeLinear implementation.
+Bounded, overlapping CPU tiles prevent whole-image inference memory spikes.
+Install: py -3 -m pip install onnxruntime numpy opencv-python
 """
 import argparse
+import os
 from pathlib import Path
 import sys
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -12,39 +17,80 @@ def main():
     parser.add_argument("--output", required=True)
     parser.add_argument("--model", required=True)
     args = parser.parse_args()
-    try:
-        import cv2
-        import numpy as np
-    except ImportError as exc:
-        raise RuntimeError("Install Python dependencies: py -m pip install opencv-python numpy") from exc
+
+    # Limit native library worker pools before importing inference libraries.
+    os.environ["OMP_NUM_THREADS"] = "2"
+    os.environ["OPENBLAS_NUM_THREADS"] = "2"
+    import cv2
+    import numpy as np
+    import onnxruntime as ort
+
     if not Path(args.model).is_file():
         raise FileNotFoundError(f"NAFNet ONNX model missing: {args.model}")
     image = cv2.imread(args.input, cv2.IMREAD_UNCHANGED)
-    if image is None:
-        raise ValueError(f"Cannot read input: {args.input}")
-    if image.ndim != 3 or image.shape[2] not in (3, 4):
+    if image is None or image.ndim != 3 or image.shape[2] not in (3, 4):
         raise ValueError("Expected RGB/RGBA PNG input")
     alpha = image[:, :, 3].copy() if image.shape[2] == 4 else None
     bgr = image[:, :, :3]
     height, width = bgr.shape[:2]
-    # NAFNet has multiple downsampling stages. Pad to a multiple of 32.
-    bottom = (-height) % 32
-    right = (-width) % 32
-    padded = cv2.copyMakeBorder(bgr, 0, bottom, 0, right, cv2.BORDER_REFLECT_101 if min(height, width) > 32 else cv2.BORDER_REPLICATE)
-    net = cv2.dnn.readNetFromONNX(args.model)
-    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-    blob = cv2.dnn.blobFromImage(padded, 1.0 / 255.0, swapRB=True, crop=False)
-    net.setInput(blob)
-    output = net.forward()
-    if output.ndim != 4 or output.shape[0] != 1 or output.shape[1] != 3:
-        raise RuntimeError(f"Unexpected NAFNet output shape: {output.shape}")
-    rgb = np.transpose(output[0], (1, 2, 0))[:height, :width]
-    bgr_result = cv2.cvtColor((np.clip(rgb, 0, 1) * 255.0).round().astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.inter_op_num_threads = 1
+    options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+    session = ort.InferenceSession(
+        args.model, sess_options=options, providers=["CPUExecutionProvider"]
+    )
+    if session.get_providers() != ["CPUExecutionProvider"]:
+        raise RuntimeError("CPU inference provider unavailable")
+
+    input_name = session.get_inputs()[0].name
+    output_name = session.get_outputs()[0].name
+
+    # Each inference is 256x256, divisible by NAFNet's 32-pixel stride.
+    # 32-pixel context on every side limits seams at tile boundaries.
+    tile = 256
+    context = 32
+    step = tile - 2 * context
+    result = np.empty((height, width, 3), dtype=np.uint8)
+    for y in range(0, height, step):
+        for x in range(0, width, step):
+            core_h = min(step, height - y)
+            core_w = min(step, width - x)
+            # Replicate edges, so even tiny images are valid inputs.
+            patch = bgr[
+                max(0, y - context):min(height, y + core_h + context),
+                max(0, x - context):min(width, x + core_w + context),
+            ]
+            top = max(0, context - y)
+            left = max(0, context - x)
+            bottom = tile - patch.shape[0] - top
+            right = tile - patch.shape[1] - left
+            if min(top, left, bottom, right) < 0:
+                raise RuntimeError("Invalid tile padding")
+            patch = cv2.copyMakeBorder(
+                patch, top, bottom, left, right, cv2.BORDER_REPLICATE
+            )
+            rgb = cv2.cvtColor(patch, cv2.COLOR_BGR2RGB)
+            tensor = np.ascontiguousarray(
+                rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+            )
+            predicted = session.run([output_name], {input_name: tensor})[0]
+            if predicted.shape != (1, 3, tile, tile):
+                raise RuntimeError(f"Unexpected NAFNet output shape: {predicted.shape}")
+            rgb_out = np.clip(
+                predicted[0].transpose(1, 2, 0), 0, 1
+            )
+            core = (rgb_out[context:context + core_h,
+                            context:context + core_w] * 255.0).round().astype(np.uint8)
+            result[y:y + core_h, x:x + core_w] = cv2.cvtColor(
+                core, cv2.COLOR_RGB2BGR
+            )
     if alpha is not None:
-        bgr_result = np.dstack((bgr_result, alpha))
-    if not cv2.imwrite(args.output, bgr_result):
+        result = np.dstack((result, alpha))
+    if not cv2.imwrite(args.output, result):
         raise RuntimeError("Could not write deblurred PNG")
+
 
 if __name__ == "__main__":
     try:
