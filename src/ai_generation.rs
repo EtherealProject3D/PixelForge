@@ -40,6 +40,16 @@ fn qwen_workflow(filename: &str, prompt: &str, seed: u64) -> Value {
     })
 }
 
+// Qwen chooses a working size internally. Return the edit on the source's
+// exact pixel grid; metadata is populated from these final pixels by the caller.
+fn restore_edit_dimensions(output: image::RgbaImage, source_size: Option<(u32, u32)>) -> image::RgbaImage {
+    match source_size {
+        Some((width, height)) if output.dimensions() != (width, height) =>
+            image::imageops::resize(&output, width, height, image::imageops::FilterType::Lanczos3),
+        _ => output,
+    }
+}
+
 fn validate_qwen_nodes(info: &Value) -> Result<(), String> {
     for node in ["UNETLoader", "CLIPLoader", "VAELoader", "FluxKontextImageScale", "TextEncodeQwenImageEditPlus", "ModelSamplingAuraFlow", "CFGNorm"] {
         if info.get(node).is_none() { return Err(format!("Qwen Edit needs ComfyUI node {node}. Update ComfyUI; see docs/QWEN_EDIT_SETUP.md.")); }
@@ -302,8 +312,9 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
                         .send().map_err(|e| e.to_string())?
                         .error_for_status().map_err(|e| e.to_string())?
                         .bytes().map_err(|e| e.to_string())?;
-                    return image::load_from_memory(&bytes).map(|img| img.to_rgba8())
-                        .map_err(|e| format!("Cannot decode generated image: {e}"));
+                    let output = image::load_from_memory(&bytes).map(|img| img.to_rgba8())
+                        .map_err(|e| format!("Cannot decode generated image: {e}"))?;
+                    return Ok(restore_edit_dimensions(output, if qwen { request.source.as_ref().map(|image| image.dimensions()) } else { None }));
                 }
             }
             if job.get("outputs").is_some() { return Err("ComfyUI finished without a saved image".into()); }
@@ -315,6 +326,19 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
 #[cfg(test)]
 mod qwen_tests {
     use super::*;
+    #[test]
+    fn qwen_output_returns_to_exact_source_resolution() {
+        let output = image::RgbaImage::from_pixel(64, 64, image::Rgba([30, 80, 120, 255]));
+        let restored = restore_edit_dimensions(output, Some((101, 73)));
+        assert_eq!(restored.dimensions(), (101, 73));
+        assert_eq!(*restored.get_pixel(50, 30), image::Rgba([30, 80, 120, 255]));
+    }
+    #[test]
+    fn matching_size_and_non_qwen_results_keep_pixels() {
+        let output = image::RgbaImage::from_pixel(7, 5, image::Rgba([1, 2, 3, 4]));
+        assert_eq!(restore_edit_dimensions(output.clone(), None), output);
+        assert_eq!(restore_edit_dimensions(output.clone(), Some((7, 5))), output);
+    }
     #[test]
     fn instruction_editor_uses_image_conditioning_and_dedicated_loaders() {
         let w = qwen_workflow("source.png", "Make the hat blue", 42);

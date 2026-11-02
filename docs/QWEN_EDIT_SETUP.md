@@ -33,8 +33,7 @@ Missing nodes/files produce actionable errors before the image upload or job
 submission, with no silent SDXL fallback. Model filenames must match the paths above
 at the root of each model category (not a nested subfolder).
 
-The pipeline scales the image to the Qwen working size. Results retain their actual
-output dimensions and model/sampling metadata. Generation model selection is
+The pipeline scales the image to the Qwen working size internally, then resamples the result back to the exact source dimensions with Lanczos filtering. This preserves pixel dimensions; it does not add native model detail. Metadata records the final dimensions and model/sampling settings. Only the bottom status panel shows generation progress; the installation-help link is tucked inside Generation settings. Generation model selection is
 independent. Large FP8 models can still exceed laptop memory; GPU performance,
 offloading and output quality must be tested on your hardware. Model weights are
 not bundled, automatically downloaded at application startup, or installed by the

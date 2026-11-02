@@ -1448,6 +1448,7 @@ impl PixelForge {
         self.show_conversation(ui);
         ui.separator();
         ui.collapsing("Generation settings", |ui| {
+        ui.hyperlink_to("Qwen installation help (only needed for setup)", "https://comfyanonymous.github.io/ComfyUI_examples/qwen_image/");
         ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
         if ui.button("Connect / Refresh Models").clicked() {
             self.refresh_generation_models(&ctx);
@@ -1875,7 +1876,6 @@ impl PixelForge {
         ui.label(format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
         if self.edit_checkpoint == ai_generation::QWEN_EDIT {
             ui.small("Instruction-based editing · 20 steps · CFG 4 · whole image");
-            ui.hyperlink_to("Qwen model setup", "https://comfyanonymous.github.io/ComfyUI_examples/qwen_image/");
         } else {
             ui.small("SDXL image-to-image refinement. Choose Qwen Edit for instruction-based editing.");
         }
@@ -1888,7 +1888,6 @@ impl PixelForge {
         }
         let ready = has_image && !self.generation_running && !self.conversation_draft.trim().is_empty() && !editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true).is_empty();
         if ui.add_enabled(ready, egui::Button::new("Apply Edit").fill(ui.visuals().selection.bg_fill)).clicked() { self.submit_conversation(ui.ctx(), true); }
-        self.show_generation_progress(ui);
         if self.generation_checkpoints.is_empty() && ui.button("Connect / Refresh Models").clicked() { self.refresh_generation_models(ui.ctx()); }
     }
 
