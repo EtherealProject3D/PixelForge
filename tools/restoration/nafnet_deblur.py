@@ -1,5 +1,5 @@
 """NAFNet ONNX neural deblur adapter for PixelForge.
-Install: py -m pip install opencv-python numpy onnxruntime
+Install: py -m pip install opencv-python numpy onnxruntime-gpu
 Model: https://huggingface.co/opencv/deblurring_nafnet
 """
 import argparse
@@ -32,9 +32,17 @@ def main():
     bottom = (-height) % 32
     right = (-width) % 32
     padded = cv2.copyMakeBorder(bgr, 0, bottom, 0, right, cv2.BORDER_REFLECT_101 if min(height, width) > 32 else cv2.BORDER_REPLICATE)
-    # OpenCV DNN cannot reliably execute this dynamic-shape NAFNet model.
-    # ONNX Runtime supports its shape operators and uses CPU inference.
-    session = ort.InferenceSession(args.model, providers=["CPUExecutionProvider"])
+    # Require CUDA. Never silently fall back to CPU: full-frame NAFNet can
+    # exhaust host RAM and make the desktop unresponsive.
+    if "CUDAExecutionProvider" not in ort.get_available_providers():
+        raise RuntimeError("CUDA provider unavailable. Install onnxruntime-gpu and compatible CUDA/cuDNN libraries; CPU deblur is disabled.")
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.inter_op_num_threads = 1
+    session = ort.InferenceSession(args.model, sess_options=options,
+                                   providers=["CUDAExecutionProvider"])
+    if "CUDAExecutionProvider" not in session.get_providers():
+        raise RuntimeError("CUDA provider could not initialize; refusing CPU fallback.")
     inputs = session.get_inputs()
     if len(inputs) != 1:
         raise RuntimeError(f"Expected one NAFNet input, got {len(inputs)}")
