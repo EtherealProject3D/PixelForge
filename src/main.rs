@@ -1069,7 +1069,6 @@ impl PixelForge {
                 self.ai_result_path = None;
                 self.original_pixels = Some(rgba);
                 self.edit_versions.clear();
-        self.active_raster_version = None;
                 self.active_raster_version = None;
         self.version_comparison = false;
         self.version_texture_a = None;
@@ -2183,6 +2182,7 @@ impl PixelForge {
         self.processed_texture = None;
         self.original_pixels = None;
         self.edit_versions.clear();
+        self.active_raster_version = None;
         self.histogram = histogram::Histogram::default();
         self.preview_source = None;
         self.preview_rx = None;
@@ -2450,6 +2450,7 @@ impl PixelForge {
 
         self.original_pixels = Some(data.pixels);
         self.edit_versions.clear();
+        self.active_raster_version = None;
         self.prepare_preview_source();
         self.processed_texture = None;
 
@@ -3634,6 +3635,26 @@ impl PixelForge {
                 .clicked()
             {
                 self.save_ai_result(ctx);
+            }
+
+            if ui.add_enabled(self.ai_result.is_some() && self.edit_versions.len() < project::MAX_VERSIONS,
+                egui::Button::new("Add AI Result to History")).clicked() {
+                let path = self.ai_result.as_ref().map(|result| result.ai_path.clone());
+                if let Some(path) = path {
+                    match image::open(&path) {
+                        Ok(image) => {
+                            self.edit_versions.push(EditVersion {
+                                global: adjustments::Adjustments::default(),
+                                local: adjustments::Adjustments::default(),
+                                mask: None,
+                                raster: Some(image.to_rgba8()),
+                            });
+                            self.project_dirty = true;
+                            self.status = "AI result added to image history".into();
+                        }
+                        Err(error) => self.status = format!("Cannot capture AI result: {error}"),
+                    }
+                }
             }
 
             if self.ai_saving {
