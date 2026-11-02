@@ -2572,9 +2572,10 @@ impl PixelForge {
             return;
         };
 
-        // Limit interactive processing to approximately 1600px
-        // on the longest side. Original pixels remain untouched.
-        const MAX_PREVIEW_EDGE: u32 = 1600;
+        // Keep enough detail for a sharp fitted preview on high-DPI / ultrawide
+        // displays. Adjustment rendering stays on the background worker.
+        // Cap texture size to avoid excessive VRAM use on very large images.
+        const MAX_PREVIEW_EDGE: u32 = 4096;
 
         let width = original.width();
         let height = original.height();
@@ -2590,7 +2591,7 @@ impl PixelForge {
                 original,
                 new_width,
                 new_height,
-                image::imageops::FilterType::Triangle,
+                image::imageops::FilterType::Lanczos3,
             )
         } else {
             original.clone()
@@ -2607,7 +2608,17 @@ impl PixelForge {
             return;
         };
 
-        let source = std::sync::Arc::clone(original);
+        // At 100% or higher, render directly from the original pixels to
+        // avoid stretching the downsampled working preview. The expensive
+        // adjustment pass is performed off the UI thread.
+        let source = if self.zoom >= 0.95 {
+            self.original_pixels
+                .as_ref()
+                .map(|pixels| std::sync::Arc::new(pixels.clone()))
+                .unwrap_or_else(|| std::sync::Arc::clone(original))
+        } else {
+            std::sync::Arc::clone(original)
+        };
         let generation_counter = std::sync::Arc::clone(&self.preview_generation);
 
         let generation = generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
