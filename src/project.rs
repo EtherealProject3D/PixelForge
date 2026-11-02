@@ -9,10 +9,21 @@ const MAGIC_V5: &[u8; 4] = b"PXF5";
 const MAGIC_V6: &[u8; 4] = b"PXF6";
 const MAGIC_V7: &[u8; 4] = b"PXF7";
 const MAGIC_V8: &[u8; 4] = b"PXF8";
+const MAGIC_V9: &[u8; 4] = b"PXF9";
 const MAX_SELECTIONS: usize = 128;
+pub const MAX_VERSIONS: usize = 128;
 const MAX_SELECTION_NAME: usize = 256;
 const MAX_BYTES: u64 = 1_073_741_824;
 const MAX_NAME: usize = 4096;
+
+// Payload tag 0 represents an adjustment checkpoint; other tags are
+// reserved for future raster AI-edit versions.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectVersion {
+    pub global: [f32; 12],
+    pub local: [f32; 12],
+    pub mask: Option<Vec<u8>>,
+}
 
 pub struct Project {
     pub pixels: image::RgbaImage,
@@ -35,12 +46,23 @@ pub struct Project {
     pub selection_adjustments: [f32; 12],
     pub active_mask: Option<Vec<u8>>,
     pub selection_target: bool,
+    pub edit_versions: Vec<ProjectVersion>,
 }
 
 fn read<const N: usize>(reader: &mut impl Read) -> Result<[u8; N], String> {
     let mut value = [0u8; N];
     reader.read_exact(&mut value).map_err(|e| e.to_string())?;
     Ok(value)
+}
+
+fn valid_adjustments(values: &[f32; 12]) -> bool {
+    values.iter().enumerate().all(|(index, value)| {
+        value.is_finite() && (if index == 2 {
+            (-3.0..=3.0).contains(value)
+        } else {
+            (-100.0..=100.0).contains(value)
+        })
+    })
 }
 
 pub fn save(path: &Path, project: &Project) -> Result<(), String> {
@@ -58,7 +80,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
     }
 
     let mut data = Vec::new();
-    data.extend_from_slice(MAGIC_V8);
+    data.extend_from_slice(MAGIC_V9);
     data.extend_from_slice(&project.brightness.to_le_bytes());
     data.extend_from_slice(&project.contrast.to_le_bytes());
     data.extend_from_slice(&project.exposure.to_le_bytes());
@@ -138,6 +160,42 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
         data.extend_from_slice(&encoded);
     } else {
         data.push(0);
+    }
+
+    // PXF9: counted, tagged edit checkpoints appended to PXF8 data.
+    if project.edit_versions.len() > MAX_VERSIONS {
+        return Err("Too many edit versions".into());
+    }
+    data.extend_from_slice(&(project.edit_versions.len() as u32).to_le_bytes());
+    for version in &project.edit_versions {
+        if !valid_adjustments(&version.global) || !valid_adjustments(&version.local) {
+            return Err("Invalid edit version adjustments".into());
+        }
+        data.push(0); // Adjustment payload
+        for value in version.global {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        for value in version.local {
+            data.extend_from_slice(&value.to_le_bytes());
+        }
+        if let Some(mask) = &version.mask {
+            if mask.len() != expected {
+                return Err("Invalid edit version mask".into());
+            }
+            let gray = image::GrayImage::from_raw(
+                project.pixels.width(), project.pixels.height(), mask.clone()
+            ).ok_or("Invalid edit version mask")?;
+            let mut output = Cursor::new(Vec::new());
+            image::DynamicImage::ImageLuma8(gray)
+                .write_to(&mut output, image::ImageFormat::Png)
+                .map_err(|e| e.to_string())?;
+            let encoded = output.into_inner();
+            data.push(1);
+            data.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+            data.extend_from_slice(&encoded);
+        } else {
+            data.push(0);
+        }
     }
 
     if data.len() as u64 > MAX_BYTES {
@@ -236,6 +294,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         && &version != MAGIC_V6
         && &version != MAGIC_V7
         && &version != MAGIC_V8
+        && &version != MAGIC_V9
     {
         return Err("Unsupported PixelForge project format".into());
     }
@@ -245,7 +304,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let (exposure, saturation) = if matches!(
         &version,
-        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V8 | MAGIC_V8 | MAGIC_V8
+        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9
     ) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -257,7 +316,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let (temperature, tint) = if matches!(
         &version,
-        MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V8 | MAGIC_V8
+        MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9
     ) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -267,7 +326,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (highlights, shadows) = if matches!(&version, MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V8) {
+    let (highlights, shadows) = if matches!(&version, MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -276,7 +335,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (whites, blacks) = if matches!(&version, MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8) {
+    let (whites, blacks) = if matches!(&version, MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -285,7 +344,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (vibrance, gamma) = if &version == MAGIC_V6 || &version == MAGIC_V7 || &version == MAGIC_V8 {
+    let (vibrance, gamma) = if matches!(&version, MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -343,7 +402,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
     if image_length == 0
         || image_length > MAX_BYTES
         || image_length > bytes.len() as u64 - reader.position()
-        || (&version != MAGIC_V7 && &version != MAGIC_V8 && image_length != bytes.len() as u64 - reader.position())
+        || (&version != MAGIC_V7 && &version != MAGIC_V8 && &version != MAGIC_V9 && image_length != bytes.len() as u64 - reader.position())
     {
         return Err("Invalid or incomplete embedded image".into());
     }
@@ -361,7 +420,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let mut saved_selections = Vec::new();
 
-    if &version == MAGIC_V7 || &version == MAGIC_V8 {
+    if matches!(&version, MAGIC_V7 | MAGIC_V8 | MAGIC_V9) {
         reader.set_position(image_end as u64);
 
         let count = u32::from_le_bytes(read::<4>(&mut reader)?) as usize;
@@ -422,7 +481,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
     let mut selection_adjustments = [0.0_f32; 12];
     let mut active_mask = None;
     let mut selection_target = false;
-    if &version == MAGIC_V8 {
+    if matches!(&version, MAGIC_V8 | MAGIC_V9) {
         for value in &mut selection_adjustments {
             *value = f32::from_le_bytes(read::<4>(&mut reader)?);
             if !value.is_finite() { return Err("Invalid selection adjustment".into()); }
@@ -447,7 +506,58 @@ pub fn load(path: &Path) -> Result<Project, String> {
             },
             _ => return Err("Invalid active selection flag".into()),
         }
-        if reader.position() != bytes.len() as u64 { return Err("Unexpected trailing project data".into()); }
+        if &version == MAGIC_V8 && reader.position() != bytes.len() as u64 {
+            return Err("Unexpected trailing project data".into());
+        }
+    }
+
+    let mut edit_versions = Vec::new();
+    if &version == MAGIC_V9 {
+        let count = u32::from_le_bytes(read::<4>(&mut reader)?) as usize;
+        if count > MAX_VERSIONS {
+            return Err("Too many edit versions".into());
+        }
+        for _ in 0..count {
+            if read::<1>(&mut reader)?[0] != 0 {
+                return Err("Unsupported edit version payload".into());
+            }
+            let mut global = [0.0_f32; 12];
+            let mut local = [0.0_f32; 12];
+            for value in &mut global {
+                *value = f32::from_le_bytes(read::<4>(&mut reader)?);
+            }
+            for value in &mut local {
+                *value = f32::from_le_bytes(read::<4>(&mut reader)?);
+            }
+            if !valid_adjustments(&global) || !valid_adjustments(&local) {
+                return Err("Invalid edit version adjustments".into());
+            }
+            let mask = match read::<1>(&mut reader)?[0] {
+                0 => None,
+                1 => {
+                    let length = u64::from_le_bytes(read::<8>(&mut reader)?);
+                    if length == 0 || length > bytes.len() as u64 - reader.position() {
+                        return Err("Invalid edit version mask length".into());
+                    }
+                    let begin = reader.position() as usize;
+                    let end = begin.checked_add(length as usize)
+                        .ok_or("Invalid edit version mask length")?;
+                    let gray = image::load_from_memory_with_format(
+                        &bytes[begin..end], image::ImageFormat::Png,
+                    ).map_err(|e| e.to_string())?.to_luma8();
+                    if gray.dimensions() != pixels.dimensions() {
+                        return Err("Edit version mask dimensions mismatch".into());
+                    }
+                    reader.set_position(end as u64);
+                    Some(gray.into_raw())
+                }
+                _ => return Err("Invalid edit version mask flag".into()),
+            };
+            edit_versions.push(ProjectVersion { global, local, mask });
+        }
+        if reader.position() != bytes.len() as u64 {
+            return Err("Unexpected trailing project data".into());
+        }
     }
 
     Ok(Project {
@@ -471,6 +581,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         selection_adjustments,
         active_mask,
         selection_target,
+        edit_versions,
     })
 }
 
@@ -510,6 +621,18 @@ mod tests {
             selection_adjustments: [1.0; 12],
             active_mask: Some(vec![0, 64, 128, 255]),
             selection_target: true,
+            edit_versions: vec![
+                ProjectVersion {
+                    global: [12.0, -10.0, 1.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
+                    local: [0.0; 12],
+                    mask: Some(vec![0, 64, 128, 255]),
+                },
+                ProjectVersion {
+                    global: [0.0; 12],
+                    local: [0.0, 8.0, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                    mask: None,
+                },
+            ],
         };
 
         save(&path, &original).expect("PXF save failed");
@@ -521,6 +644,7 @@ mod tests {
         assert_eq!(loaded.selection_adjustments, original.selection_adjustments);
         assert_eq!(loaded.active_mask, original.active_mask);
         assert_eq!(loaded.selection_target, original.selection_target);
+        assert_eq!(loaded.edit_versions, original.edit_versions);
         assert_eq!(loaded.image_name, original.image_name);
         assert_eq!(loaded.brightness, original.brightness);
         assert_eq!(loaded.contrast, original.contrast);
@@ -536,6 +660,61 @@ mod tests {
         assert_eq!(loaded.gamma, original.gamma);
         assert_eq!(loaded.comparison_enabled, original.comparison_enabled);
         assert_eq!(loaded.comparison_position, original.comparison_position);
+    }
+
+    #[test]
+    fn pxf8_loads_without_version_history() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "pixelforge_legacy_{}_{}.pxf", std::process::id(), unique
+        ));
+        let project = Project {
+            pixels: image::RgbaImage::from_pixel(2, 2, image::Rgba([7, 8, 9, 255])),
+            image_name: "legacy.png".into(),
+            brightness: 1.0, contrast: 0.0, exposure: 0.0, saturation: 0.0,
+            temperature: 0.0, tint: 0.0, highlights: 0.0, shadows: 0.0,
+            whites: 0.0, blacks: 0.0, vibrance: 0.0, gamma: 0.0,
+            comparison_enabled: false, comparison_position: 0.5,
+            saved_selections: vec![], selection_adjustments: [0.0; 12],
+            active_mask: None, selection_target: false, edit_versions: vec![],
+        };
+        save(&path, &project).unwrap();
+        // PXF9 with zero versions is PXF8 plus a four-byte version count.
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[0..4].copy_from_slice(MAGIC_V8);
+        bytes.truncate(bytes.len() - 4);
+        std::fs::write(&path, &bytes).unwrap();
+        let loaded = load(&path).expect("PXF8 should load");
+        std::fs::remove_file(&path).unwrap();
+        assert!(loaded.edit_versions.is_empty());
+        assert_eq!(loaded.pixels, project.pixels);
+    }
+
+    #[test]
+    fn rejects_excessive_version_count() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "pixelforge_bad_versions_{}_{}.pxf", std::process::id(), unique
+        ));
+        let project = Project {
+            pixels: image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255])),
+            image_name: "test.png".into(),
+            brightness: 0.0, contrast: 0.0, exposure: 0.0, saturation: 0.0,
+            temperature: 0.0, tint: 0.0, highlights: 0.0, shadows: 0.0,
+            whites: 0.0, blacks: 0.0, vibrance: 0.0, gamma: 0.0,
+            comparison_enabled: false, comparison_position: 0.5,
+            saved_selections: vec![], selection_adjustments: [0.0; 12],
+            active_mask: None, selection_target: false, edit_versions: vec![],
+        };
+        save(&path, &project).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let offset = bytes.len() - 4;
+        bytes[offset..].copy_from_slice(&((MAX_VERSIONS as u32) + 1).to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(load(&path).is_err());
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]
