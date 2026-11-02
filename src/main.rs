@@ -443,6 +443,25 @@ struct EditVersion {
     mask: Option<masking::SelectionMask>,
 }
 
+fn adjustment_values(a: adjustments::Adjustments) -> [f32; 12] {
+    [
+        a.brightness, a.contrast, a.exposure, a.saturation,
+        a.temperature, a.tint, a.highlights, a.shadows,
+        a.whites, a.blacks, a.vibrance, a.gamma,
+    ]
+}
+
+fn adjustments_from_values(values: [f32; 12]) -> adjustments::Adjustments {
+    adjustments::Adjustments {
+        brightness: values[0], contrast: values[1],
+        exposure: values[2], saturation: values[3],
+        temperature: values[4], tint: values[5],
+        highlights: values[6], shadows: values[7],
+        whites: values[8], blacks: values[9],
+        vibrance: values[10], gamma: values[11],
+    }
+}
+
 struct PixelForge {
     inactive_tabs: Vec<(usize, Box<PixelForge>)>,
     active_tab: usize,
@@ -2231,6 +2250,11 @@ impl PixelForge {
                 .as_ref()
                 .map(|mask| mask.pixels().to_vec()),
             selection_target: self.selection_adjustment_target,
+            edit_versions: self.edit_versions.iter().map(|version| project::ProjectVersion {
+                global: adjustment_values(version.global),
+                local: adjustment_values(version.local),
+                mask: version.mask.as_ref().map(|mask| mask.pixels().to_vec()),
+            }).collect(),
             saved_selections: self
                 .saved_selections
                 .iter()
@@ -2314,6 +2338,24 @@ impl PixelForge {
             .original_pixels
             .as_ref()
             .map(|pixels| pixels.dimensions());
+
+        self.edit_versions = data.edit_versions.into_iter().map(|version| {
+            let mask = selection_dimensions.and_then(|(width, height)| {
+                version.mask.and_then(|pixels| {
+                    masking::SelectionMask::from_pixels(width, height, pixels).ok()
+                })
+            });
+            EditVersion {
+                global: adjustments_from_values(version.global),
+                local: adjustments_from_values(version.local),
+                mask,
+            }
+        }).collect();
+        self.compare_version_a = 0;
+        self.compare_version_b = self.edit_versions.len().saturating_sub(1);
+        self.version_comparison = false;
+        self.version_texture_a = None;
+        self.version_texture_b = None;
 
         self.saved_selections = selection_dimensions
             .map(|(width, height)| {
@@ -4249,7 +4291,13 @@ impl PixelForge {
         }
         ui.collapsing("Edit Versions", |ui| {
             ui.label("Save adjustment checkpoints without copying the original image.");
-            if ui.button("Save Current Version").clicked() {
+            if ui
+                .add_enabled(
+                    self.edit_versions.len() < project::MAX_VERSIONS,
+                    egui::Button::new("Save Current Version"),
+                )
+                .clicked()
+            {
                 let current = self.current_adjustments();
                 let (global, local) = if self.selection_adjustment_target {
                     (self.selection_adjustments, current)
@@ -4322,7 +4370,7 @@ impl PixelForge {
                     ui.label("Drag the divider on the image to compare versions.");
                 }
             }
-            ui.small("Session-only history; project persistence is planned for Stage 3.6.5.");
+            ui.small("Versions are saved with your .pxf project.");
         });
         let mut preview_needs_refresh = false;
         let before_adjustments = [
