@@ -746,6 +746,7 @@ struct PixelForge {
     project_path: Option<PathBuf>,
     project_dirty: bool,
     edit_versions: Vec<EditVersion>,
+    active_raster_version: Option<usize>,
     compare_version_a: usize,
     compare_version_b: usize,
     version_comparison: bool,
@@ -923,6 +924,7 @@ impl Default for PixelForge {
             project_path: None,
             project_dirty: false,
             edit_versions: Vec::new(),
+            active_raster_version: None,
             compare_version_a: 0,
             compare_version_b: 0,
             version_comparison: false,
@@ -942,8 +944,8 @@ impl PixelForge {
         version: &EditVersion,
         name: &str,
     ) -> Option<TextureHandle> {
-        let source = self.preview_source.as_ref()?;
-        let mut pixels = version.raster.clone().unwrap_or_else(|| (**source).clone());
+        let source = self.original_pixels.as_ref()?;
+        let mut pixels = version.raster.clone().unwrap_or_else(|| source.clone());
         let (width, height) = pixels.dimensions();
         for (y, row) in pixels.rows_mut().enumerate() {
             for (x, pixel) in row.enumerate() {
@@ -982,6 +984,26 @@ impl PixelForge {
             self.version_texture_a = left;
             self.version_texture_b = right;
             self.comparison_enabled = true;
+        }
+    }
+
+    fn activate_version_source(&mut self, ctx: &egui::Context) {
+        let raster = self.active_raster_version
+            .and_then(|i| self.edit_versions.get(i))
+            .and_then(|v| v.raster.as_ref())
+            .or(self.original_pixels.as_ref()).cloned();
+        if let Some(raster) = raster {
+            let size = [raster.width() as usize, raster.height() as usize];
+            self.texture = Some(ctx.load_texture("current_image",
+                ColorImage::from_rgba_unmultiplied(size, raster.as_raw()), TextureOptions::LINEAR));
+            self.image_size = size;
+            self.preview_generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.preview_rx = None;
+            self.preview_source = Some(std::sync::Arc::new(raster.clone()));
+            self.histogram = histogram::Histogram::from_image(&raster);
+            self.processed_texture = None;
+            self.fit_pending = true;
+            self.update_processed_image(ctx);
         }
     }
 
@@ -1047,6 +1069,8 @@ impl PixelForge {
                 self.ai_result_path = None;
                 self.original_pixels = Some(rgba);
                 self.edit_versions.clear();
+        self.active_raster_version = None;
+                self.active_raster_version = None;
         self.version_comparison = false;
         self.version_texture_a = None;
         self.version_texture_b = None;
@@ -2374,6 +2398,7 @@ impl PixelForge {
                 .as_ref()
                 .map(|mask| mask.pixels().to_vec()),
             selection_target: self.selection_adjustment_target,
+            active_raster_version: self.active_raster_version,
             edit_versions: self.edit_versions.iter().map(|version| project::ProjectVersion {
                 global: adjustment_values(version.global),
                 local: adjustment_values(version.local),
@@ -2477,6 +2502,7 @@ impl PixelForge {
                 raster: version.raster,
             }
         }).collect();
+        self.active_raster_version = data.active_raster_version;
         self.compare_version_a = 0;
         self.compare_version_b = self.edit_versions.len().saturating_sub(1);
         self.version_comparison = false;
@@ -2525,8 +2551,8 @@ impl PixelForge {
         self.export_progress = 0.0;
         self.export_stage.clear();
 
+        self.activate_version_source(ctx);
         self.refresh_selection_overlay(ctx);
-        self.update_processed_image(ctx);
 
         self.status = format!("Project opened: {}", path.display());
     }
@@ -4408,7 +4434,7 @@ impl PixelForge {
             std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
         }
         ui.collapsing("Edit Versions", |ui| {
-            ui.label("Save adjustment checkpoints without copying the original image.");
+            ui.label("Save adjustments or full-resolution image snapshots. The original stays unchanged.");
             if ui
                 .add_enabled(
                     self.edit_versions.len() < project::MAX_VERSIONS,
@@ -4430,10 +4456,27 @@ impl PixelForge {
                 self.version_texture_b = None;
                 self.project_dirty = true;
             }
+            if ui.add_enabled(self.edit_versions.len() < project::MAX_VERSIONS,
+                egui::Button::new("Save Image Snapshot")).clicked() {
+                if let Some(raster) = self.preview_source.as_ref().map(|p| (**p).clone()) {
+                    let current = self.current_adjustments();
+                    let (global, local) = if self.selection_adjustment_target {
+                        (self.selection_adjustments, current)
+                    } else { (current, self.selection_adjustments) };
+                    self.edit_versions.push(EditVersion {
+                        global, local, mask: self.selection_mask.clone(), raster: Some(raster),
+                    });
+                    self.active_raster_version = Some(self.edit_versions.len() - 1);
+                    self.project_dirty = true;
+                    self.version_comparison = false;
+                    self.status = "Image snapshot saved in project history".into();
+                }
+            }
             let mut restore = None;
             for index in 0..self.edit_versions.len() {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Version {}", index + 1));
+                    ui.label(format!("Version {} ({})", index + 1,
+                        if self.edit_versions[index].raster.is_some() { "Image" } else { "Adjustments" }));
                     if ui.button("Restore").clicked() {
                         restore = Some(index);
                     }
@@ -4453,6 +4496,8 @@ impl PixelForge {
                     version.local
                 };
                 self.selection_mask = version.mask;
+                self.active_raster_version = if version.raster.is_some() { Some(index) } else { None };
+                self.activate_version_source(ui.ctx());
                 self.version_comparison = false;
                 self.project_dirty = true;
                 self.update_processed_image(ui.ctx());
