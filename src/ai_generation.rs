@@ -120,9 +120,9 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
     ensure_server()?;
     if request.prompt.trim().is_empty() { return Err("Enter a generation prompt".into()); }
     if request.checkpoint.trim().is_empty() { return Err("Select a local checkpoint".into()); }
-    if !(256..=2048).contains(&request.width) || !(256..=2048).contains(&request.height)
+    if !(256..=4096).contains(&request.width) || !(256..=4096).contains(&request.height)
         || request.width % 64 != 0 || request.height % 64 != 0 {
-        return Err("Dimensions must be multiples of 64, between 256 and 2048".into());
+        return Err("Dimensions must be multiples of 64, between 256 and 4096".into());
     }
     if cancel.load(Ordering::Relaxed) { return Err("Generation cancelled".into()); }
     let mut workflow = json!({
