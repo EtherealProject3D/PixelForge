@@ -1,5 +1,5 @@
 """NAFNet ONNX neural deblur adapter for PixelForge.
-Install: py -m pip install opencv-python numpy
+Install: py -m pip install opencv-python numpy onnxruntime
 Model: https://huggingface.co/opencv/deblurring_nafnet
 """
 import argparse
@@ -15,8 +15,9 @@ def main():
     try:
         import cv2
         import numpy as np
+        import onnxruntime as ort
     except ImportError as exc:
-        raise RuntimeError("Install Python dependencies: py -m pip install opencv-python numpy") from exc
+        raise RuntimeError("Install Python dependencies: py -m pip install opencv-python numpy onnxruntime") from exc
     if not Path(args.model).is_file():
         raise FileNotFoundError(f"NAFNet ONNX model missing: {args.model}")
     image = cv2.imread(args.input, cv2.IMREAD_UNCHANGED)
@@ -31,12 +32,14 @@ def main():
     bottom = (-height) % 32
     right = (-width) % 32
     padded = cv2.copyMakeBorder(bgr, 0, bottom, 0, right, cv2.BORDER_REFLECT_101 if min(height, width) > 32 else cv2.BORDER_REPLICATE)
-    net = cv2.dnn.readNetFromONNX(args.model)
-    net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-    net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+    # OpenCV DNN cannot reliably execute this dynamic-shape NAFNet model.
+    # ONNX Runtime supports its shape operators and uses CPU inference.
+    session = ort.InferenceSession(args.model, providers=["CPUExecutionProvider"])
+    inputs = session.get_inputs()
+    if len(inputs) != 1:
+        raise RuntimeError(f"Expected one NAFNet input, got {len(inputs)}")
     blob = cv2.dnn.blobFromImage(padded, 1.0 / 255.0, swapRB=True, crop=False)
-    net.setInput(blob)
-    output = net.forward()
+    output = session.run(None, {inputs[0].name: blob})[0]
     if output.ndim != 4 or output.shape[0] != 1 or output.shape[1] != 3:
         raise RuntimeError(f"Unexpected NAFNet output shape: {output.shape}")
     rgb = np.transpose(output[0], (1, 2, 0))[:height, :width]
