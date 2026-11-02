@@ -4486,7 +4486,14 @@ impl PixelForge {
             let mut restore = None;
             for index in 0..self.edit_versions.len() {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Version {}", index + 1));
+                    let label = if self.edit_versions[index].raster.is_some() {
+                        format!("Version {} — AI Image", index + 1)
+                    } else if index == 0 {
+                        "Version 1 — Original / Edits".to_owned()
+                    } else {
+                        format!("Version {} — Edits", index + 1)
+                    };
+                    ui.label(label);
                     if ui.button("Restore").clicked() {
                         restore = Some(index);
                     }
