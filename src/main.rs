@@ -1,15 +1,15 @@
 mod adjustments;
-mod ai_upscale;
 mod ai_denoise;
-mod ai_restoration;
 mod ai_generation;
+mod ai_restoration;
+mod ai_upscale;
 mod analysis;
 mod auto_enhance;
 mod histogram;
 #[allow(dead_code)]
 mod masking;
-mod project;
 mod model_installer;
+mod project;
 
 use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
@@ -199,32 +199,223 @@ struct GeneratedItem {
 
 const GENERATION_STYLES: &[(&str, &str)] = &[
     ("Default", ""),
-    ("Photorealistic", "unedited RAW photograph captured on a full-frame DSLR, authentic documentary photography, physically accurate natural lighting, realistic dynamic range, natural color science, subtle film grain, organic fine detail, true-to-life material textures, no CGI, no illustration, no artificial HDR, no oversharpening"),
-    ("Portrait", "professional portrait photography, flattering studio light, natural skin texture, shallow depth of field"),
-    ("Landscape Photography", "real outdoor landscape photograph, full-frame camera, realistic geography and atmospheric perspective, naturally irregular trees and foliage, authentic terrain, subtle natural daylight, realistic haze, neutral color grading, restrained contrast, no fantasy scenery, no CGI, no artificial HDR, no oversaturation"),
-    ("Product", "commercial product photography, clean composition, studio lighting"),
-    ("Macro", "macro photography, intricate close-up detail, shallow depth of field"),
-    ("Cinematic", "cinematic film still, dramatic lighting, atmospheric color grading"),
-    ("3D Cartoon", "stylized 3D animated film, expressive shapes, polished materials"),
+    (
+        "Photorealistic",
+        "unedited RAW photograph captured on a full-frame DSLR, authentic documentary photography, physically accurate natural lighting, realistic dynamic range, natural color science, subtle film grain, organic fine detail, true-to-life material textures, no CGI, no illustration, no artificial HDR, no oversharpening",
+    ),
+    (
+        "Portrait Photography",
+        "professional portrait photography, flattering studio light, natural skin texture, shallow depth of field",
+    ),
+    (
+        "Landscape Photography",
+        "real outdoor landscape photograph, full-frame camera, realistic geography and atmospheric perspective, naturally irregular trees and foliage, authentic terrain, subtle natural daylight, realistic haze, neutral color grading, restrained contrast, no fantasy scenery, no CGI, no artificial HDR, no oversaturation",
+    ),
+    (
+        "Product",
+        "commercial product photography, clean composition, studio lighting",
+    ),
+    (
+        "Macro",
+        "macro photography, intricate close-up detail, shallow depth of field",
+    ),
+    (
+        "Cinematic",
+        "cinematic film still, dramatic lighting, atmospheric color grading",
+    ),
+    (
+        "3D Cartoon",
+        "stylized 3D animated film, expressive shapes, polished materials",
+    ),
     ("Anime", "anime illustration, clean linework, cel shading"),
-    ("Watercolor", "traditional watercolor painting, textured paper, soft pigment washes"),
-    ("Oil Painting", "traditional oil painting, visible brush strokes, painterly texture"),
-    ("Pencil Sketch", "graphite pencil drawing, fine hatching, monochrome"),
-    ("Comic Book", "graphic novel illustration, bold ink lines, dynamic colors"),
-    ("Pixel Art", "pixel art, crisp pixel edges, limited color palette"),
-    ("Fantasy", "fantasy concept art, magical atmosphere, detailed worldbuilding"),
-    ("Sci-Fi", "science fiction concept art, futuristic atmosphere"),
-    ("Cyberpunk", "cyberpunk neon city aesthetic, dramatic futuristic lighting"),
-    ("Vintage Film", "analog film photograph, subtle grain, vintage color palette"),
+    (
+        "Watercolor",
+        "traditional watercolor painting, textured paper, soft pigment washes",
+    ),
+    (
+        "Oil Painting",
+        "traditional oil painting, visible brush strokes, painterly texture",
+    ),
+    (
+        "Pencil Sketch",
+        "graphite pencil drawing, fine hatching, monochrome",
+    ),
+    (
+        "Comic Book",
+        "graphic novel illustration, bold ink lines, dynamic colors",
+    ),
+    (
+        "Pixel Art",
+        "pixel art, crisp pixel edges, limited color palette",
+    ),
+    (
+        "Fantasy",
+        "fantasy concept art, magical atmosphere, detailed worldbuilding",
+    ),
+    (
+        "Sci-Fi",
+        "science fiction concept art, futuristic atmosphere",
+    ),
+    (
+        "Cyberpunk",
+        "cyberpunk neon city aesthetic, dramatic futuristic lighting",
+    ),
+    (
+        "Vintage Film",
+        "analog film photograph, subtle grain, vintage color palette",
+    ),
+    (
+        "Iconography",
+        "professional iconography, simple recognizable symbols, clean geometric shapes, balanced proportions, strong silhouettes, precise edges, limited color palette, centered isolated design, minimal visual clutter",
+    ),
+    (
+        "Logo Design",
+        "professional brand identity concept, distinctive logo mark, balanced composition, memorable abstract symbol, elegant geometric construction, clean negative space, scalable visual simplicity",
+    ),
+    (
+        "Vector Illustration",
+        "clean flat vector-style illustration, smooth precise shapes, solid colors, crisp edges, balanced composition, modern editorial graphic design",
+    ),
+    (
+        "Silhouette / Stencil",
+        "bold high-contrast silhouette artwork, clean black and white shapes, solid filled regions, strong recognizable outlines, stencil-friendly graphic composition",
+    ),
+    (
+        "Ink & Engraving",
+        "traditional ink engraving, fine crosshatching, detailed etched linework, vintage printmaking aesthetics, precise black ink illustration",
+    ),
+    (
+        "Low Poly",
+        "stylized low-poly artwork, angular polygonal shapes, faceted surfaces, simplified geometry, carefully balanced colors",
+    ),
+    (
+        "Isometric Art",
+        "isometric illustration, consistent three-quarter projection, miniature scene composition, clean geometric structures, detailed stylized environment",
+    ),
+    (
+        "Papercut Art",
+        "layered paper cut illustration, stacked colored paper shapes, crisp cut edges, subtle dimensional shadows, handcrafted composition",
+    ),
+    (
+        "Character Design",
+        "professional character concept art, distinctive silhouette, coherent costume design, expressive pose, detailed original character illustration",
+    ),
+    (
+        "Industrial Design",
+        "professional industrial design concept visualization, functional product geometry, realistic materials, precise construction, clean presentation, innovative manufactured object",
+    ),
+    (
+        "Synthwave",
+        "retro futuristic synthwave artwork, 1980s inspired neon aesthetic, glowing magenta and cyan lighting, atmospheric retro technology, vibrant cinematic composition",
+    ),
+    (
+        "Surrealism",
+        "surrealist fine art, dreamlike atmosphere, imaginative impossible environments, unexpected visual combinations, coherent artistic composition",
+    ),
 ];
 
+fn automatic_negative_prompt(style: &str) -> &'static str {
+    match style {
+        "Iconography" | "Logo Design" => {
+            "photorealistic, complex scenery, busy background, excessive detail, blurry edges, distorted shapes, illegible text, watermark, visual clutter"
+        }
+        "Vector Illustration" => {
+            "photorealistic, photographic textures, muddy colors, blurry edges, excessive gradients, watermark, text"
+        }
+        "Silhouette / Stencil" => {
+            "gradients, photographic textures, soft shadows, complex background, fine disconnected details, blurry edges, watermark, text"
+        }
+        "Ink & Engraving" => {
+            "photorealistic, smooth digital shading, blurry linework, flat plastic textures, watermark, text"
+        }
+        "Low Poly" => {
+            "photorealistic, smooth organic surfaces, excessive fine detail, blurry geometry, watermark, text"
+        }
+        "Isometric Art" => {
+            "fisheye perspective, inconsistent projection, distorted geometry, blurry details, watermark, text"
+        }
+        "Papercut Art" => {
+            "photorealistic, glossy plastic, blurry edges, flat lighting, watermark, text"
+        }
+        "Character Design" => {
+            "inconsistent anatomy, extra limbs, distorted hands, duplicate features, blurry details, watermark, text"
+        }
+        "Industrial Design" => {
+            "impossible geometry, distorted perspective, inconsistent materials, blurry details, watermark, text"
+        }
+        "Synthwave" => {
+            "muted colors, flat lighting, natural daylight, blurry details, watermark, text"
+        }
+        "Surrealism" => {
+            "mundane composition, repetitive scenery, low detail, blurry, watermark, text"
+        }
+        "Photorealistic"
+        | "Portrait Photography"
+        | "Landscape Photography"
+        | "Product"
+        | "Macro"
+        | "Vintage Film" => {
+            "cartoon, anime, illustration, CGI, plastic textures, artificial skin, distorted anatomy, unnatural colors, watermark, text"
+        }
+        "Cinematic" => {
+            "cartoon, anime, flat lighting, artificial textures, washed out colors, watermark, text"
+        }
+        "3D Cartoon" => {
+            "photorealistic, flat shading, muddy textures, distorted geometry, watermark, text"
+        }
+        "Anime" => {
+            "photorealistic, 3D render, inconsistent linework, blurry, distorted anatomy, watermark, text"
+        }
+        "Watercolor" => {
+            "photorealistic, 3D render, hard digital edges, plastic textures, watermark, text"
+        }
+        "Oil Painting" => {
+            "photorealistic, 3D render, flat colors, digital artifacts, watermark, text"
+        }
+        "Pencil Sketch" => {
+            "photorealistic, full color, painted textures, blurry lines, watermark, text"
+        }
+        "Comic Book" => "photorealistic, blurry linework, muddy colors, watermark, text",
+        "Pixel Art" => {
+            "photorealistic, smooth gradients, anti-aliasing, blurry pixels, watermark, text"
+        }
+        "Fantasy" => "modern photography, mundane setting, flat lighting, watermark, text",
+        "Sci-Fi" => "historical setting, medieval architecture, low detail, watermark, text",
+        "Cyberpunk" => "rural scenery, daylight photography, muted lighting, watermark, text",
+        _ => "blurry, low quality, distorted, watermark, unwanted text",
+    }
+}
 const GENERATION_SIZES: &[(&str, u32, u32)] = &[
-    ("Square 1:1", 1024, 1024),
-    ("Classic 4:3", 1152, 896),
-    ("Photo 3:2", 1216, 832),
-    ("Widescreen 16:9", 1344, 768),
-    ("Ultrawide 21:9", 1536, 640),
+    ("Square 1:1", 1, 1),
+    ("Landscape 4:3", 4, 3),
+    ("Portrait 3:4", 3, 4),
+    ("Landscape 3:2", 3, 2),
+    ("Portrait 2:3", 2, 3),
+    ("Landscape 16:9", 16, 9),
+    ("Portrait 9:16", 9, 16),
+    ("Landscape 16:10", 16, 10),
+    ("Portrait 10:16", 10, 16),
+    ("Ultrawide 21:9", 21, 9),
+    ("Portrait 9:21", 9, 21),
+    ("Super Ultrawide 32:9", 32, 9),
+    ("Portrait 9:32", 9, 32),
 ];
+
+fn generation_dimensions(ratio: usize, resolution: usize) -> (u32, u32) {
+    let (_, rw, rh) = GENERATION_SIZES[ratio.min(GENERATION_SIZES.len() - 1)];
+    let long_side = match resolution {
+        0 => 768.0_f32,
+        1 => 1344.0,
+        2 => 2048.0,
+        _ => 4096.0,
+    };
+    let divisor = rw.max(rh) as f32;
+    let snap = |value: f32| ((value / 64.0).round() as u32 * 64).clamp(256, 4096);
+    (
+        snap(long_side * rw as f32 / divisor),
+        snap(long_side * rh as f32 / divisor),
+    )
+}
 
 struct PixelForge {
     inactive_tabs: Vec<(usize, Box<PixelForge>)>,
@@ -233,7 +424,7 @@ struct PixelForge {
     closing_tab: Option<usize>,
     generation_style: usize,
     generation_size: usize,
-    generation_portrait: bool,
+    generation_unlock_dimensions: bool,
     generation_custom_size: bool,
     generation_resolution: usize,
     generation_zoom: f32,
@@ -248,6 +439,7 @@ struct PixelForge {
     generation_workspace: bool,
     generation_prompt: String,
     generation_negative: String,
+    generation_auto_negative: bool,
     generation_checkpoint: String,
     generation_checkpoints: Vec<String>,
     generation_width: u32,
@@ -404,7 +596,7 @@ impl Default for PixelForge {
             closing_tab: None,
             generation_style: 0,
             generation_size: 0,
-            generation_portrait: false,
+            generation_unlock_dimensions: false,
             generation_custom_size: false,
             generation_resolution: 1,
             generation_zoom: 1.0,
@@ -419,6 +611,7 @@ impl Default for PixelForge {
             generation_workspace: false,
             generation_prompt: String::new(),
             generation_negative: String::new(),
+            generation_auto_negative: true,
             generation_checkpoint: String::new(),
             generation_checkpoints: Vec::new(),
             generation_width: 512,
@@ -647,14 +840,26 @@ impl PixelForge {
     }
 
     fn start_generation(&mut self, ctx: &egui::Context) {
-        if self.generation_running { return; }
-        let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].1;
-        let prompt = if style.is_empty() { self.generation_prompt.clone() }
-            else { format!("{}, {}", self.generation_prompt, style) };
+        if self.generation_running {
+            return;
+        }
+        let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].1;
+        let prompt = if style.is_empty() {
+            self.generation_prompt.clone()
+        } else {
+            format!("{}, {}", self.generation_prompt, style)
+        };
         let request = ai_generation::Request {
             checkpoint: self.generation_checkpoint.clone(),
             prompt,
-            negative: self.generation_negative.clone(),
+            negative: if self.generation_auto_negative {
+                automatic_negative_prompt(
+                    GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].0,
+                )
+                .to_owned()
+            } else {
+                self.generation_negative.clone()
+            },
             width: self.generation_width,
             height: self.generation_height,
             steps: self.generation_steps,
@@ -677,21 +882,31 @@ impl PixelForge {
         let ctx = ctx.clone();
         std::thread::spawn(move || {
             for index in 0..count {
-                if cancel.load(std::sync::atomic::Ordering::Relaxed) { break; }
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
                 progress.store(0, std::sync::atomic::Ordering::Relaxed);
                 let mut item = request.clone();
                 item.seed = if random {
-                    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default().as_nanos() as u64;
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos() as u64;
                     now.wrapping_add(index as u64)
-                } else { request.seed.wrapping_add(index as u64) };
+                } else {
+                    request.seed.wrapping_add(index as u64)
+                };
                 let seed = item.seed;
                 let result = ai_generation::generate(item, cancel.clone(), progress.clone())
                     .map(|image| (image, seed));
                 let failed = result.is_err();
-                if tx.send(result).is_err() { break; }
+                if tx.send(result).is_err() {
+                    break;
+                }
                 ctx.request_repaint();
-                if failed { break; }
+                if failed {
+                    break;
+                }
             }
         });
     }
@@ -713,7 +928,9 @@ impl PixelForge {
                     }
                     Err(error) => self.install_status = format!("Install failed: {error}"),
                 }
-            } else { ctx.request_repaint_after(std::time::Duration::from_millis(200)); }
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(200));
+            }
         }
         if let Some(rx) = &self.generation_models_rx {
             if let Ok(result) = rx.try_recv() {
@@ -721,12 +938,16 @@ impl PixelForge {
                 match result {
                     Ok(models) => {
                         if !models.contains(&self.generation_checkpoint) {
-                            self.generation_checkpoint = models.first().cloned().unwrap_or_default();
+                            self.generation_checkpoint =
+                                models.first().cloned().unwrap_or_default();
                         }
-                        self.generation_status = format!("Found {} local checkpoints", models.len());
+                        self.generation_status =
+                            format!("Found {} local checkpoints", models.len());
                         self.generation_checkpoints = models;
                         if !self.install_folder_manual {
-                            self.install_folder = model_installer::detect_checkpoint_folder(&self.generation_checkpoints);
+                            self.install_folder = model_installer::detect_checkpoint_folder(
+                                &self.generation_checkpoints,
+                            );
                         }
                     }
                     Err(error) => self.generation_status = error,
@@ -735,25 +956,41 @@ impl PixelForge {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
         }
-        if !self.generation_running { return; }
+        if !self.generation_running {
+            return;
+        }
         ctx.request_repaint_after(std::time::Duration::from_millis(200));
         let received = self.generation_rx.as_ref().map(|rx| rx.try_recv());
         match received {
             Some(Ok(Ok((image, seed)))) => {
                 let size = [image.width() as usize, image.height() as usize];
                 let preview = ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-                let texture = ctx.load_texture(format!("generation_{}_{}", self.generation_gallery.len(), seed),
-                    preview, TextureOptions::LINEAR);
+                let texture = ctx.load_texture(
+                    format!("generation_{}_{}", self.generation_gallery.len(), seed),
+                    preview,
+                    TextureOptions::LINEAR,
+                );
                 self.generation_texture = Some(texture.clone());
                 self.generation_image = Some(image.clone());
-                self.generation_gallery.push(GeneratedItem { pixels: image, texture, seed });
-                self.generation_selected = self.generation_gallery.len()-1;
+                self.generation_gallery.push(GeneratedItem {
+                    pixels: image,
+                    texture,
+                    seed,
+                });
+                self.generation_selected = self.generation_gallery.len() - 1;
                 self.generation_batch_done += 1;
-                self.generation_status = format!("Generated {} of {} images", self.generation_batch_done, self.generation_batch_count);
+                self.generation_status = format!(
+                    "Generated {} of {} images",
+                    self.generation_batch_done, self.generation_batch_count
+                );
                 if self.generation_batch_done >= self.generation_batch_count {
                     self.generation_running = false;
                     self.generation_rx = None;
-                    let elapsed = self.generation_started.take().map(|t| t.elapsed().as_secs_f32()).unwrap_or(0.0);
+                    let elapsed = self
+                        .generation_started
+                        .take()
+                        .map(|t| t.elapsed().as_secs_f32())
+                        .unwrap_or(0.0);
                     self.generation_status = format!("Batch complete in {elapsed:.1}s.");
                 }
             }
@@ -767,19 +1004,27 @@ impl PixelForge {
                 self.generation_running = false;
                 self.generation_rx = None;
                 self.generation_started = None;
-                self.generation_status = if self.generation_cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                self.generation_status = if self
+                    .generation_cancel
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
                     "Batch cancelled.".into()
-                } else { "Generation worker finished.".into() };
+                } else {
+                    "Generation worker finished.".into()
+                };
             }
             _ => {}
         }
     }
 
     fn refresh_generation_models(&mut self, ctx: &egui::Context) {
-        if self.generation_models_rx.is_some() { return; }
+        if self.generation_models_rx.is_some() {
+            return;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         self.generation_models_rx = Some(rx);
-        self.generation_status = "Connecting to local ComfyUI (starting backend if needed)...".into();
+        self.generation_status =
+            "Connecting to local ComfyUI (starting backend if needed)...".into();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
             let _ = tx.send(ai_generation::checkpoints());
@@ -795,7 +1040,11 @@ impl PixelForge {
             self.refresh_generation_models(&ctx);
         }
         egui::ComboBox::from_label("Checkpoint")
-            .selected_text(if self.generation_checkpoint.is_empty() { "Select a checkpoint" } else { &self.generation_checkpoint })
+            .selected_text(if self.generation_checkpoint.is_empty() {
+                "Select a checkpoint"
+            } else {
+                &self.generation_checkpoint
+            })
             .show_ui(ui, |ui| {
                 for checkpoint in &self.generation_checkpoints {
                     let lower = checkpoint.to_ascii_lowercase();
@@ -931,73 +1180,130 @@ impl PixelForge {
             });
         ui.separator();
         let previous_ratio = self.generation_size;
-        let previous_orientation = self.generation_portrait;
         egui::ComboBox::from_label("Style preset")
-            .selected_text(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0)
+            .selected_text(
+                GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].0,
+            )
             .show_ui(ui, |ui| {
                 for (i, (name, _)) in GENERATION_STYLES.iter().enumerate() {
                     ui.selectable_value(&mut self.generation_style, i, *name);
                 }
             });
-        ui.horizontal(|ui| {
-            ui.label("Aspect ratio");
-            egui::ComboBox::from_id_salt("generation_ratio")
-                .selected_text(GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)].0)
-                .show_ui(ui, |ui| {
-                    for (i, (name, _, _)) in GENERATION_SIZES.iter().enumerate() {
-                        ui.selectable_value(&mut self.generation_size, i, *name);
-                    }
-                });
-        });
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.generation_portrait, false, "Landscape");
-            ui.selectable_value(&mut self.generation_portrait, true, "Portrait");
-        });
-        let (_, rw, rh) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
-        let (rw, rh) = if self.generation_portrait { (rh, rw) } else { (rw, rh) };
-        let resolution_labels: Vec<String> = [("Small", 0.75_f32), ("Standard", 1.0), ("Large", 1.25)]
-            .iter().map(|(name, scale)| {
-                let snap = |value: f32| ((value / 64.0).round() as u32 * 64).clamp(256, 2048);
-                format!("{} — {} × {}", name, snap(rw as f32 * scale), snap(rh as f32 * scale))
-            }).collect();
+
+        egui::ComboBox::from_label("Aspect ratio")
+            .selected_text(GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len() - 1)].0)
+            .show_ui(ui, |ui| {
+                for (i, (name, _, _)) in GENERATION_SIZES.iter().enumerate() {
+                    ui.selectable_value(&mut self.generation_size, i, *name);
+                }
+            });
+
+        let resolution_names = ["Small", "Standard", "Large", "Extra Large"];
+        let resolution_labels: Vec<String> = resolution_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let (w, h) = generation_dimensions(self.generation_size, i);
+                format!("{name} — {w} × {h}")
+            })
+            .collect();
+
         egui::ComboBox::from_label("Resolution")
-            .selected_text(&resolution_labels[self.generation_resolution.min(2)])
+            .selected_text(&resolution_labels[self.generation_resolution.min(3)])
             .show_ui(ui, |ui| {
                 for (i, label) in resolution_labels.iter().enumerate() {
                     ui.selectable_value(&mut self.generation_resolution, i, label);
                 }
             });
-        ui.checkbox(&mut self.generation_custom_size, "Custom proportional resolution");
-        if previous_ratio != self.generation_size || previous_orientation != self.generation_portrait {
-            let (_, w, h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
-            (self.generation_width, self.generation_height) = if self.generation_portrait { (h, w) } else { (w, h) };
-        }
-        let (_, base_w, base_h) = GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len()-1)];
-        let (base_w, base_h) = if self.generation_portrait { (base_h, base_w) } else { (base_w, base_h) };
-        let scale = [0.75_f32, 1.0, 1.25][self.generation_resolution.min(2)];
-        let snap = |n: f32| ((n / 64.0).round() as u32 * 64).clamp(256, 2048);
+
+        let custom_changed = ui
+            .checkbox(&mut self.generation_custom_size, "Custom resolution")
+            .changed();
+
+        let (preset_w, preset_h) =
+            generation_dimensions(self.generation_size, self.generation_resolution);
+
         if !self.generation_custom_size {
-            self.generation_width = snap(base_w as f32 * scale);
-            self.generation_height = snap(base_h as f32 * scale);
+            self.generation_width = preset_w;
+            self.generation_height = preset_h;
+            self.generation_unlock_dimensions = false;
         } else {
-            ui.label("Editing either dimension adjusts the other to the selected aspect ratio.");
+            if custom_changed {
+                self.generation_width = preset_w;
+                self.generation_height = preset_h;
+            }
+
+            let unlock_changed = ui
+                .checkbox(
+                    &mut self.generation_unlock_dimensions,
+                    "Unlock Width / Height",
+                )
+                .changed();
+
+            let (_, rw, rh) =
+                GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len() - 1)];
+
+            let snap = |n: f32| ((n / 64.0).round() as u32 * 64).clamp(256, 4096);
+
+            if previous_ratio != self.generation_size {
+                let long_side = self.generation_width.max(self.generation_height);
+                self.generation_width = snap(long_side as f32 * rw as f32 / rw.max(rh) as f32);
+                self.generation_height = snap(long_side as f32 * rh as f32 / rw.max(rh) as f32);
+            }
+
+            if unlock_changed && !self.generation_unlock_dimensions {
+                self.generation_height = snap(self.generation_width as f32 * rh as f32 / rw as f32);
+            }
+
+            if self.generation_unlock_dimensions {
+                ui.label("Width and height can be changed independently.");
+            } else {
+                ui.label("Aspect ratio locked. Editing either dimension adjusts the other.");
+            }
+
             ui.horizontal(|ui| {
                 ui.label("Width");
-                let width_changed = ui.add(egui::DragValue::new(&mut self.generation_width)
-                    .range(256..=2048).speed(64)).changed();
+                let width_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut self.generation_width)
+                            .range(256..=4096)
+                            .speed(64),
+                    )
+                    .changed();
+
                 ui.label("Height");
-                let height_changed = ui.add(egui::DragValue::new(&mut self.generation_height)
-                    .range(256..=2048).speed(64)).changed();
-                if width_changed {
-                    self.generation_width = snap(self.generation_width as f32);
-                    self.generation_height = snap(self.generation_width as f32 * base_h as f32 / base_w as f32);
-                } else if height_changed {
-                    self.generation_height = snap(self.generation_height as f32);
-                    self.generation_width = snap(self.generation_height as f32 * base_w as f32 / base_h as f32);
+                let height_changed = ui
+                    .add(
+                        egui::DragValue::new(&mut self.generation_height)
+                            .range(256..=4096)
+                            .speed(64),
+                    )
+                    .changed();
+
+                self.generation_width = snap(self.generation_width as f32);
+                self.generation_height = snap(self.generation_height as f32);
+
+                if !self.generation_unlock_dimensions {
+                    if width_changed {
+                        let max_width = (4096.0_f32 * rw as f32 / rh as f32).min(4096.0);
+                        self.generation_width = snap((self.generation_width as f32).min(max_width));
+                        self.generation_height =
+                            snap(self.generation_width as f32 * rh as f32 / rw as f32);
+                    } else if height_changed {
+                        let max_height = (4096.0_f32 * rh as f32 / rw as f32).min(4096.0);
+                        self.generation_height =
+                            snap((self.generation_height as f32).min(max_height));
+                        self.generation_width =
+                            snap(self.generation_height as f32 * rw as f32 / rh as f32);
+                    }
                 }
             });
         }
-        ui.label(format!("Output: {} × {} (multiples of 64)", self.generation_width, self.generation_height));
+
+        ui.label(format!(
+            "Output: {} × {} (multiples of 64)",
+            self.generation_width, self.generation_height
+        ));
         ui.horizontal(|ui| {
             ui.label("Batch");
             for count in [1, 2, 4, 8] {
@@ -1009,20 +1315,43 @@ impl PixelForge {
         ui.label("Prompt");
         ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).desired_rows(3));
         ui.label("Negative prompt");
-        ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
-         ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
+        if self.generation_auto_negative {
+            let style_name =
+                GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].0;
+            let mut automatic = automatic_negative_prompt(style_name).to_owned();
+            ui.add_enabled(
+                false,
+                egui::TextEdit::multiline(&mut automatic).desired_rows(2),
+            );
+        } else {
+            ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
+        }
+        ui.checkbox(
+            &mut self.generation_auto_negative,
+            "Automatically fill negative prompt for selected style",
+        );
+        ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
         ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0).text("CFG"));
         ui.horizontal(|ui| {
             ui.label("Seed");
             ui.add(egui::DragValue::new(&mut self.generation_seed));
         });
         ui.horizontal(|ui| {
-            if ui.add_enabled(!self.generation_running && !self.generation_checkpoint.is_empty(),
-                egui::Button::new("Generate")).clicked() {
+            if ui
+                .add_enabled(
+                    !self.generation_running && !self.generation_checkpoint.is_empty(),
+                    egui::Button::new("Generate"),
+                )
+                .clicked()
+            {
                 self.start_generation(&ctx);
             }
-            if ui.add_enabled(self.generation_running, egui::Button::new("Cancel")).clicked() {
-                self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+            if ui
+                .add_enabled(self.generation_running, egui::Button::new("Cancel"))
+                .clicked()
+            {
+                self.generation_cancel
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
                 self.generation_status = "Cancelling generation...".into();
             }
         });
@@ -1030,15 +1359,29 @@ impl PixelForge {
             self.generation_workspace = true;
         }
         if let Some(started) = self.generation_started {
-            let step = self.generation_progress.load(std::sync::atomic::Ordering::Relaxed);
+            let step = self
+                .generation_progress
+                .load(std::sync::atomic::Ordering::Relaxed);
             if step > 0 {
-                ui.add(egui::ProgressBar::new((step as f32 / self.generation_steps.max(1) as f32).clamp(0.0, 1.0))
-                    .text(format!("Sampling step {}/{} ({:.0}%)", step, self.generation_steps, 100.0 * step as f32 / self.generation_steps.max(1) as f32)));
+                ui.add(
+                    egui::ProgressBar::new(
+                        (step as f32 / self.generation_steps.max(1) as f32).clamp(0.0, 1.0),
+                    )
+                    .text(format!(
+                        "Sampling step {}/{} ({:.0}%)",
+                        step,
+                        self.generation_steps,
+                        100.0 * step as f32 / self.generation_steps.max(1) as f32
+                    )),
+                );
             } else {
                 ui.spinner();
                 ui.label("Waiting for sampling progress...");
             }
-            ui.label(format!("Generation elapsed: {:.1}s", started.elapsed().as_secs_f32()));
+            ui.label(format!(
+                "Generation elapsed: {:.1}s",
+                started.elapsed().as_secs_f32()
+            ));
         }
         ui.label(&self.generation_status);
         if let Some(texture) = &self.generation_texture {
@@ -1055,39 +1398,57 @@ impl PixelForge {
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("AI Generation Studio");
-            if ui.button("Return to Editor").clicked() { self.generation_workspace = false; }
+            if ui.button("Return to Editor").clicked() {
+                self.generation_workspace = false;
+            }
             ui.checkbox(&mut self.generation_compare, "Compare A/B");
         });
         if self.generation_gallery.is_empty() {
-            ui.centered_and_justified(|ui| { ui.label("Generate images to populate the gallery."); });
+            ui.centered_and_justified(|ui| {
+                ui.label("Generate images to populate the gallery.");
+            });
             return;
         }
         let count = self.generation_gallery.len();
-        self.generation_selected = self.generation_selected.min(count-1);
-        self.generation_compare_index = self.generation_compare_index.min(count-1);
+        self.generation_selected = self.generation_selected.min(count - 1);
+        self.generation_compare_index = self.generation_compare_index.min(count - 1);
         ui.horizontal(|ui| {
             ui.label("Selected");
             egui::ComboBox::from_id_salt("generation_selected")
-                .selected_text(format!("Image {} (seed {})", self.generation_selected+1,
-                    self.generation_gallery[self.generation_selected].seed))
+                .selected_text(format!(
+                    "Image {} (seed {})",
+                    self.generation_selected + 1,
+                    self.generation_gallery[self.generation_selected].seed
+                ))
                 .show_ui(ui, |ui| {
                     for (i, item) in self.generation_gallery.iter().enumerate() {
-                        ui.selectable_value(&mut self.generation_selected, i,
-                            format!("Image {} - seed {}", i+1, item.seed));
+                        ui.selectable_value(
+                            &mut self.generation_selected,
+                            i,
+                            format!("Image {} - seed {}", i + 1, item.seed),
+                        );
                     }
                 });
             if self.generation_compare {
                 ui.label("Compare with");
                 egui::ComboBox::from_id_salt("generation_compare")
-                    .selected_text(format!("Image {}", self.generation_compare_index+1))
+                    .selected_text(format!("Image {}", self.generation_compare_index + 1))
                     .show_ui(ui, |ui| {
                         for i in 0..count {
-                            ui.selectable_value(&mut self.generation_compare_index, i, format!("Image {}", i+1));
+                            ui.selectable_value(
+                                &mut self.generation_compare_index,
+                                i,
+                                format!("Image {}", i + 1),
+                            );
                         }
                     });
             }
             if ui.button("Open Selected in Editor").clicked() {
-                self.generation_image = Some(self.generation_gallery[self.generation_selected].pixels.clone());
+                self.generation_image = Some(
+                    self.generation_gallery[self.generation_selected]
+                        .pixels
+                        .clone(),
+                );
                 self.open_generated_image(ui.ctx());
             }
         });
@@ -1096,83 +1457,152 @@ impl PixelForge {
                 self.generation_zoom = 1.0;
                 self.generation_pan = Vec2::ZERO;
             }
-            if ui.button("−").clicked() { self.generation_zoom = (self.generation_zoom / 1.25).max(0.1); }
-            if ui.button("+").clicked() { self.generation_zoom = (self.generation_zoom * 1.25).min(16.0); }
-            ui.label(format!("Zoom {:.0}% of fit | Scroll to zoom, drag to pan", self.generation_zoom * 100.0));
+            if ui.button("−").clicked() {
+                self.generation_zoom = (self.generation_zoom / 1.25).max(0.1);
+            }
+            if ui.button("+").clicked() {
+                self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);
+            }
+            ui.label(format!(
+                "Zoom {:.0}% of fit | Scroll to zoom, drag to pan",
+                self.generation_zoom * 100.0
+            ));
         });
         let available = ui.available_size();
         let thumbnail_height = 110.0;
         let viewer_height = (available.y - thumbnail_height - 10.0).max(120.0);
         let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(available.x.max(100.0), viewer_height), egui::Sense::drag());
+            egui::vec2(available.x.max(100.0), viewer_height),
+            egui::Sense::drag(),
+        );
         if response.dragged() {
             self.generation_pan += response.drag_delta();
         }
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.0 {
-                self.generation_zoom = (self.generation_zoom * (scroll * 0.002).exp()).clamp(0.1, 16.0);
+                self.generation_zoom =
+                    (self.generation_zoom * (scroll * 0.002).exp()).clamp(0.1, 16.0);
             }
         }
         let painter = ui.painter().with_clip_rect(rect);
         painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
         let indices = if self.generation_compare {
             vec![self.generation_selected, self.generation_compare_index]
-        } else { vec![self.generation_selected] };
+        } else {
+            vec![self.generation_selected]
+        };
         let count = indices.len();
         for (slot, index) in indices.into_iter().enumerate() {
             let cell = egui::Rect::from_min_size(
-                egui::pos2(rect.min.x + rect.width() * slot as f32 / count as f32, rect.min.y),
-                egui::vec2(rect.width() / count as f32, rect.height()));
+                egui::pos2(
+                    rect.min.x + rect.width() * slot as f32 / count as f32,
+                    rect.min.y,
+                ),
+                egui::vec2(rect.width() / count as f32, rect.height()),
+            );
             let item = &self.generation_gallery[index];
             let fit = (cell.width() / item.pixels.width() as f32)
                 .min(cell.height() / item.pixels.height() as f32);
             let size = egui::vec2(item.pixels.width() as f32, item.pixels.height() as f32)
-                * fit * self.generation_zoom;
+                * fit
+                * self.generation_zoom;
             let center = cell.center() + self.generation_pan;
             let image_rect = egui::Rect::from_center_size(center, size);
             let clipped = painter.with_clip_rect(cell);
-            clipped.image(item.texture.id(), image_rect,
+            clipped.image(
+                item.texture.id(),
+                image_rect,
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE);
-            clipped.text(cell.left_top() + egui::vec2(8.0, 8.0), egui::Align2::LEFT_TOP,
-                format!("Image {} | Seed {}", index+1, item.seed),
-                egui::FontId::proportional(13.0), egui::Color32::WHITE);
+                egui::Color32::WHITE,
+            );
+            clipped.text(
+                cell.left_top() + egui::vec2(8.0, 8.0),
+                egui::Align2::LEFT_TOP,
+                format!("Image {} | Seed {}", index + 1, item.seed),
+                egui::FontId::proportional(13.0),
+                egui::Color32::WHITE,
+            );
         }
-        egui::ScrollArea::horizontal().max_height(thumbnail_height).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (index, item) in self.generation_gallery.iter().enumerate() {
-                    let selected = index == self.generation_selected;
-                    let image = egui::Image::new((item.texture.id(), egui::vec2(90.0, 70.0)));
-                    if ui.add(egui::Button::image(image).selected(selected)).clicked() {
-                        self.generation_selected = index;
+        egui::ScrollArea::horizontal()
+            .max_height(thumbnail_height)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (index, item) in self.generation_gallery.iter().enumerate() {
+                        let selected = index == self.generation_selected;
+                        let image = egui::Image::new((item.texture.id(), egui::vec2(90.0, 70.0)));
+                        if ui
+                            .add(egui::Button::image(image).selected(selected))
+                            .clicked()
+                        {
+                            self.generation_selected = index;
+                        }
                     }
-                }
+                });
             });
-        });
     }
 
     // Keep Generation Studio alive across document changes; editor state belongs to each tab.
     fn swap_generation_state(&mut self, other: &mut PixelForge) {
         std::mem::swap(&mut self.generation_style, &mut other.generation_style);
         std::mem::swap(&mut self.generation_size, &mut other.generation_size);
-        std::mem::swap(&mut self.generation_portrait, &mut other.generation_portrait);
-        std::mem::swap(&mut self.generation_custom_size, &mut other.generation_custom_size);
-        std::mem::swap(&mut self.generation_resolution, &mut other.generation_resolution);
+        std::mem::swap(
+            &mut self.generation_unlock_dimensions,
+            &mut other.generation_unlock_dimensions,
+        );
+        std::mem::swap(
+            &mut self.generation_custom_size,
+            &mut other.generation_custom_size,
+        );
+        std::mem::swap(
+            &mut self.generation_resolution,
+            &mut other.generation_resolution,
+        );
         std::mem::swap(&mut self.generation_zoom, &mut other.generation_zoom);
         std::mem::swap(&mut self.generation_pan, &mut other.generation_pan);
-        std::mem::swap(&mut self.generation_batch_count, &mut other.generation_batch_count);
-        std::mem::swap(&mut self.generation_batch_done, &mut other.generation_batch_done);
-        std::mem::swap(&mut self.generation_random_seeds, &mut other.generation_random_seeds);
+        std::mem::swap(
+            &mut self.generation_batch_count,
+            &mut other.generation_batch_count,
+        );
+        std::mem::swap(
+            &mut self.generation_batch_done,
+            &mut other.generation_batch_done,
+        );
+        std::mem::swap(
+            &mut self.generation_random_seeds,
+            &mut other.generation_random_seeds,
+        );
         std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
-        std::mem::swap(&mut self.generation_selected, &mut other.generation_selected);
+        std::mem::swap(
+            &mut self.generation_selected,
+            &mut other.generation_selected,
+        );
         std::mem::swap(&mut self.generation_compare, &mut other.generation_compare);
-        std::mem::swap(&mut self.generation_compare_index, &mut other.generation_compare_index);
-        std::mem::swap(&mut self.generation_workspace, &mut other.generation_workspace);
+        std::mem::swap(
+            &mut self.generation_compare_index,
+            &mut other.generation_compare_index,
+        );
+        std::mem::swap(
+            &mut self.generation_workspace,
+            &mut other.generation_workspace,
+        );
         std::mem::swap(&mut self.generation_prompt, &mut other.generation_prompt);
-        std::mem::swap(&mut self.generation_negative, &mut other.generation_negative);
-        std::mem::swap(&mut self.generation_checkpoint, &mut other.generation_checkpoint);
-        std::mem::swap(&mut self.generation_checkpoints, &mut other.generation_checkpoints);
+        std::mem::swap(
+            &mut self.generation_negative,
+            &mut other.generation_negative,
+        );
+        std::mem::swap(
+            &mut self.generation_auto_negative,
+            &mut other.generation_auto_negative,
+        );
+        std::mem::swap(
+            &mut self.generation_checkpoint,
+            &mut other.generation_checkpoint,
+        );
+        std::mem::swap(
+            &mut self.generation_checkpoints,
+            &mut other.generation_checkpoints,
+        );
         std::mem::swap(&mut self.generation_width, &mut other.generation_width);
         std::mem::swap(&mut self.generation_height, &mut other.generation_height);
         std::mem::swap(&mut self.generation_steps, &mut other.generation_steps);
@@ -1181,8 +1611,14 @@ impl PixelForge {
         std::mem::swap(&mut self.generation_rx, &mut other.generation_rx);
         std::mem::swap(&mut self.generation_running, &mut other.generation_running);
         std::mem::swap(&mut self.generation_started, &mut other.generation_started);
-        std::mem::swap(&mut self.generation_progress, &mut other.generation_progress);
-        std::mem::swap(&mut self.generation_models_rx, &mut other.generation_models_rx);
+        std::mem::swap(
+            &mut self.generation_progress,
+            &mut other.generation_progress,
+        );
+        std::mem::swap(
+            &mut self.generation_models_rx,
+            &mut other.generation_models_rx,
+        );
         std::mem::swap(&mut self.generation_cancel, &mut other.generation_cancel);
         std::mem::swap(&mut self.generation_image, &mut other.generation_image);
         std::mem::swap(&mut self.generation_texture, &mut other.generation_texture);
@@ -1193,18 +1629,29 @@ impl PixelForge {
         std::mem::swap(&mut self.install_cancel, &mut other.install_cancel);
         std::mem::swap(&mut self.install_status, &mut other.install_status);
         std::mem::swap(&mut self.install_folder, &mut other.install_folder);
-        std::mem::swap(&mut self.install_folder_manual, &mut other.install_folder_manual);
-        std::mem::swap(&mut self.generation_tools_tab, &mut other.generation_tools_tab);
+        std::mem::swap(
+            &mut self.install_folder_manual,
+            &mut other.install_folder_manual,
+        );
+        std::mem::swap(
+            &mut self.generation_tools_tab,
+            &mut other.generation_tools_tab,
+        );
     }
 
     fn project_tab_title(&self) -> String {
-        self.project_path.as_ref().or(self.image_path.as_ref())
-            .and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned())
+        self.project_path
+            .as_ref()
+            .or(self.image_path.as_ref())
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| "Untitled".into())
     }
 
     fn switch_project_tab(&mut self, target: usize) {
-        if target == self.active_tab { return; }
+        if target == self.active_tab {
+            return;
+        }
         let mut tabs = std::mem::take(&mut self.inactive_tabs);
         let Some(position) = tabs.iter().position(|(id, _)| *id == target) else {
             self.inactive_tabs = tabs;
@@ -1223,7 +1670,9 @@ impl PixelForge {
     }
 
     fn create_project_tab(&mut self) {
-        if self.original_pixels.is_none() && self.inactive_tabs.is_empty() { return; }
+        if self.original_pixels.is_none() && self.inactive_tabs.is_empty() {
+            return;
+        }
         let mut tabs = std::mem::take(&mut self.inactive_tabs);
         let previous = self.active_tab;
         let id = self.next_tab;
@@ -1251,9 +1700,16 @@ impl PixelForge {
     }
 
     fn show_project_tabs(&mut self, ctx: &egui::Context) {
-        let mut entries: Vec<(usize, String, bool)> = self.inactive_tabs.iter()
-            .map(|(id, tab)| (*id, tab.project_tab_title(), tab.project_dirty)).collect();
-        entries.push((self.active_tab, self.project_tab_title(), self.project_dirty));
+        let mut entries: Vec<(usize, String, bool)> = self
+            .inactive_tabs
+            .iter()
+            .map(|(id, tab)| (*id, tab.project_tab_title(), tab.project_dirty))
+            .collect();
+        entries.push((
+            self.active_tab,
+            self.project_tab_title(),
+            self.project_dirty,
+        ));
         entries.sort_by_key(|entry| entry.0);
         let mut switch = None;
         let mut close = None;
@@ -1265,7 +1721,11 @@ impl PixelForge {
                         if ui.selectable_label(*id == self.active_tab, label).clicked() {
                             switch = Some(*id);
                         }
-                        if ui.small_button("×").on_hover_text("Close project tab").clicked() {
+                        if ui
+                            .small_button("×")
+                            .on_hover_text("Close project tab")
+                            .clicked()
+                        {
                             close = Some(*id);
                         }
                         ui.separator();
@@ -1276,23 +1736,37 @@ impl PixelForge {
                 });
             });
         });
-        if let Some(id) = switch { self.switch_project_tab(id); }
+        if let Some(id) = switch {
+            self.switch_project_tab(id);
+        }
         if let Some(id) = close {
-            let dirty = if id == self.active_tab { self.project_dirty } else {
-                self.inactive_tabs.iter().find(|(tab_id, _)| *tab_id == id)
+            let dirty = if id == self.active_tab {
+                self.project_dirty
+            } else {
+                self.inactive_tabs
+                    .iter()
+                    .find(|(tab_id, _)| *tab_id == id)
                     .is_some_and(|(_, tab)| tab.project_dirty)
             };
-            if dirty { self.closing_tab = Some(id); }
-            else { self.close_project_tab(id); }
+            if dirty {
+                self.closing_tab = Some(id);
+            } else {
+                self.close_project_tab(id);
+            }
         }
         if let Some(id) = self.closing_tab {
             egui::Window::new("Unsaved Project Changes")
-                .collapsible(false).resizable(false)
+                .collapsible(false)
+                .resizable(false)
                 .show(ctx, |ui| {
                     ui.label("Save this project's changes before closing its tab?");
                     ui.horizontal(|ui| {
-                        if ui.button("Cancel").clicked() { self.closing_tab = None; }
-                        if ui.button("Discard").clicked() { self.close_project_tab(id); }
+                        if ui.button("Cancel").clicked() {
+                            self.closing_tab = None;
+                        }
+                        if ui.button("Discard").clicked() {
+                            self.close_project_tab(id);
+                        }
                         if ui.button("Save").clicked() {
                             let current = self.active_tab;
                             self.switch_project_tab(id);
@@ -1309,11 +1783,15 @@ impl PixelForge {
     }
 
     fn open_generated_image(&mut self, ctx: &egui::Context) {
-        let Some(image) = self.generation_image.as_ref() else { return; };
+        let Some(image) = self.generation_image.as_ref() else {
+            return;
+        };
         let path = std::env::temp_dir().join(format!(
             "pixelforge-generated-{}.png",
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default().as_millis()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
         ));
         match image.save(&path) {
             Ok(()) => {
@@ -1323,8 +1801,10 @@ impl PixelForge {
                 self.generation_tools_tab = false;
                 self.ai_tools_tab = false;
                 self.selection_tools_tab = false;
-            },
-            Err(error) => self.generation_status = format!("Cannot prepare generated image: {error}"),
+            }
+            Err(error) => {
+                self.generation_status = format!("Cannot prepare generated image: {error}")
+            }
         }
     }
 
@@ -1343,9 +1823,12 @@ impl PixelForge {
             PendingOpen::Image => self.open_image(ctx),
             PendingOpen::Project => self.open_project(ctx),
             PendingOpen::Close => {
-                if self.inactive_tabs.is_empty() { self.close_image(); }
-                else { self.close_project_tab(self.active_tab); }
-            },
+                if self.inactive_tabs.is_empty() {
+                    self.close_image();
+                } else {
+                    self.close_project_tab(self.active_tab);
+                }
+            }
         }
     }
 
@@ -1556,8 +2039,24 @@ impl PixelForge {
             gamma: self.gamma,
             comparison_enabled: self.comparison_enabled,
             comparison_position: self.comparison_position,
-            selection_adjustments: [self.selection_adjustments.brightness, self.selection_adjustments.contrast, self.selection_adjustments.exposure, self.selection_adjustments.saturation, self.selection_adjustments.temperature, self.selection_adjustments.tint, self.selection_adjustments.highlights, self.selection_adjustments.shadows, self.selection_adjustments.whites, self.selection_adjustments.blacks, self.selection_adjustments.vibrance, self.selection_adjustments.gamma],
-            active_mask: self.selection_mask.as_ref().map(|mask| mask.pixels().to_vec()),
+            selection_adjustments: [
+                self.selection_adjustments.brightness,
+                self.selection_adjustments.contrast,
+                self.selection_adjustments.exposure,
+                self.selection_adjustments.saturation,
+                self.selection_adjustments.temperature,
+                self.selection_adjustments.tint,
+                self.selection_adjustments.highlights,
+                self.selection_adjustments.shadows,
+                self.selection_adjustments.whites,
+                self.selection_adjustments.blacks,
+                self.selection_adjustments.vibrance,
+                self.selection_adjustments.gamma,
+            ],
+            active_mask: self
+                .selection_mask
+                .as_ref()
+                .map(|mask| mask.pixels().to_vec()),
             selection_target: self.selection_adjustment_target,
             saved_selections: self
                 .saved_selections
@@ -1659,7 +2158,8 @@ impl PixelForge {
         self.active_saved_selection = None;
         self.selection_name_input.clear();
         self.selection_mask = selection_dimensions.and_then(|(width, height)| {
-            restored_active_mask.and_then(|pixels| masking::SelectionMask::from_pixels(width, height, pixels).ok())
+            restored_active_mask
+                .and_then(|pixels| masking::SelectionMask::from_pixels(width, height, pixels).ok())
         });
         self.selection_texture = None;
         self.selection_undo.clear();
@@ -1934,14 +2434,19 @@ impl PixelForge {
                     if let Some(mask) = &selection_mask {
                         let (mw, mh) = mask.dimensions();
                         if mw > 0 && mh > 0 {
-                            let mx = (x as u64 * mw as u64 / width as u64).min(mw as u64 - 1) as u32;
-                            let my = (y as u64 * mh as u64 / height as u64).min(mh as u64 - 1) as u32;
+                            let mx =
+                                (x as u64 * mw as u64 / width as u64).min(mw as u64 - 1) as u32;
+                            let my =
+                                (y as u64 * mh as u64 / height as u64).min(mh as u64 - 1) as u32;
                             let alpha = mask.get(mx, my).unwrap_or(0);
                             if alpha > 0 {
                                 let before = *pixel;
                                 local_settings.apply_pixel(pixel);
                                 for c in 0..3 {
-                                    pixel[c] = ((before[c] as u32 * (255 - alpha) as u32 + pixel[c] as u32 * alpha as u32 + 127) / 255) as u8;
+                                    pixel[c] = ((before[c] as u32 * (255 - alpha) as u32
+                                        + pixel[c] as u32 * alpha as u32
+                                        + 127)
+                                        / 255) as u8;
                                 }
                             }
                         }
@@ -2105,7 +2610,10 @@ impl PixelForge {
                                 let before = *pixel;
                                 local_settings.apply_pixel(pixel);
                                 for c in 0..3 {
-                                    pixel[c] = ((before[c] as u32 * (255 - alpha) as u32 + pixel[c] as u32 * alpha as u32 + 127) / 255) as u8;
+                                    pixel[c] = ((before[c] as u32 * (255 - alpha) as u32
+                                        + pixel[c] as u32 * alpha as u32
+                                        + 127)
+                                        / 255) as u8;
                                 }
                             }
                         }
@@ -2323,7 +2831,9 @@ impl PixelForge {
     fn refresh_vulkan_gpus(&mut self) {
         match ai_upscale::available_vulkan_gpus() {
             Ok(gpus) => {
-                if !gpus.iter().any(|gpu| gpu.id == self.ai_gpu_id) { self.ai_gpu_id = -1; }
+                if !gpus.iter().any(|gpu| gpu.id == self.ai_gpu_id) {
+                    self.ai_gpu_id = -1;
+                }
                 self.ai_gpus = gpus;
                 self.ai_gpu_error = None;
             }
@@ -2343,7 +2853,13 @@ impl PixelForge {
         self.start_restoration_job(ctx, scale, denoise, None);
     }
 
-    fn start_restoration_job(&mut self, ctx: &egui::Context, scale: u32, denoise: bool, restoration: Option<ai_restoration::Operation>) {
+    fn start_restoration_job(
+        &mut self,
+        ctx: &egui::Context,
+        scale: u32,
+        denoise: bool,
+        restoration: Option<ai_restoration::Operation>,
+    ) {
         if self.ai_running || self.ai_saving || self.exporting {
             self.ai_status = "Another operation is running".into();
             return;
@@ -2355,10 +2871,12 @@ impl PixelForge {
         };
 
         if !denoise && restoration.is_none() {
-        if let Err(error) = ai_upscale::validate_upscale_size(original.width(), original.height(), scale) {
-            self.ai_status = error;
-            return;
-        }
+            if let Err(error) =
+                ai_upscale::validate_upscale_size(original.width(), original.height(), scale)
+            {
+                self.ai_status = error;
+                return;
+            }
         }
 
         let settings = adjustments::Adjustments {
@@ -2394,7 +2912,13 @@ impl PixelForge {
         self.ai_running = true;
         self.ai_is_denoise = denoise;
         self.ai_restoration = restoration;
-        self.ai_status = if let Some(operation) = restoration { format!("Running AI {}...", operation.name()) } else if denoise { "Running AI photo denoise...".into() } else { format!("Running Real-ESRGAN {scale}x on GPU...") };
+        self.ai_status = if let Some(operation) = restoration {
+            format!("Running AI {}...", operation.name())
+        } else if denoise {
+            "Running AI photo denoise...".into()
+        } else {
+            format!("Running Real-ESRGAN {scale}x on GPU...")
+        };
 
         self.ai_detail_rx = None;
         self.ai_detail_key = None;
@@ -2423,13 +2947,26 @@ impl PixelForge {
         std::thread::spawn(move || {
             let result = if let Some(operation) = restoration {
                 match operation {
-                    ai_restoration::Operation::Sharpen =>
-                        ai_restoration::sharpen(pixels, settings, options.gpu_id, options.tile_size, cancel),
-                    ai_restoration::Operation::Deblur =>
-                        ai_restoration::run(pixels, settings, operation, cancel),
+                    ai_restoration::Operation::Sharpen => ai_restoration::sharpen(
+                        pixels,
+                        settings,
+                        options.gpu_id,
+                        options.tile_size,
+                        cancel,
+                    ),
+                    ai_restoration::Operation::Deblur => {
+                        ai_restoration::run(pixels, settings, operation, cancel)
+                    }
                 }
             } else if denoise {
-                ai_denoise::denoise(pixels, settings, denoise_level, options.gpu_id, options.tile_size, cancel)
+                ai_denoise::denoise(
+                    pixels,
+                    settings,
+                    denoise_level,
+                    options.gpu_id,
+                    options.tile_size,
+                    cancel,
+                )
             } else {
                 ai_upscale::upscale(pixels, settings, scale, options, cancel)
             };
@@ -2452,7 +2989,8 @@ impl PixelForge {
 
         self.ai_running = false;
         self.ai_rx = None;
-        self.ai_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
+        self.ai_cancel
+            .store(false, std::sync::atomic::Ordering::Relaxed);
 
         match result {
             Ok(result) => {
@@ -2479,12 +3017,24 @@ impl PixelForge {
                     result.preview.height() as usize,
                 ];
 
-                let operation = if let Some(kind) = self.ai_restoration { kind.name() } else if self.ai_is_denoise { "AI denoise" } else { "AI upscale" };
-                self.ai_status = format!("{operation} complete: {} x {}. Not saved.", result.dimensions[0], result.dimensions[1]);
+                let operation = if let Some(kind) = self.ai_restoration {
+                    kind.name()
+                } else if self.ai_is_denoise {
+                    "AI denoise"
+                } else {
+                    "AI upscale"
+                };
+                self.ai_status = format!(
+                    "{operation} complete: {} x {}. Not saved.",
+                    result.dimensions[0], result.dimensions[1]
+                );
 
                 self.status = self.ai_status.clone();
                 let saved = std::sync::Arc::new(result);
-                self.ai_variations.push((format!("{} #{}", operation, self.ai_variations.len() + 1), saved.clone()));
+                self.ai_variations.push((
+                    format!("{} #{}", operation, self.ai_variations.len() + 1),
+                    saved.clone(),
+                ));
                 self.ai_compare_b = self.ai_variations.len() - 1;
                 self.ai_compare_a = self.ai_compare_b.saturating_sub(1);
                 self.ai_result = Some(saved);
@@ -2492,17 +3042,32 @@ impl PixelForge {
                 self.ai_show_result = true;
             }
             Err(error) => {
-                self.ai_status = format!("{} failed: {error}", if let Some(kind) = self.ai_restoration { kind.name() } else if self.ai_is_denoise { "AI denoise" } else { "AI upscale" });
+                self.ai_status = format!(
+                    "{} failed: {error}",
+                    if let Some(kind) = self.ai_restoration {
+                        kind.name()
+                    } else if self.ai_is_denoise {
+                        "AI denoise"
+                    } else {
+                        "AI upscale"
+                    }
+                );
                 self.status = self.ai_status.clone();
             }
         }
     }
 
     fn compare_ai_variations(&mut self, ctx: &egui::Context) {
-        let Some((_, a)) = self.ai_variations.get(self.ai_compare_a) else { return; };
-        let Some((_, b)) = self.ai_variations.get(self.ai_compare_b) else { return; };
+        let Some((_, a)) = self.ai_variations.get(self.ai_compare_a) else {
+            return;
+        };
+        let Some((_, b)) = self.ai_variations.get(self.ai_compare_b) else {
+            return;
+        };
         if a.dimensions != b.dimensions {
-            self.ai_status = "Cannot compare variations of different dimensions. Compare equal-size results.".into();
+            self.ai_status =
+                "Cannot compare variations of different dimensions. Compare equal-size results."
+                    .into();
             self.status = self.ai_status.clone();
             return;
         }
@@ -2510,8 +3075,10 @@ impl PixelForge {
         let folder = std::env::temp_dir().join(format!(
             "pixelforge_compare_{}_{}",
             std::process::id(),
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos()).unwrap_or(0)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
         ));
         if let Err(e) = std::fs::create_dir_all(&folder) {
             self.ai_status = format!("Cannot prepare comparison: {e}");
@@ -2527,10 +3094,14 @@ impl PixelForge {
         };
         self.ai_result_size = result.dimensions;
         let color = ColorImage::from_rgba_unmultiplied(
-            [result.baseline_preview.width() as usize, result.baseline_preview.height() as usize],
-            result.baseline_preview.as_raw()
+            [
+                result.baseline_preview.width() as usize,
+                result.baseline_preview.height() as usize,
+            ],
+            result.baseline_preview.as_raw(),
         );
-        self.ai_baseline_texture = Some(ctx.load_texture("variation_a", color, TextureOptions::LINEAR));
+        self.ai_baseline_texture =
+            Some(ctx.load_texture("variation_a", color, TextureOptions::LINEAR));
         self.ai_result = Some(std::sync::Arc::new(result));
         self.ai_comparison = true;
         self.ai_result_path = None;
@@ -2602,7 +3173,13 @@ impl PixelForge {
             })
             .unwrap_or(4);
 
-        let suggested = if let Some(kind) = self.ai_restoration { format!("{stem}_AI_{}.png", kind.name()) } else if self.ai_is_denoise { format!("{stem}_AI_Denoised.png") } else { format!("{stem}_AI_{scale}x.png") };
+        let suggested = if let Some(kind) = self.ai_restoration {
+            format!("{stem}_AI_{}.png", kind.name())
+        } else if self.ai_is_denoise {
+            format!("{stem}_AI_Denoised.png")
+        } else {
+            format!("{stem}_AI_{scale}x.png")
+        };
 
         let Some(mut destination) = rfd::FileDialog::new()
             .add_filter("PNG Image", &["png"])
@@ -2715,7 +3292,12 @@ impl PixelForge {
             ui.horizontal_wrapped(|ui| {
                 ui.label("Compare AI variations:");
                 egui::ComboBox::from_id_salt("ai_variation_a")
-                    .selected_text(self.ai_variations.get(self.ai_compare_a).map(|v| v.0.as_str()).unwrap_or("A"))
+                    .selected_text(
+                        self.ai_variations
+                            .get(self.ai_compare_a)
+                            .map(|v| v.0.as_str())
+                            .unwrap_or("A"),
+                    )
                     .show_ui(ui, |ui| {
                         for (i, (name, _)) in self.ai_variations.iter().enumerate() {
                             ui.selectable_value(&mut self.ai_compare_a, i, name);
@@ -2723,7 +3305,12 @@ impl PixelForge {
                     });
                 ui.label("vs");
                 egui::ComboBox::from_id_salt("ai_variation_b")
-                    .selected_text(self.ai_variations.get(self.ai_compare_b).map(|v| v.0.as_str()).unwrap_or("B"))
+                    .selected_text(
+                        self.ai_variations
+                            .get(self.ai_compare_b)
+                            .map(|v| v.0.as_str())
+                            .unwrap_or("B"),
+                    )
                     .show_ui(ui, |ui| {
                         for (i, (name, _)) in self.ai_variations.iter().enumerate() {
                             ui.selectable_value(&mut self.ai_compare_b, i, name);
@@ -2777,7 +3364,19 @@ impl PixelForge {
             });
 
             ui.horizontal(|ui| {
-                ui.checkbox(&mut self.ai_comparison, if let Some(kind) = self.ai_restoration { match kind { ai_restoration::Operation::Sharpen => "Compare Original / Sharpened", ai_restoration::Operation::Deblur => "Compare Original / Deblurred" } } else if self.ai_is_denoise { "Compare Original / Denoised" } else { "Compare Lanczos / Result" });
+                ui.checkbox(
+                    &mut self.ai_comparison,
+                    if let Some(kind) = self.ai_restoration {
+                        match kind {
+                            ai_restoration::Operation::Sharpen => "Compare Original / Sharpened",
+                            ai_restoration::Operation::Deblur => "Compare Original / Deblurred",
+                        }
+                    } else if self.ai_is_denoise {
+                        "Compare Original / Denoised"
+                    } else {
+                        "Compare Lanczos / Result"
+                    },
+                );
 
                 if self.ai_comparison {
                     ui.add(
@@ -3258,7 +3857,11 @@ impl PixelForge {
                     painter.text(
                         Pos2::new(rect.left() + 8.0, rect.top() + 8.0),
                         egui::Align2::LEFT_TOP,
-                        if self.ai_is_denoise || self.ai_restoration.is_some() { "Original" } else { "Lanczos" },
+                        if self.ai_is_denoise || self.ai_restoration.is_some() {
+                            "Original"
+                        } else {
+                            "Lanczos"
+                        },
                         egui::FontId::proportional(14.0),
                         Color32::WHITE,
                     );
@@ -3266,7 +3869,16 @@ impl PixelForge {
                     painter.text(
                         Pos2::new(rect.right() - 8.0, rect.top() + 8.0),
                         egui::Align2::RIGHT_TOP,
-                        if let Some(kind) = self.ai_restoration { match kind { ai_restoration::Operation::Sharpen => "Sharpened", ai_restoration::Operation::Deblur => "Deblurred" } } else if self.ai_is_denoise { "Denoised" } else { "AI Result" },
+                        if let Some(kind) = self.ai_restoration {
+                            match kind {
+                                ai_restoration::Operation::Sharpen => "Sharpened",
+                                ai_restoration::Operation::Deblur => "Deblurred",
+                            }
+                        } else if self.ai_is_denoise {
+                            "Denoised"
+                        } else {
+                            "AI Result"
+                        },
                         egui::FontId::proportional(14.0),
                         Color32::WHITE,
                     );
@@ -3436,13 +4048,25 @@ impl PixelForge {
         // Temporarily bind the existing sliders to the selection adjustment bank.
         // Restore global values before rendering the preview.
         if self.selection_adjustment_target {
-            std::mem::swap(&mut self.brightness, &mut self.selection_adjustments.brightness);
+            std::mem::swap(
+                &mut self.brightness,
+                &mut self.selection_adjustments.brightness,
+            );
             std::mem::swap(&mut self.contrast, &mut self.selection_adjustments.contrast);
             std::mem::swap(&mut self.exposure, &mut self.selection_adjustments.exposure);
-            std::mem::swap(&mut self.saturation, &mut self.selection_adjustments.saturation);
-            std::mem::swap(&mut self.temperature, &mut self.selection_adjustments.temperature);
+            std::mem::swap(
+                &mut self.saturation,
+                &mut self.selection_adjustments.saturation,
+            );
+            std::mem::swap(
+                &mut self.temperature,
+                &mut self.selection_adjustments.temperature,
+            );
             std::mem::swap(&mut self.tint, &mut self.selection_adjustments.tint);
-            std::mem::swap(&mut self.highlights, &mut self.selection_adjustments.highlights);
+            std::mem::swap(
+                &mut self.highlights,
+                &mut self.selection_adjustments.highlights,
+            );
             std::mem::swap(&mut self.shadows, &mut self.selection_adjustments.shadows);
             std::mem::swap(&mut self.whites, &mut self.selection_adjustments.whites);
             std::mem::swap(&mut self.blacks, &mut self.selection_adjustments.blacks);
@@ -3510,7 +4134,8 @@ impl PixelForge {
         if let Some(mask) = &self.selection_mask {
             let active_pixels = mask.pixels().iter().filter(|&&alpha| alpha > 0).count();
             if active_pixels > 0 {
-                let label = self.active_saved_selection
+                let label = self
+                    .active_saved_selection
                     .and_then(|index| self.saved_selections.get(index))
                     .map(|(name, _)| name.as_str())
                     .unwrap_or("Unsaved selection");
@@ -3518,7 +4143,11 @@ impl PixelForge {
                     ui.colored_label(egui::Color32::LIGHT_GREEN, "● Selection active");
                     ui.label(label);
                 });
-                if ui.button("Clear Selection").on_hover_text("Clear the active mask without deleting saved selections").clicked() {
+                if ui
+                    .button("Clear Selection")
+                    .on_hover_text("Clear the active mask without deleting saved selections")
+                    .clicked()
+                {
                     self.selection_checkpoint();
                     if let Some(mask) = self.selection_mask.as_mut() {
                         mask.clear();
@@ -3540,7 +4169,10 @@ impl PixelForge {
         } else {
             ui.label("No active selection mask.");
             if self.selection_adjustment_target {
-                ui.colored_label(egui::Color32::YELLOW, "Paint or load a selection mask first.");
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Paint or load a selection mask first.",
+                );
             }
         }
 
@@ -3796,13 +4428,25 @@ impl PixelForge {
             self.project_dirty = true;
         }
         if self.selection_adjustment_target {
-            std::mem::swap(&mut self.brightness, &mut self.selection_adjustments.brightness);
+            std::mem::swap(
+                &mut self.brightness,
+                &mut self.selection_adjustments.brightness,
+            );
             std::mem::swap(&mut self.contrast, &mut self.selection_adjustments.contrast);
             std::mem::swap(&mut self.exposure, &mut self.selection_adjustments.exposure);
-            std::mem::swap(&mut self.saturation, &mut self.selection_adjustments.saturation);
-            std::mem::swap(&mut self.temperature, &mut self.selection_adjustments.temperature);
+            std::mem::swap(
+                &mut self.saturation,
+                &mut self.selection_adjustments.saturation,
+            );
+            std::mem::swap(
+                &mut self.temperature,
+                &mut self.selection_adjustments.temperature,
+            );
             std::mem::swap(&mut self.tint, &mut self.selection_adjustments.tint);
-            std::mem::swap(&mut self.highlights, &mut self.selection_adjustments.highlights);
+            std::mem::swap(
+                &mut self.highlights,
+                &mut self.selection_adjustments.highlights,
+            );
             std::mem::swap(&mut self.shadows, &mut self.selection_adjustments.shadows);
             std::mem::swap(&mut self.whites, &mut self.selection_adjustments.whites);
             std::mem::swap(&mut self.blacks, &mut self.selection_adjustments.blacks);
@@ -3912,10 +4556,8 @@ impl PixelForge {
                 .max_height(130.0)
                 .show(ui, |ui| {
                     for (index, (name, _)) in self.saved_selections.iter().enumerate() {
-                        let response = ui.selectable_label(
-                            self.active_saved_selection == Some(index),
-                            name,
-                        );
+                        let response =
+                            ui.selectable_label(self.active_saved_selection == Some(index), name);
                         if response.double_clicked() {
                             selected = Some(index);
                             activate = Some(index);
@@ -4932,7 +5574,7 @@ impl eframe::App for PixelForge {
                             ui.heading("AI Tools");
                             ui.horizontal(|ui| {
                                                             ui.label("AI Result Strength");
-                            
+
                                                             ui.with_layout(
                                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                                 |ui| {
@@ -4940,14 +5582,14 @@ impl eframe::App for PixelForge {
                                                                 },
                                                             );
                                                         });
-                            
+
                                                         // egui Slider has its own internal width.
                                                         // Set that width explicitly rather than
                                                         // just enlarging its allocated rectangle.
                                                         let old_slider_width = ui.spacing().slider_width;
-                            
+
                                                         ui.spacing_mut().slider_width = (ui.available_width() - 20.0).max(80.0);
-                            
+
                                                         if ui
                                                             .add(
                                                                 egui::Slider::new(&mut self.ai_strength, 0.0..=1.0)
@@ -4958,9 +5600,9 @@ impl eframe::App for PixelForge {
                                                         {
                                                             self.refresh_ai_preview(ctx);
                                                         }
-                            
+
                                                         ui.spacing_mut().slider_width = old_slider_width;
-                            
+
                                                         ui.label("Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
                             ui.separator();
                             ui.heading("AI Upscaling");
@@ -5228,7 +5870,8 @@ fn main() -> eframe::Result {
 
 impl Drop for PixelForge {
     fn drop(&mut self) {
-        self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.generation_cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         ai_generation::stop_managed_backend();
     }
 }
