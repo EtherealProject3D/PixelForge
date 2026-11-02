@@ -9,7 +9,20 @@ Base: `dev/stage-3-5-local-generation`
 
 ## Architecture and behavior
 
-The single conversation composer sits below the canvas and uses the existing asynchronous ComfyUI request path. Apply Edit changes the viewed version; Create New Image starts a separate image (and respects batch settings). Version thumbnails and prompts live in the right sidebar. Generation settings and image details are collapsed by default. Import, Save Project and Export Image are in the Studio toolbar. Edit Area reveals mask painting controls; Cancel Area Edit returns to whole-image editing. Less common actions are in More.
+The right sidebar has separate Initial prompt and Changes prompt boxes. Create New
+Image uses the initial prompt; Apply Edit uses the changes prompt and viewed image.
+Thumbnails are below the canvas. The visible progress bar reports sampling steps,
+batch position, percentage, elapsed time, and the active model, including while
+preparing the backend. Technical settings remain collapsed.
+
+The edit-model dropdown can follow the generation checkpoint or choose a different
+installed SDXL checkpoint. The resolved name is displayed before editing, saved in
+result metadata, and the independent selection is saved with the Studio project.
+Older projects default to following the generation model. This is a checkpoint
+selector for the current SDXL img2img/inpainting workflow, not support for arbitrary
+dedicated instruction-edit model architectures. Initial prompt text remains intact
+when applying changes. Less common actions remain under More.
+
 The first message creates one image; subsequent messages use the selected gallery
 image as img2img input. Each successful result appends an immutable image/settings
 snapshot with its parent index and editing prompt. Failed or cancelled requests
@@ -67,8 +80,8 @@ cargo test --locked
    export metadata, cancellation and an unavailable backend followed by retry.
 8. Check layout at your normal window size and display scaling.
 
-Validation performed: Windows Rust debug build and 58 automated tests passed,
-including new prompt/metadata and branched gallery project roundtrip tests.
+Validation performed: Windows Rust debug build and 59 automated tests passed,
+including edit-model routing and new prompt/metadata and branched gallery project roundtrip tests.
 Cargo.lock was synchronized with the already-declared backend dependencies;
 the previous lock omitted several required packages. Existing compiler warnings
 remain. The rebuilt Windows app was launched and the empty Studio layout was visually checked: a single bottom composer, right-side versions/settings and no misleading editor image status. Populated layout, real ComfyUI/GPU generation, model quality, VRAM usage, and release execution were not verified. Keep the feature branch unmerged until

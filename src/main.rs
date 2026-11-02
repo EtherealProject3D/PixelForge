@@ -326,6 +326,10 @@ struct GenerationSettings {
     refine_masked: bool,
 }
 
+fn editing_checkpoint<'a>(generation: &'a str, editing: &'a str, is_edit: bool) -> &'a str {
+    if is_edit && !editing.is_empty() { editing } else { generation }
+}
+
 fn conversation_context(settings: &GenerationSettings) -> String {
     match settings.refine_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(edit) if !settings.prompt.trim().is_empty() => format!("{}, {}", settings.prompt.trim(), edit),
@@ -606,6 +610,7 @@ struct PixelForge {
     generation_batch_count: usize,
     generation_batch_done: usize,
     generation_random_seeds: bool,
+    edit_checkpoint: String,
     conversation_draft: String,
     generation_gallery: Vec<GeneratedItem>,
     generation_project_path: Option<PathBuf>,
@@ -799,6 +804,7 @@ impl Default for PixelForge {
             generation_batch_count: 1,
             generation_batch_done: 0,
             generation_random_seeds: true,
+            edit_checkpoint: String::new(),
             conversation_draft: String::new(),
             generation_gallery: Vec::new(),
             generation_project_path: None,
@@ -1175,6 +1181,7 @@ impl PixelForge {
             self.generation_status="Refinement source is no longer available".into();
             return;
         }
+        let checkpoint = editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, self.refinement_source.is_some()).to_owned();
         let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].1;
         let prompt = if self.refinement_source.is_some() {
             // CLIP is not an instruction-following editor: retain scene context,
@@ -1191,7 +1198,7 @@ impl PixelForge {
             prompt: self.generation_prompt.clone(),
             negative: self.generation_negative.clone(),
             auto_negative: self.generation_auto_negative,
-            checkpoint: self.generation_checkpoint.clone(),
+            checkpoint: checkpoint.clone(),
             style: self.generation_style,
             ratio: self.generation_size,
             custom_size: self.generation_custom_size,
@@ -1208,7 +1215,7 @@ impl PixelForge {
             refine_masked: self.refinement_source.is_some() && self.refinement_masked,
         });
         let request = ai_generation::Request {
-            checkpoint: self.generation_checkpoint.clone(),
+            checkpoint: checkpoint.clone(),
             prompt,
             negative: if self.generation_auto_negative {
                 let base=automatic_negative_prompt(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0);
@@ -1434,41 +1441,7 @@ impl PixelForge {
         if !self.generation_workspace {
             if ui.button("Open Image Studio").clicked() { self.generation_workspace = true; }
         }
-        ui.heading("Versions");
-        ui.small("Select a version to view it and continue editing. Later versions are kept.");
-        if self.generation_gallery.is_empty() { ui.label("Your images will appear here."); }
-        egui::ScrollArea::vertical().id_salt("studio_versions").max_height(300.0).show(ui, |ui| {
-            for index in (0..self.generation_gallery.len()).rev() {
-                let item = &self.generation_gallery[index];
-                ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        let size = item.texture.size_vec2();
-                        let thumb = size * (64.0 / size.x.max(size.y));
-                        if ui.add(egui::Button::image(egui::Image::new((item.texture.id(), thumb)))
-                            .selected(self.generation_selected == index)).clicked() {
-                            self.generation_selected = index;
-                            self.refinement_source = None;
-                            self.refinement_mask.clear();
-                            self.refinement_mask_texture = None;
-                            self.generation_zoom = 1.0;
-                            self.generation_pan = Vec2::ZERO;
-                        }
-                        ui.vertical(|ui| {
-                            ui.strong(format!("Version {}{}", index+1, if self.generation_selected == index { " · Viewing" } else { "" }));
-                            if let Some(parent) = item.settings.refine_parent.filter(|&p| p < self.generation_gallery.len()) {
-                                ui.small(format!("Edited from version {}", parent+1));
-                                if ui.small_button("Compare with source").clicked() {
-                                    self.generation_selected = index;
-                                    self.generation_compare_index = parent;
-                                    self.generation_compare = true;
-                                }
-                            }
-                        });
-                    });
-                    ui.add(egui::Label::new(item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt)).wrap());
-                });
-            }
-        });
+        self.show_conversation(ui);
         ui.separator();
         ui.collapsing("Generation settings", |ui| {
         ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
@@ -1798,7 +1771,9 @@ impl PixelForge {
         let Some(mut path)=(!save_as).then(||self.generation_project_path.clone()).flatten().or_else(||rfd::FileDialog::new().add_filter("PixelForge Project",&["pxf"]).set_file_name("Generation.pxf").save_file()) else {return};
         path.set_extension("pxf");
         let current=GenerationSettings {prompt:self.generation_prompt.clone(),negative:self.generation_negative.clone(),auto_negative:self.generation_auto_negative,checkpoint:self.generation_checkpoint.clone(),style:self.generation_style,ratio:self.generation_size,custom_size:self.generation_custom_size,unlock_dimensions:self.generation_unlock_dimensions,resolution:self.generation_resolution,width:self.generation_width,height:self.generation_height,steps:self.generation_steps,cfg:self.generation_cfg,seed:self.generation_seed,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};
-        let project=generation_project::GalleryProject {items:self.generation_gallery.iter().map(|i|generation_project::GalleryImage {settings:settings_json(&i.settings),pixels:i.pixels.clone(),seed:i.seed}).collect(),selected:self.generation_selected,compare_index:self.generation_compare_index,compare:self.generation_compare,current:settings_json(&current)};
+        let mut current_json = settings_json(&current);
+        current_json["edit_checkpoint"] = serde_json::json!(self.edit_checkpoint);
+        let project=generation_project::GalleryProject {items:self.generation_gallery.iter().map(|i|generation_project::GalleryImage {settings:settings_json(&i.settings),pixels:i.pixels.clone(),seed:i.seed}).collect(),selected:self.generation_selected,compare_index:self.generation_compare_index,compare:self.generation_compare,current:current_json};
         match generation_project::save(&path,&project) {Ok(())=>{self.generation_project_path=Some(path.clone());self.generation_status=format!("Saved {}",path.display());},Err(e)=>self.generation_status=format!("Save failed: {e}")}
     }
     fn open_generation_project(&mut self,path:&std::path::Path,ctx:&egui::Context) {
@@ -1808,6 +1783,7 @@ impl PixelForge {
             let texture=ctx.load_texture(format!("loaded_generation_{n}"),ColorImage::from_rgba_unmultiplied(size,i.pixels.as_raw()),TextureOptions::LINEAR);
             GeneratedItem {settings:settings_from_json(&i.settings),pixels:i.pixels,texture,seed:i.seed}
         }).collect();
+        self.edit_checkpoint = project.current["edit_checkpoint"].as_str().unwrap_or("").to_owned();
         let current=settings_from_json(&project.current);
         self.generation_prompt=current.prompt;self.generation_negative=current.negative;self.generation_auto_negative=current.auto_negative;self.generation_checkpoint=current.checkpoint;self.generation_style=current.style;self.generation_size=current.ratio;self.generation_custom_size=current.custom_size;self.generation_unlock_dimensions=current.unlock_dimensions;self.generation_resolution=current.resolution;self.generation_width=current.width;self.generation_height=current.height;self.generation_steps=current.steps;self.generation_cfg=current.cfg;self.generation_seed=current.seed;
         self.refinement_source=None;
@@ -1835,7 +1811,10 @@ impl PixelForge {
     }
 
     fn submit_conversation(&mut self, ctx: &egui::Context, edit: bool) {
-        if self.generation_running || self.conversation_draft.trim().is_empty() || self.generation_checkpoint.is_empty() { return; }
+        let draft = if edit { &self.conversation_draft } else { &self.generation_prompt };
+        let model = editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, edit);
+        if self.generation_running || draft.trim().is_empty() || model.is_empty() { return; }
+        let initial_prompt = self.generation_prompt.clone();
         if edit {
             let Some(source) = self.generation_gallery.get(self.generation_selected) else { return; };
             let painted = self.refinement_source == Some(self.generation_selected) && self.refinement_masked;
@@ -1852,42 +1831,53 @@ impl PixelForge {
         } else {
             self.refinement_source = None;
             self.refinement_masked = false;
-            self.generation_prompt = self.conversation_draft.trim().to_owned();
         }
         self.start_generation(ctx);
+        self.generation_prompt = initial_prompt;
     }
 
-    fn show_conversation(&mut self, ui: &mut egui::Ui) {
-        let has_image = self.generation_gallery.get(self.generation_selected).is_some();
-        ui.strong(if has_image { "What would you like to change?" } else { "What would you like to create?" });
-        ui.add(egui::TextEdit::multiline(&mut self.conversation_draft)
-            .hint_text("Describe the result you want…").desired_width(f32::INFINITY).desired_rows(2));
-        ui.horizontal_wrapped(|ui| {
-            let ready = !self.generation_running && !self.conversation_draft.trim().is_empty() && !self.generation_checkpoint.is_empty();
-            if has_image && ui.add_enabled(ready, egui::Button::new("Apply Edit").fill(ui.visuals().selection.bg_fill)).clicked() {
-                self.submit_conversation(ui.ctx(), true);
-            }
-            if ui.add_enabled(ready, egui::Button::new("Create New Image")).clicked() {
-                self.submit_conversation(ui.ctx(), false);
-            }
-            if has_image {
-                ui.label(format!("Editing version {}", self.generation_selected+1));
-                ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Change strength"));
-            }
-            if self.generation_running {
-                ui.spinner();
-                let step = self.generation_progress.load(std::sync::atomic::Ordering::Relaxed);
-                ui.label(format!("Step {step} / {}", self.generation_steps));
+    fn show_generation_progress(&mut self, ui: &mut egui::Ui) {
+        if self.generation_running {
+            let step = self.generation_progress.load(std::sync::atomic::Ordering::Relaxed);
+            let settings = self.generation_batch_settings.as_ref();
+            let steps = settings.map(|s| s.steps).unwrap_or(self.generation_steps).max(1);
+            let total = if settings.and_then(|s| s.refine_parent).is_some() { 1 } else { self.generation_batch_count.max(1) };
+            let fraction = ((self.generation_batch_done as f32 + (step as f32 / steps as f32).clamp(0.0,1.0)) / total as f32).clamp(0.0,1.0);
+            ui.add(egui::ProgressBar::new(fraction).animate(true).text(format!("Image {} / {} · Step {} / {} · {:.0}%", (self.generation_batch_done+1).min(total), total, step, steps, fraction*100.0)));
+            ui.horizontal_wrapped(|ui| {
+                if step == 0 { ui.spinner(); ui.label("Preparing / waiting for ComfyUI…"); }
+                if let Some(started) = self.generation_started { ui.label(format!("{:.1}s elapsed", started.elapsed().as_secs_f32())); }
+                if let Some(settings) = settings { ui.label(format!("Model: {}", settings.checkpoint)); }
                 if ui.button("Cancel").clicked() { self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
-            }
-        });
-        if self.generation_checkpoint.is_empty() {
-            ui.horizontal(|ui| {
-                ui.label("Choose a local model in Generation settings to start.");
-                if ui.button("Connect Models").clicked() { self.refresh_generation_models(ui.ctx()); }
             });
         }
         ui.small(&self.generation_status);
+    }
+
+    fn show_conversation(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Initial prompt");
+        ui.label(format!("Generation model: {}", if self.generation_checkpoint.is_empty() { "Not selected" } else { &self.generation_checkpoint }));
+        ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).hint_text("Describe a new image…").desired_width(f32::INFINITY).desired_rows(4));
+        if ui.add_enabled(!self.generation_running && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty(), egui::Button::new("Create New Image")).clicked() {
+            self.submit_conversation(ui.ctx(), false);
+        }
+        ui.separator();
+        ui.heading("Changes prompt");
+        egui::ComboBox::from_id_salt("edit_model").selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
+            ui.selectable_value(&mut self.edit_checkpoint, String::new(), "Use generation model");
+            for model in &self.generation_checkpoints { ui.selectable_value(&mut self.edit_checkpoint, model.clone(), model); }
+        });
+        ui.label(format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
+        ui.small("Choose an installed SDXL checkpoint. Edits use image-to-image guidance; Edit Area limits changes to a painted region.");
+        ui.add(egui::TextEdit::multiline(&mut self.conversation_draft).hint_text("Describe changes to the viewed image…").desired_width(f32::INFINITY).desired_rows(4));
+        let has_image = self.generation_gallery.get(self.generation_selected).is_some();
+        if has_image { ui.label(format!("Editing version {} · earlier versions are kept", self.generation_selected+1)); }
+        else { ui.label("Create or import an image before applying changes."); }
+        ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Change strength"));
+        let ready = has_image && !self.generation_running && !self.conversation_draft.trim().is_empty() && !editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true).is_empty();
+        if ui.add_enabled(ready, egui::Button::new("Apply Edit").fill(ui.visuals().selection.bg_fill)).clicked() { self.submit_conversation(ui.ctx(), true); }
+        self.show_generation_progress(ui);
+        if self.generation_checkpoints.is_empty() && ui.button("Connect / Refresh Models").clicked() { self.refresh_generation_models(ui.ctx()); }
     }
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
@@ -1991,7 +1981,7 @@ impl PixelForge {
         });
         let available = ui.available_size();
         // The composer is reserved by the bottom panel before the canvas.
-        let viewer_height = available.y.max(1.0);
+        let viewer_height = (available.y - 104.0).max(1.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::drag(),
@@ -2092,6 +2082,26 @@ impl PixelForge {
             );
         }
 
+        ui.separator();
+        egui::ScrollArea::horizontal().id_salt("studio_filmstrip").max_height(96.0).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (index, item) in self.generation_gallery.iter().enumerate() {
+                    ui.vertical(|ui| {
+                        let size = item.texture.size_vec2();
+                        let thumb = size * (68.0 / size.x.max(size.y));
+                        if ui.add(egui::Button::image(egui::Image::new((item.texture.id(), thumb))).selected(index == self.generation_selected)).on_hover_text(item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt)).clicked() {
+                            self.generation_selected = index;
+                            self.refinement_source = None;
+                            self.refinement_mask_texture = None;
+                            self.generation_zoom = 1.0;
+                            self.generation_pan = Vec2::ZERO;
+                        }
+                        ui.small(format!("Version {}", index+1));
+                    });
+                }
+            });
+        });
+
     }
 
     // Keep Generation Studio alive across document changes; editor state belongs to each tab.
@@ -2124,6 +2134,7 @@ impl PixelForge {
             &mut self.generation_random_seeds,
             &mut other.generation_random_seeds,
         );
+        std::mem::swap(&mut self.edit_checkpoint, &mut other.edit_checkpoint);
         std::mem::swap(&mut self.conversation_draft, &mut other.conversation_draft);
         std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
         std::mem::swap(&mut self.generation_project_path, &mut other.generation_project_path);
@@ -6534,7 +6545,7 @@ impl eframe::App for PixelForge {
             });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             if self.generation_workspace {
-                self.show_conversation(ui);
+                self.show_generation_progress(ui);
                 return;
             }
             ui.allocate_ui_with_layout(
@@ -6676,6 +6687,12 @@ impl Drop for PixelForge {
 #[cfg(test)]
 mod conversation_tests {
     use super::*;
+    #[test]
+    fn edit_model_selection_does_not_change_generation_model() {
+        assert_eq!(editing_checkpoint("base.safetensors", "edit.safetensors", true), "edit.safetensors");
+        assert_eq!(editing_checkpoint("base.safetensors", "edit.safetensors", false), "base.safetensors");
+        assert_eq!(editing_checkpoint("base.safetensors", "", true), "base.safetensors");
+    }
     #[test]
     fn sequential_context_and_metadata_roundtrip() {
         let mut s = settings_from_json(&serde_json::json!({"prompt":"A red car", "refine_prompt":"A blue car", "refine_parent":0}));
