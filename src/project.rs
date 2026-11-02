@@ -49,6 +49,7 @@ pub struct Project {
     pub active_mask: Option<Vec<u8>>,
     pub selection_target: bool,
     pub edit_versions: Vec<ProjectVersion>,
+    pub active_raster_version: Option<usize>,
 }
 
 fn read<const N: usize>(reader: &mut impl Read) -> Result<[u8; N], String> {
@@ -199,9 +200,6 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
             data.push(0);
         }
         if let Some(raster) = &version.raster {
-            if raster.dimensions() != project.pixels.dimensions() {
-                return Err("Image version dimensions mismatch".into());
-            }
             let mut output = Cursor::new(Vec::new());
             image::DynamicImage::ImageRgba8(raster.clone())
                 .write_to(&mut output, image::ImageFormat::Png)
@@ -211,6 +209,13 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
             data.extend_from_slice(&encoded);
         }
     }
+
+    if let Some(index) = project.active_raster_version {
+        if index >= project.edit_versions.len() || project.edit_versions[index].raster.is_none() {
+            return Err("Invalid active raster version".into());
+        }
+    }
+    data.extend_from_slice(&project.active_raster_version.map(|i| i as u32).unwrap_or(u32::MAX).to_le_bytes());
 
     if data.len() as u64 > MAX_BYTES {
         return Err("Project exceeds the 1 GiB limit".into());
@@ -578,17 +583,24 @@ pub fn load(path: &Path) -> Result<Project, String> {
                 let end = begin.checked_add(length as usize).ok_or("Invalid image version length")?;
                 let rgba = image::load_from_memory_with_format(&bytes[begin..end], image::ImageFormat::Png)
                     .map_err(|e| e.to_string())?.to_rgba8();
-                if rgba.dimensions() != pixels.dimensions() {
-                    return Err("Image version dimensions mismatch".into());
-                }
                 reader.set_position(end as u64);
                 Some(rgba)
             } else { None };
             edit_versions.push(ProjectVersion { global, local, mask, raster });
         }
-        if reader.position() != bytes.len() as u64 {
-            return Err("Unexpected trailing project data".into());
+    }
+    let active_raster_version = if &version == MAGIC_V10 {
+        let index = u32::from_le_bytes(read::<4>(&mut reader)?);
+        if index == u32::MAX { None } else {
+            let index = index as usize;
+            if index >= edit_versions.len() || edit_versions[index].raster.is_none() {
+                return Err("Invalid active raster version".into());
+            }
+            Some(index)
         }
+    } else { None };
+    if matches!(&version, MAGIC_V9 | MAGIC_V10) && reader.position() != bytes.len() as u64 {
+        return Err("Unexpected trailing project data".into());
     }
 
     Ok(Project {
@@ -613,6 +625,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         active_mask,
         selection_target,
         edit_versions,
+        active_raster_version,
     })
 }
 
@@ -652,6 +665,7 @@ mod tests {
             selection_adjustments: [1.0; 12],
             active_mask: Some(vec![0, 64, 128, 255]),
             selection_target: true,
+            active_raster_version: Some(1),
             edit_versions: vec![
                 ProjectVersion {
                     global: [12.0, -10.0, 1.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
@@ -678,6 +692,7 @@ mod tests {
         assert_eq!(loaded.active_mask, original.active_mask);
         assert_eq!(loaded.selection_target, original.selection_target);
         assert_eq!(loaded.edit_versions, original.edit_versions);
+        assert_eq!(loaded.active_raster_version, original.active_raster_version);
         assert_eq!(loaded.image_name, original.image_name);
         assert_eq!(loaded.brightness, original.brightness);
         assert_eq!(loaded.contrast, original.contrast);
@@ -710,7 +725,7 @@ mod tests {
             whites: 0.0, blacks: 0.0, vibrance: 0.0, gamma: 0.0,
             comparison_enabled: false, comparison_position: 0.5,
             saved_selections: vec![], selection_adjustments: [0.0; 12],
-            active_mask: None, selection_target: false, edit_versions: vec![],
+            active_mask: None, selection_target: false, edit_versions: vec![], active_raster_version: None,
         };
         save(&path, &project).unwrap();
         // PXF9 with zero versions is PXF8 plus a four-byte version count.
@@ -739,7 +754,7 @@ mod tests {
             whites: 0.0, blacks: 0.0, vibrance: 0.0, gamma: 0.0,
             comparison_enabled: false, comparison_position: 0.5,
             saved_selections: vec![], selection_adjustments: [0.0; 12],
-            active_mask: None, selection_target: false, edit_versions: vec![],
+            active_mask: None, selection_target: false, edit_versions: vec![], active_raster_version: None,
         };
         save(&path, &project).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
