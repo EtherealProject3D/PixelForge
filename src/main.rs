@@ -588,6 +588,7 @@ struct PixelForge {
     preview_source: Option<std::sync::Arc<image::RgbaImage>>,
     preview_rx: Option<std::sync::mpsc::Receiver<(u64, ColorImage, histogram::Histogram)>>,
     preview_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    preview_full_resolution: bool,
     brightness: f32,
     selection_adjustment_target: bool,
     selection_adjustments: adjustments::Adjustments,
@@ -751,6 +752,7 @@ impl Default for PixelForge {
             preview_source: None,
             preview_rx: None,
             preview_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            preview_full_resolution: false,
             brightness: 0.0,
             selection_adjustment_target: false,
             selection_adjustments: adjustments::Adjustments::default(),
@@ -2567,6 +2569,7 @@ impl PixelForge {
         self.preview_rx = None;
         self.preview_source = None;
         self.processed_texture = None;
+        self.preview_full_resolution = false;
 
         let Some(original) = &self.original_pixels else {
             return;
@@ -2608,6 +2611,7 @@ impl PixelForge {
             return;
         };
 
+        self.preview_full_resolution = self.zoom >= 0.95;
         // At 100% or higher, render directly from the original pixels to
         // avoid stretching the downsampled working preview. The expensive
         // adjustment pass is performed off the UI thread.
@@ -5229,6 +5233,14 @@ impl PixelForge {
             self.fit_image(available);
         }
 
+        // Switching between fitted and 100% views upgrades/downgrades
+        // the worker source automatically; never block the UI thread.
+        if self.preview_source.is_some()
+            && self.preview_full_resolution != (self.zoom >= 0.95)
+        {
+            self.update_processed_image(ui.ctx());
+        }
+
         let (canvas, response) = ui.allocate_exact_size(available, Sense::hover());
 
         let painter = ui.painter().with_clip_rect(canvas);
@@ -5350,6 +5362,12 @@ impl PixelForge {
 
                 self.zoom_at(factor, anchor, center);
             }
+        }
+
+        if self.preview_source.is_some()
+            && self.preview_full_resolution != (self.zoom >= 0.95)
+        {
+            self.update_processed_image(ui.ctx());
         }
 
         let (brush_down, brush_pressed) = ui.ctx().input(|i| {
