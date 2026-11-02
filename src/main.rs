@@ -1736,20 +1736,23 @@ impl PixelForge {
             ui.label("Seed");
             ui.add(egui::DragValue::new(&mut self.generation_seed));
         });
-        if self.refinement_source.is_none() {
-            ui.horizontal(|ui| {
-                if ui.add_enabled(
-                    !self.generation_running && !self.generation_checkpoint.is_empty(),
-                    egui::Button::new("Generate")
-                ).clicked() {
-                    self.start_generation(&ctx);
-                }
-                if self.generation_running && ui.button("Cancel").clicked() {
-                    self.generation_cancel.store(true,std::sync::atomic::Ordering::Relaxed);
-                    self.generation_status="Cancelling generation...".into();
-                }
-            });
-        }
+        // Always expose ordinary generation. Refinement mode must never block
+        // preset aspect-ratio generation or silently redirect the Generate button.
+        ui.horizontal(|ui| {
+            if ui.add_enabled(
+                !self.generation_running && !self.generation_checkpoint.is_empty(),
+                egui::Button::new("Generate New Image")
+            ).clicked() {
+                self.refinement_source=None;
+                self.refinement_mask.clear();
+                self.refinement_mask_texture=None;
+                self.start_generation(&ctx);
+            }
+            if self.generation_running && ui.button("Cancel").clicked() {
+                self.generation_cancel.store(true,std::sync::atomic::Ordering::Relaxed);
+                self.generation_status="Cancelling generation...".into();
+            }
+        });
         if !self.generation_gallery.is_empty() && ui.button("Open Generation Gallery").clicked() {
             self.generation_workspace = true;
         }
