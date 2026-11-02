@@ -1856,7 +1856,7 @@ impl PixelForge {
         });
         let available = ui.available_size();
         let thumbnail_height = 110.0;
-        let viewer_height = (available.y - 165.0).max(120.0);
+        let viewer_height = (available.y - 175.0).max(120.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::drag(),
@@ -1910,20 +1910,8 @@ impl PixelForge {
                 egui::Color32::WHITE,
             );
         }
-        // Bottom-up layout pins the prompt to the bottom of the workspace,
-        // with gallery thumbnails immediately above it.
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        ui.group(|ui| {
-            let settings=&self.generation_gallery[self.generation_selected].settings;
-            ui.strong("Selected Image Prompt");
-            egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
-                if settings.prompt.trim().is_empty() {ui.label("No prompt recorded (imported image)");}
-                else {ui.label(&settings.prompt);}
-                if !settings.negative.trim().is_empty() {
-                    ui.label(format!("Additional negative: {}",settings.negative));
-                }
-            });
-        });            ui.separator();
+        // Top-down footer: thumbnails first, then the selected prompt.
+        // The viewer above consumes the remaining height so these stay together.
         egui::ScrollArea::horizontal()
             .max_height(thumbnail_height)
             .show(ui, |ui| {
@@ -1939,6 +1927,20 @@ impl PixelForge {
                         }
                     }
                 });
+            });
+        ui.separator();
+        ui.group(|ui| {
+            let settings = &self.generation_gallery[self.generation_selected].settings;
+            ui.strong("Selected Image Prompt");
+            egui::ScrollArea::vertical().max_height(85.0).show(ui, |ui| {
+                if settings.prompt.trim().is_empty() {
+                    ui.label("No prompt recorded (imported image)");
+                } else {
+                    ui.label(&settings.prompt);
+                }
+                if !settings.negative.trim().is_empty() {
+                    ui.label(format!("Additional negative: {}", settings.negative));
+                }
             });
         });
     }
