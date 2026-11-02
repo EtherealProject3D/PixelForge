@@ -1418,9 +1418,11 @@ impl PixelForge {
                     ("SDXL Base 1.0", "sd_xl_base", "General-purpose baseline; useful for comparisons.",
                      "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0", None),
                     ("RealVisXL", "realvis", "Photography-focused SDXL checkpoint; recommended for natural-looking photos.",
-                     "https://huggingface.co/SG161222/RealVisXL_V5.0", Some(0)),
+                     "https://huggingface.co/SG161222/RealVisXL_V5.0", Some(1)),
                     ("Juggernaut XL", "juggernaut", "Detailed SDXL photography and cinematic imagery.",
-                     "https://huggingface.co/RunDiffusion/Juggernaut-XL-v9", Some(1)),
+                     "https://huggingface.co/RunDiffusion/Juggernaut-XL-v9", Some(2)),
+                    ("CyberRealistic Pony v18", "cyberrealisticpony", "Pony XL checkpoint for realistic characters, poses, and anatomy. Recommended starting point: CFG 5, 30+ steps.",
+                     "https://huggingface.co/cyberdelia/CyberRealisticPony", Some(0)),
                 ] {
                     ui.group(|ui| {
                         ui.horizontal(|ui| {
