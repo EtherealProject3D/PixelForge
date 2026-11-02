@@ -973,6 +973,7 @@ impl PixelForge {
                 self.offset = Vec2::ZERO;
                 self.panning = false;
                 self.status = "Image loaded".into();
+                self.update_processed_image(ctx);
             }
             Err(err) => {
                 self.status = format!("Open failed: {err}");
@@ -2400,6 +2401,7 @@ impl PixelForge {
         self.export_stage.clear();
 
         self.refresh_selection_overlay(ctx);
+        self.update_processed_image(ctx);
 
         self.status = format!("Project opened: {}", path.display());
     }
@@ -2575,7 +2577,7 @@ impl PixelForge {
         // Keep enough detail for a sharp fitted preview on high-DPI / ultrawide
         // displays. Adjustment rendering stays on the background worker.
         // Cap texture size to avoid excessive VRAM use on very large images.
-        const MAX_PREVIEW_EDGE: u32 = 4096;
+        const MAX_PREVIEW_EDGE: u32 = 2048;
 
         let width = original.width();
         let height = original.height();
@@ -2722,9 +2724,11 @@ impl PixelForge {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.preview_rx = None;
+                self.status = "Adjusted preview worker stopped unexpectedly".into();
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
-                // Worker will request a repaint when finished.
+                // Keep the UI alive and make the pending render visible.
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
             }
         }
     }
@@ -5211,6 +5215,12 @@ impl PixelForge {
             ui.label(format!("{:.1}%", self.zoom * 100.0));
         });
 
+        if self.preview_rx.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.small("Rendering adjusted preview...");
+            });
+        }
         ui.separator();
 
         let available = ui.available_size();
