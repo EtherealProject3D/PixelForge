@@ -48,6 +48,40 @@ enum FitButton {
     Middle,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+struct WindowPlacement {
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    maximized: bool,
+}
+
+impl WindowPlacement {
+    fn path() -> Option<PathBuf> {
+        Some(PathBuf::from(std::env::var_os("APPDATA")?).join("PixelForge").join("window.cfg"))
+    }
+
+    fn load() -> Option<Self> {
+        let content = std::fs::read_to_string(Self::path()?).ok()?;
+        let values: Vec<&str> = content.split_whitespace().collect();
+        if values.len() != 5 { return None; }
+        let nums: Vec<f32> = values[..4].iter().map(|v| v.parse::<f32>()).collect::<Result<_,_>>().ok()?;
+        if !nums.iter().all(|v| v.is_finite()) || nums[2] < 800.0 || nums[3] < 500.0 {
+            return None;
+        }
+        Some(Self { x: nums[0], y: nums[1], width: nums[2], height: nums[3], maximized: values[4] == "true" })
+    }
+
+    fn save(self) {
+        let Some(path) = Self::path() else { return; };
+        if let Some(parent) = path.parent() {
+            if std::fs::create_dir_all(parent).is_err() { return; }
+        }
+        let _ = std::fs::write(path, format!("{} {} {} {} {}", self.x, self.y, self.width, self.height, self.maximized));
+    }
+}
+
 struct Controls {
     pan: PanButton,
     fit: FitButton,
@@ -588,6 +622,8 @@ struct PixelForge {
     preview_source: Option<std::sync::Arc<image::RgbaImage>>,
     preview_rx: Option<std::sync::mpsc::Receiver<(u64, ColorImage, histogram::Histogram)>>,
     preview_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    window_placement: Option<WindowPlacement>,
+    last_window_save: std::time::Instant,
     brightness: f32,
     selection_adjustment_target: bool,
     selection_adjustments: adjustments::Adjustments,
@@ -751,6 +787,8 @@ impl Default for PixelForge {
             preview_source: None,
             preview_rx: None,
             preview_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            window_placement: WindowPlacement::load(),
+            last_window_save: std::time::Instant::now(),
             brightness: 0.0,
             selection_adjustment_target: false,
             selection_adjustments: adjustments::Adjustments::default(),
@@ -5556,6 +5594,29 @@ impl eframe::App for PixelForge {
             }
         }
 
+        // Persist the last normal window bounds, even if the user closes
+        // while maximized. Save at most once per second during dragging.
+        let viewport = ctx.input(|i| i.viewport().clone());
+        if let Some(rect) = viewport.outer_rect {
+            let maximized = viewport.maximized.unwrap_or(false);
+            let previous = self.window_placement;
+            if !maximized && rect.width() >= 800.0 && rect.height() >= 500.0 {
+                self.window_placement = Some(WindowPlacement {
+                    x: rect.min.x, y: rect.min.y,
+                    width: rect.width(), height: rect.height(), maximized,
+                });
+            } else if let Some(mut placement) = previous {
+                placement.maximized = maximized;
+                self.window_placement = Some(placement);
+            }
+            if self.last_window_save.elapsed() >= std::time::Duration::from_secs(1)
+                || viewport.close_requested()
+            {
+                if let Some(placement) = self.window_placement { placement.save(); }
+                self.last_window_save = std::time::Instant::now();
+            }
+        }
+
         self.show_project_tabs(ctx);
         self.poll_export(ctx);
         self.poll_preview(ctx);
@@ -6168,12 +6229,20 @@ fn main() -> eframe::Result {
         width: icon_image.width(),
         height: icon_image.height(),
     };
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("PixelForge v0.5.0-dev")
+        .with_icon(icon_data)
+        .with_min_inner_size([800.0, 500.0]);
+    if let Some(saved) = WindowPlacement::load() {
+        viewport = viewport
+            .with_position([saved.x, saved.y])
+            .with_inner_size([saved.width, saved.height])
+            .with_maximized(saved.maximized);
+    } else {
+        viewport = viewport.with_maximized(true);
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("PixelForge v0.5.0-dev")
-            .with_icon(icon_data)
-            .with_maximized(true)
-            .with_min_inner_size([800.0, 500.0]),
+        viewport,
         ..Default::default()
     };
 
