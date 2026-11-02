@@ -326,6 +326,14 @@ struct GenerationSettings {
     refine_masked: bool,
 }
 
+fn conversation_context(settings: &GenerationSettings) -> String {
+    match settings.refine_prompt.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(edit) if !settings.prompt.trim().is_empty() => format!("{}, {}", settings.prompt.trim(), edit),
+        Some(edit) => edit.to_owned(),
+        None => settings.prompt.clone(),
+    }
+}
+
 fn settings_json(s:&GenerationSettings)->serde_json::Value {serde_json::json!({"prompt":s.prompt,"negative":s.negative,"auto_negative":s.auto_negative,"checkpoint":s.checkpoint,"style":s.style,"ratio":s.ratio,"custom_size":s.custom_size,"unlock_dimensions":s.unlock_dimensions,"resolution":s.resolution,"width":s.width,"height":s.height,"steps":s.steps,"cfg":s.cfg,"seed":s.seed,"refine_parent":s.refine_parent,"refine_strength":s.refine_strength,"refine_prompt":s.refine_prompt,"refine_masked":s.refine_masked})}
 fn settings_from_json(v:&serde_json::Value)->GenerationSettings {GenerationSettings {prompt:v["prompt"].as_str().unwrap_or("").into(),negative:v["negative"].as_str().unwrap_or("").into(),auto_negative:v["auto_negative"].as_bool().unwrap_or(false),checkpoint:v["checkpoint"].as_str().unwrap_or("").into(),style:v["style"].as_u64().unwrap_or(0) as usize,ratio:v["ratio"].as_u64().unwrap_or(0) as usize,custom_size:v["custom_size"].as_bool().unwrap_or(false),unlock_dimensions:v["unlock_dimensions"].as_bool().unwrap_or(false),resolution:v["resolution"].as_u64().unwrap_or(0) as usize,width:v["width"].as_u64().unwrap_or(1024) as u32,height:v["height"].as_u64().unwrap_or(1024) as u32,steps:v["steps"].as_u64().unwrap_or(30) as u32,cfg:v["cfg"].as_f64().unwrap_or(7.0) as f32,seed:v["seed"].as_u64().unwrap_or(0),refine_parent:v["refine_parent"].as_u64().map(|n|n as usize),refine_strength:v["refine_strength"].as_f64().map(|n|n as f32),refine_prompt:v["refine_prompt"].as_str().map(str::to_owned),refine_masked:v["refine_masked"].as_bool().unwrap_or(false)}}
 
@@ -598,6 +606,7 @@ struct PixelForge {
     generation_batch_count: usize,
     generation_batch_done: usize,
     generation_random_seeds: bool,
+    conversation_draft: String,
     generation_gallery: Vec<GeneratedItem>,
     generation_project_path: Option<PathBuf>,
     refinement_source: Option<usize>,
@@ -790,6 +799,7 @@ impl Default for PixelForge {
             generation_batch_count: 1,
             generation_batch_done: 0,
             generation_random_seeds: true,
+            conversation_draft: String::new(),
             generation_gallery: Vec::new(),
             generation_project_path: None,
             refinement_source: None,
@@ -1422,6 +1432,8 @@ impl PixelForge {
     fn show_generation_sidebar(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         ui.heading("Image Generation");
+        ui.push_id("sidebar_conversation", |ui| self.show_conversation(ui));
+        ui.separator();
         if let Some(index)=self.refinement_source {
             ui.group(|ui| {
                 ui.strong(format!("Refine Image {}",index+1));
@@ -1841,6 +1853,7 @@ impl PixelForge {
         self.refinement_source=None;
         self.refinement_mask.clear();
         self.refinement_mask_texture=None;
+        self.conversation_draft.clear();
         self.generation_gallery=gallery;self.generation_selected=project.selected.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare_index=project.compare_index.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare=project.compare && self.generation_gallery.len()>1;self.generation_project_path=Some(path.to_path_buf());self.generation_workspace=true;self.generation_status=format!("Opened {} ({} images)",path.display(),self.generation_gallery.len());
     }
     fn import_generation_images(&mut self,ctx:&egui::Context) {
@@ -1861,7 +1874,65 @@ impl PixelForge {
         }
     }
 
+    fn show_conversation(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Image conversation");
+        ui.small("Local SDXL editing: describe the desired result. Accuracy depends on the checkpoint.");
+        ui.add(egui::TextEdit::multiline(&mut self.conversation_draft).hint_text("Describe an image or a change to the selected version").desired_rows(2));
+        ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Edit strength"));
+        let label = if self.generation_gallery.is_empty() { "Send: Create Image" } else { "Send: Edit Selected Version" };
+        if ui.add_enabled(!self.generation_running && !self.conversation_draft.trim().is_empty() && !self.generation_checkpoint.is_empty(), egui::Button::new(label)).clicked() {
+            if let Some(source) = self.generation_gallery.get(self.generation_selected) {
+                self.refinement_source = Some(self.generation_selected);
+                self.generation_prompt = conversation_context(&source.settings);
+                self.refinement_prompt = self.conversation_draft.trim().to_owned();
+                self.generation_negative = source.settings.negative.clone();
+                self.generation_auto_negative = source.settings.auto_negative;
+                self.generation_width = ((source.pixels.width().clamp(256,4096)+32)/64*64).clamp(256,4096);
+                self.generation_height = ((source.pixels.height().clamp(256,4096)+32)/64*64).clamp(256,4096);
+                self.generation_custom_size = true;
+                self.generation_unlock_dimensions = true;
+                self.refinement_masked = false;
+            } else {
+                self.refinement_source = None;
+                self.generation_prompt = self.conversation_draft.trim().to_owned();
+                self.generation_batch_count = 1;
+            }
+            self.refinement_mask.clear();
+            self.refinement_mask_texture = None;
+            self.start_generation(ui.ctx());
+            // Retain the draft so failed or cancelled requests can be retried.
+        }
+        ui.collapsing("Conversation history / Revert", |ui| {
+            ui.small("Select a version to revert and continue. Later versions remain. Save the Studio project to retain history.");
+            egui::ScrollArea::vertical().id_salt("conversation_history").max_height(120.0).show(ui, |ui| {
+                for (index, item) in self.generation_gallery.iter().enumerate() {
+                    let parent = item.settings.refine_parent.filter(|&p| p < self.generation_gallery.len());
+                    let action = item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt);
+                    let origin = parent.map(|p| format!("from v{}", p + 1)).unwrap_or_else(|| "original / import".into());
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(self.generation_selected == index, format!("v{} ({origin}): {action}", index + 1)).clicked() {
+                            self.generation_selected = index;
+                            self.refinement_source = None;
+                            self.refinement_mask.clear();
+                            self.refinement_mask_texture = None;
+                            self.generation_zoom = 1.0;
+                            self.generation_pan = Vec2::ZERO;
+                        }
+                        if let Some(parent) = parent {
+                            if ui.small_button("Compare parent").clicked() {
+                                self.generation_selected = index;
+                                self.generation_compare_index = parent;
+                                self.generation_compare = true;
+                            }
+                        }
+                    });
+                }
+            });
+        });
+    }
+
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
+        ui.push_id("workspace_conversation", |ui| self.show_conversation(ui));
         ui.horizontal(|ui| {
             ui.heading("AI Generation Studio");
             if ui.button("Return to Editor").clicked() {
@@ -2147,6 +2218,7 @@ impl PixelForge {
             &mut self.generation_random_seeds,
             &mut other.generation_random_seeds,
         );
+        std::mem::swap(&mut self.conversation_draft, &mut other.conversation_draft);
         std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
         std::mem::swap(&mut self.generation_project_path, &mut other.generation_project_path);
         std::mem::swap(&mut self.refinement_source, &mut other.refinement_source);
@@ -6705,5 +6777,26 @@ impl Drop for PixelForge {
         self.generation_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
         ai_generation::stop_managed_backend();
+    }
+}
+
+#[cfg(test)]
+mod conversation_tests {
+    use super::*;
+    #[test]
+    fn sequential_context_and_metadata_roundtrip() {
+        let mut s = settings_from_json(&serde_json::json!({"prompt":"A red car", "refine_prompt":"A blue car", "refine_parent":0}));
+        assert_eq!(conversation_context(&s), "A red car, A blue car");
+        s.prompt = conversation_context(&s);
+        s.refine_prompt = Some("Dramatic sunset".into());
+        s.refine_parent = Some(1);
+        let restored = settings_from_json(&settings_json(&s));
+        assert_eq!(conversation_context(&restored), "A red car, A blue car, Dramatic sunset");
+        assert_eq!(restored.refine_parent, Some(1));
+    }
+    #[test]
+    fn imported_image_can_begin_conversation() {
+        let s = settings_from_json(&serde_json::json!({"refine_prompt":"A blue car"}));
+        assert_eq!(conversation_context(&s), "A blue car");
     }
 }

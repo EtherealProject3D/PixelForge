@@ -62,3 +62,26 @@ pub fn load(path: &Path) -> Result<GalleryProject, String> {
     }
     Ok(GalleryProject {items,selected:meta["selected"].as_u64().unwrap_or(0) as usize,compare_index:meta["compare_index"].as_u64().unwrap_or(0) as usize,compare:meta["compare"].as_bool().unwrap_or(false),current:meta["current"].clone()})
 }
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn conversation_branch_and_compare_survive_project_roundtrip() {
+        let path = std::env::temp_dir().join(format!("pixelforge-conversation-{}.pxf", std::process::id()));
+        let items = [None, Some(0), Some(0)].into_iter().enumerate().map(|(n,parent)| GalleryImage {
+            settings: json!({"prompt":"Scene", "refine_parent":parent, "refine_prompt":format!("Edit {n}")}),
+            pixels: image::RgbaImage::from_pixel(2, 2, image::Rgba([n as u8, 0, 0, 255])), seed:n as u64,
+        }).collect();
+        let project = GalleryProject {items, selected:2, compare_index:0, compare:true, current:json!({})};
+        save(&path, &project).unwrap();
+        let loaded = load(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(loaded.items.len(), 3);
+        assert_eq!(loaded.selected, 2);
+        assert!(loaded.compare);
+        assert_eq!(loaded.compare_index, 0);
+        for n in [1,2] { assert_eq!(loaded.items[n].settings["refine_parent"], 0); }
+        assert_eq!(loaded.items[2].pixels.get_pixel(0,0)[0], 2);
+        assert_eq!(loaded.items[1].settings["refine_prompt"], "Edit 1");
+    }
+}
