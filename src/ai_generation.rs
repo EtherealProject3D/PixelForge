@@ -12,6 +12,8 @@ pub struct Request {
     pub steps: u32,
     pub cfg: f32,
     pub seed: u64,
+    pub source: Option<image::RgbaImage>,
+    pub denoise: f32,
 }
 
 fn client() -> Result<reqwest::blocking::Client, String> {
@@ -122,7 +124,7 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         return Err("Dimensions must be multiples of 64, between 256 and 2048".into());
     }
     if cancel.load(Ordering::Relaxed) { return Err("Generation cancelled".into()); }
-    let workflow = json!({
+    let mut workflow = json!({
         "1": {"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":request.checkpoint}},
         "2": {"class_type":"CLIPTextEncode","inputs":{"text":request.prompt,"clip":["1",1]}},
         "3": {"class_type":"CLIPTextEncode","inputs":{"text":request.negative,"clip":["1",1]}},
@@ -135,6 +137,31 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         "7": {"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge","images":["6",0]}}
     });
     let http = client()?;
+
+    if let Some(source) = request.source.as_ref() {
+        if !(0.01..=1.0).contains(&request.denoise) {
+            return Err("Refinement strength must be between 0.01 and 1.0".into());
+        }
+        let resized = image::imageops::resize(source, request.width, request.height, image::imageops::FilterType::Lanczos3);
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(resized)
+            .write_to(&mut png, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+        let filename = format!("pixelforge_refine_{}_{}.png",std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+        let part = reqwest::blocking::multipart::Part::bytes(png.into_inner())
+            .file_name(filename).mime_str("image/png").map_err(|e|e.to_string())?;
+        let form = reqwest::blocking::multipart::Form::new().part("image",part).text("type","input").text("overwrite","false");
+        let uploaded: Value = http.post(format!("{BASE}/upload/image")).multipart(form)
+            .send().map_err(|e|format!("ComfyUI image upload failed: {e}"))?
+            .error_for_status().map_err(|e|format!("ComfyUI rejected source image: {e}"))?
+            .json().map_err(|e|e.to_string())?;
+        let stored = uploaded["name"].as_str().ok_or("ComfyUI did not return an uploaded filename")?;
+        let subfolder = uploaded["subfolder"].as_str().unwrap_or("");
+        workflow["4"] = json!({"class_type":"LoadImage","inputs":{"image": if subfolder.is_empty(){stored.to_owned()}else{format!("{subfolder}/{stored}")}}});
+        workflow["8"] = json!({"class_type":"VAEEncode","inputs":{"pixels":["4",0],"vae":["1",2]}});
+        workflow["5"]["inputs"]["latent_image"] = json!(["8",0]);
+        workflow["5"]["inputs"]["denoise"] = json!(request.denoise);
+    }
     // Each generation has a private websocket client ID; ComfyUI emits actual sampler steps.
     let client_id = format!("pixelforge-{}-{}", std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
