@@ -1857,7 +1857,7 @@ impl PixelForge {
         let available = ui.available_size();
         // Reserve a fixed footer: thumbnails (80 px) and prompt panel (up to 90 px).
         // The viewer fills everything above that footer.
-        let footer_height = 180.0;
+        let footer_height = 95.0;
         let viewer_height = (available.y - footer_height).max(120.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
@@ -1912,40 +1912,20 @@ impl PixelForge {
                 egui::Color32::WHITE,
             );
         }
-        // Anchor the gallery and prompt to the bottom of the central workspace.
-        // A nested top-down layout preserves the requested order and text direction.
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-            ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
-                egui::ScrollArea::horizontal()
-                    .max_height(82.0)
-                    .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            for (index, item) in self.generation_gallery.iter().enumerate() {
-                                let selected = index == self.generation_selected;
-                                let image = egui::Image::new((item.texture.id(), egui::vec2(90.0, 70.0)));
-                                if ui.add(egui::Button::image(image).selected(selected)).clicked() {
-                                    self.generation_selected = index;
-                                }
-                            }
-                        });
-                    });
-                ui.separator();
-                ui.group(|ui| {
-                    let settings = &self.generation_gallery[self.generation_selected].settings;
-                    ui.strong("Selected Image Prompt");
-                    egui::ScrollArea::vertical().max_height(85.0).show(ui, |ui| {
-                        if settings.prompt.trim().is_empty() {
-                            ui.label("No prompt recorded (imported image)");
-                        } else {
-                            ui.label(&settings.prompt);
+        // Thumbnails occupy the bottom of the viewer, directly above the status panel.
+        egui::ScrollArea::horizontal()
+            .max_height(82.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (index, item) in self.generation_gallery.iter().enumerate() {
+                        let selected = index == self.generation_selected;
+                        let image = egui::Image::new((item.texture.id(), egui::vec2(90.0, 70.0)));
+                        if ui.add(egui::Button::image(image).selected(selected)).clicked() {
+                            self.generation_selected = index;
                         }
-                        if !settings.negative.trim().is_empty() {
-                            ui.label(format!("Additional negative: {}", settings.negative));
-                        }
-                    });
+                    }
                 });
             });
-        });
     }
 
     // Keep Generation Studio alive across document changes; editor state belongs to each tab.
@@ -6377,6 +6357,25 @@ impl eframe::App for PixelForge {
                     });
             });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
+            if self.generation_workspace {
+                ui.set_min_height(90.0);
+                if let Some(item) = self.generation_gallery.get(self.generation_selected) {
+                    ui.strong("Selected Image Prompt");
+                    egui::ScrollArea::vertical().max_height(65.0).show(ui, |ui| {
+                        if item.settings.prompt.trim().is_empty() {
+                            ui.label("No prompt recorded (imported image)");
+                        } else {
+                            ui.label(&item.settings.prompt);
+                        }
+                        if !item.settings.negative.trim().is_empty() {
+                            ui.label(format!("Additional negative: {}", item.settings.negative));
+                        }
+                    });
+                } else {
+                    ui.label("Select a gallery image to view its prompt");
+                }
+                return;
+            }
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), 76.0),
                 egui::Layout::top_down(egui::Align::Min),
