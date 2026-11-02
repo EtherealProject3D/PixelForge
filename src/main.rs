@@ -553,6 +553,7 @@ struct EditVersion {
     global: adjustments::Adjustments,
     local: adjustments::Adjustments,
     mask: Option<masking::SelectionMask>,
+    raster: Option<image::RgbaImage>,
 }
 
 fn adjustment_values(a: adjustments::Adjustments) -> [f32; 12] {
@@ -942,7 +943,7 @@ impl PixelForge {
         name: &str,
     ) -> Option<TextureHandle> {
         let source = self.preview_source.as_ref()?;
-        let mut pixels = (**source).clone();
+        let mut pixels = version.raster.clone().unwrap_or_else(|| (**source).clone());
         let (width, height) = pixels.dimensions();
         for (y, row) in pixels.rows_mut().enumerate() {
             for (x, pixel) in row.enumerate() {
@@ -2377,6 +2378,7 @@ impl PixelForge {
                 global: adjustment_values(version.global),
                 local: adjustment_values(version.local),
                 mask: version.mask.as_ref().map(|mask| mask.pixels().to_vec()),
+                raster: version.raster.clone(),
             }).collect(),
             saved_selections: self
                 .saved_selections
@@ -2472,6 +2474,7 @@ impl PixelForge {
                 global: adjustments_from_values(version.global),
                 local: adjustments_from_values(version.local),
                 mask,
+                raster: version.raster,
             }
         }).collect();
         self.compare_version_a = 0;
@@ -4420,7 +4423,7 @@ impl PixelForge {
                     (current, self.selection_adjustments)
                 };
                 self.edit_versions.push(EditVersion {
-                    global, local, mask: self.selection_mask.clone(),
+                    global, local, mask: self.selection_mask.clone(), raster: None,
                 });
                 self.version_comparison = false;
                 self.version_texture_a = None;
