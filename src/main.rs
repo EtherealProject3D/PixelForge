@@ -1239,8 +1239,26 @@ impl PixelForge {
                     request.seed.wrapping_add(index as u64)
                 };
                 let seed = item.seed;
+                let source_for_composite=item.source.clone();
+                let mask_for_composite=item.mask.clone();
                 let result = ai_generation::generate(item, cancel.clone(), progress.clone())
-                    .map(|image| (image, seed));
+                    .map(|mut image| {
+                        if let (Some(source),Some(mask))=(source_for_composite,mask_for_composite) {
+                            if let Some(mask_image)=image::GrayImage::from_raw(source.width(),source.height(),mask) {
+                                let original=image::imageops::resize(&source,image.width(),image.height(),image::imageops::FilterType::Lanczos3);
+                                let scaled_mask=image::imageops::resize(&mask_image,image.width(),image.height(),image::imageops::FilterType::Nearest);
+                                for (x,y,pixel) in image.enumerate_pixels_mut() {
+                                    let alpha=scaled_mask.get_pixel(x,y)[0] as f32/255.0;
+                                    let old=original.get_pixel(x,y);
+                                    for channel in 0..3 {
+                                        pixel[channel]=(old[channel] as f32*(1.0-alpha)+pixel[channel] as f32*alpha).round() as u8;
+                                    }
+                                    pixel[3]=255;
+                                }
+                            }
+                        }
+                        (image, seed)
+                    });
                 let failed = result.is_err();
                 if tx.send(result).is_err() {
                     break;
