@@ -322,10 +322,12 @@ struct GenerationSettings {
     seed: u64,
     refine_parent: Option<usize>,
     refine_strength: Option<f32>,
+    refine_prompt: Option<String>,
+    refine_masked: bool,
 }
 
-fn settings_json(s:&GenerationSettings)->serde_json::Value {serde_json::json!({"prompt":s.prompt,"negative":s.negative,"auto_negative":s.auto_negative,"checkpoint":s.checkpoint,"style":s.style,"ratio":s.ratio,"custom_size":s.custom_size,"unlock_dimensions":s.unlock_dimensions,"resolution":s.resolution,"width":s.width,"height":s.height,"steps":s.steps,"cfg":s.cfg,"seed":s.seed,"refine_parent":s.refine_parent,"refine_strength":s.refine_strength})}
-fn settings_from_json(v:&serde_json::Value)->GenerationSettings {GenerationSettings {prompt:v["prompt"].as_str().unwrap_or("").into(),negative:v["negative"].as_str().unwrap_or("").into(),auto_negative:v["auto_negative"].as_bool().unwrap_or(false),checkpoint:v["checkpoint"].as_str().unwrap_or("").into(),style:v["style"].as_u64().unwrap_or(0) as usize,ratio:v["ratio"].as_u64().unwrap_or(0) as usize,custom_size:v["custom_size"].as_bool().unwrap_or(false),unlock_dimensions:v["unlock_dimensions"].as_bool().unwrap_or(false),resolution:v["resolution"].as_u64().unwrap_or(0) as usize,width:v["width"].as_u64().unwrap_or(1024) as u32,height:v["height"].as_u64().unwrap_or(1024) as u32,steps:v["steps"].as_u64().unwrap_or(30) as u32,cfg:v["cfg"].as_f64().unwrap_or(7.0) as f32,seed:v["seed"].as_u64().unwrap_or(0),refine_parent:v["refine_parent"].as_u64().map(|n|n as usize),refine_strength:v["refine_strength"].as_f64().map(|n|n as f32)}}
+fn settings_json(s:&GenerationSettings)->serde_json::Value {serde_json::json!({"prompt":s.prompt,"negative":s.negative,"auto_negative":s.auto_negative,"checkpoint":s.checkpoint,"style":s.style,"ratio":s.ratio,"custom_size":s.custom_size,"unlock_dimensions":s.unlock_dimensions,"resolution":s.resolution,"width":s.width,"height":s.height,"steps":s.steps,"cfg":s.cfg,"seed":s.seed,"refine_parent":s.refine_parent,"refine_strength":s.refine_strength,"refine_prompt":s.refine_prompt,"refine_masked":s.refine_masked})}
+fn settings_from_json(v:&serde_json::Value)->GenerationSettings {GenerationSettings {prompt:v["prompt"].as_str().unwrap_or("").into(),negative:v["negative"].as_str().unwrap_or("").into(),auto_negative:v["auto_negative"].as_bool().unwrap_or(false),checkpoint:v["checkpoint"].as_str().unwrap_or("").into(),style:v["style"].as_u64().unwrap_or(0) as usize,ratio:v["ratio"].as_u64().unwrap_or(0) as usize,custom_size:v["custom_size"].as_bool().unwrap_or(false),unlock_dimensions:v["unlock_dimensions"].as_bool().unwrap_or(false),resolution:v["resolution"].as_u64().unwrap_or(0) as usize,width:v["width"].as_u64().unwrap_or(1024) as u32,height:v["height"].as_u64().unwrap_or(1024) as u32,steps:v["steps"].as_u64().unwrap_or(30) as u32,cfg:v["cfg"].as_f64().unwrap_or(7.0) as f32,seed:v["seed"].as_u64().unwrap_or(0),refine_parent:v["refine_parent"].as_u64().map(|n|n as usize),refine_strength:v["refine_strength"].as_f64().map(|n|n as f32),refine_prompt:v["refine_prompt"].as_str().map(str::to_owned),refine_masked:v["refine_masked"].as_bool().unwrap_or(false)}}
 
 struct GeneratedItem {
     settings: GenerationSettings,
@@ -600,6 +602,11 @@ struct PixelForge {
     generation_project_path: Option<PathBuf>,
     refinement_source: Option<usize>,
     refinement_strength: f32,
+    refinement_prompt: String,
+    refinement_masked: bool,
+    refinement_brush: f32,
+    refinement_mask: Vec<u8>,
+    refinement_mask_texture: Option<TextureHandle>,
     generation_batch_settings: Option<GenerationSettings>,
     generation_selected: usize,
     generation_compare: bool,
@@ -787,6 +794,11 @@ impl Default for PixelForge {
             generation_project_path: None,
             refinement_source: None,
             refinement_strength: 0.35,
+            refinement_prompt: "Remove the extra head on the right. Reconstruct the natural background and preserve the rest of the image.".into(),
+            refinement_masked: true,
+            refinement_brush: 36.0,
+            refinement_mask: Vec::new(),
+            refinement_mask_texture: None,
             generation_batch_settings: None,
             generation_selected: 0,
             generation_compare: false,
@@ -1154,7 +1166,7 @@ impl PixelForge {
             return;
         }
         let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].1;
-        let prompt = if style.is_empty() {
+        let prompt = if self.refinement_source.is_some() {self.refinement_prompt.clone()} else if style.is_empty() {
             self.generation_prompt.clone()
         } else {
             format!("{}, {}", self.generation_prompt, style)
@@ -1176,6 +1188,8 @@ impl PixelForge {
             seed: self.generation_seed,
             refine_parent: self.refinement_source,
             refine_strength: self.refinement_source.map(|_| self.refinement_strength),
+            refine_prompt: self.refinement_source.map(|_| self.refinement_prompt.clone()),
+            refine_masked: self.refinement_source.is_some() && self.refinement_masked,
         });
         let request = ai_generation::Request {
             checkpoint: self.generation_checkpoint.clone(),
@@ -1192,6 +1206,7 @@ impl PixelForge {
             seed: self.generation_seed,
             source: self.refinement_source.and_then(|index|self.generation_gallery.get(index)).map(|item|item.pixels.clone()),
             denoise: self.refinement_strength,
+            mask: if self.refinement_source.is_some() && self.refinement_masked {Some(self.refinement_mask.clone())} else {None},
         };
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         self.generation_cancel = cancel.clone();
@@ -1369,9 +1384,24 @@ impl PixelForge {
         if let Some(index)=self.refinement_source {
             ui.group(|ui| {
                 ui.strong(format!("Refine Image {}",index+1));
-                ui.add(egui::Slider::new(&mut self.refinement_strength,0.05..=1.0).text("Denoise strength"));
-                ui.small("Low strength preserves the source; high strength changes more. Source is resized to generation dimensions.");
-                if ui.button("Cancel Refinement Mode").clicked() {self.refinement_source=None;}
+                ui.radio_value(&mut self.refinement_masked,false,"Refine Entire Image");
+                ui.radio_value(&mut self.refinement_masked,true,"Edit Selected Area (Inpainting)");
+                ui.label("Editing Prompt (separate from original)");
+                ui.add(egui::TextEdit::multiline(&mut self.refinement_prompt).desired_rows(4));
+                ui.add(egui::Slider::new(&mut self.refinement_strength,0.05..=1.0).text("Change Strength"));
+                if self.refinement_masked {
+                    ui.add(egui::Slider::new(&mut self.refinement_brush,4.0..=150.0).text("Brush size (pixels)"));
+                    ui.small("Paint on the image in the center viewer. Red marks the area to regenerate.");
+                    if ui.button("Clear Painted Area").clicked() {
+                        self.refinement_mask.fill(0);
+                        self.refinement_mask_texture=None;
+                    }
+                }
+                if ui.button("Cancel Refinement Mode").clicked() {
+                    self.refinement_source=None;
+                    self.refinement_mask.clear();
+                    self.refinement_mask_texture=None;
+                }
             });
         }
         ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
@@ -1731,7 +1761,7 @@ impl PixelForge {
     fn save_generation_project(&mut self, save_as:bool) {
         let Some(mut path)=(!save_as).then(||self.generation_project_path.clone()).flatten().or_else(||rfd::FileDialog::new().add_filter("PixelForge Project",&["pxf"]).set_file_name("Generation.pxf").save_file()) else {return};
         path.set_extension("pxf");
-        let current=GenerationSettings {prompt:self.generation_prompt.clone(),negative:self.generation_negative.clone(),auto_negative:self.generation_auto_negative,checkpoint:self.generation_checkpoint.clone(),style:self.generation_style,ratio:self.generation_size,custom_size:self.generation_custom_size,unlock_dimensions:self.generation_unlock_dimensions,resolution:self.generation_resolution,width:self.generation_width,height:self.generation_height,steps:self.generation_steps,cfg:self.generation_cfg,seed:self.generation_seed,refine_parent:None,refine_strength:None};
+        let current=GenerationSettings {prompt:self.generation_prompt.clone(),negative:self.generation_negative.clone(),auto_negative:self.generation_auto_negative,checkpoint:self.generation_checkpoint.clone(),style:self.generation_style,ratio:self.generation_size,custom_size:self.generation_custom_size,unlock_dimensions:self.generation_unlock_dimensions,resolution:self.generation_resolution,width:self.generation_width,height:self.generation_height,steps:self.generation_steps,cfg:self.generation_cfg,seed:self.generation_seed,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};
         let project=generation_project::GalleryProject {items:self.generation_gallery.iter().map(|i|generation_project::GalleryImage {settings:settings_json(&i.settings),pixels:i.pixels.clone(),seed:i.seed}).collect(),selected:self.generation_selected,compare_index:self.generation_compare_index,compare:self.generation_compare,current:settings_json(&current)};
         match generation_project::save(&path,&project) {Ok(())=>{self.generation_project_path=Some(path.clone());self.generation_status=format!("Saved {}",path.display());},Err(e)=>self.generation_status=format!("Save failed: {e}")}
     }
@@ -1745,13 +1775,15 @@ impl PixelForge {
         let current=settings_from_json(&project.current);
         self.generation_prompt=current.prompt;self.generation_negative=current.negative;self.generation_auto_negative=current.auto_negative;self.generation_checkpoint=current.checkpoint;self.generation_style=current.style;self.generation_size=current.ratio;self.generation_custom_size=current.custom_size;self.generation_unlock_dimensions=current.unlock_dimensions;self.generation_resolution=current.resolution;self.generation_width=current.width;self.generation_height=current.height;self.generation_steps=current.steps;self.generation_cfg=current.cfg;self.generation_seed=current.seed;
         self.refinement_source=None;
+        self.refinement_mask.clear();
+        self.refinement_mask_texture=None;
         self.generation_gallery=gallery;self.generation_selected=project.selected.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare_index=project.compare_index.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare=project.compare && self.generation_gallery.len()>1;self.generation_project_path=Some(path.to_path_buf());self.generation_workspace=true;self.generation_status=format!("Opened {} ({} images)",path.display(),self.generation_gallery.len());
     }
     fn import_generation_images(&mut self,ctx:&egui::Context) {
         if let Some(paths)=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","webp"]).pick_files() {
             let mut count=0;
             for path in paths {match image::open(&path) {
-                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None};self.generation_gallery.push(GeneratedItem {settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
+                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};self.generation_gallery.push(GeneratedItem {settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
                 Err(e)=>self.generation_status=format!("Import failed: {e}"),
             }}
             if count>0 {self.generation_status=format!("Imported {count} image(s)");}
@@ -1779,6 +1811,7 @@ impl PixelForge {
             {
                 let removed=self.generation_selected;
                 self.generation_gallery.remove(removed);
+                if self.refinement_source==Some(removed) {self.refinement_mask.clear();self.refinement_mask_texture=None;}
                 self.refinement_source=match self.refinement_source {Some(index) if index==removed=>None,Some(index) if index>removed=>Some(index-1),other=>other};
                 for item in &mut self.generation_gallery {item.settings.refine_parent=match item.settings.refine_parent {Some(index) if index==removed=>None,Some(index) if index>removed=>Some(index-1),other=>other};}
                 self.generation_selected = self.generation_selected.min(self.generation_gallery.len().saturating_sub(1));
@@ -1831,6 +1864,8 @@ impl PixelForge {
                 let index=self.generation_selected;
                 let selected=&self.generation_gallery[index];
                 self.refinement_source=Some(index);
+                self.refinement_mask=vec![0; (selected.pixels.width() as usize)*(selected.pixels.height() as usize)];
+                self.refinement_mask_texture=None;
                 self.generation_prompt=selected.settings.prompt.clone();
                 self.generation_negative=selected.settings.negative.clone();
                 self.generation_auto_negative=selected.settings.auto_negative;
@@ -1879,6 +1914,7 @@ impl PixelForge {
             ui.label(format!("Steps: {} | CFG: {:.1}", s.steps, s.cfg));
             ui.label(format!("Prompt: {}", s.prompt));
             if let Some(parent)=s.refine_parent {ui.label(format!("Refined from image {} | Strength {:.2}",parent+1,s.refine_strength.unwrap_or(0.35)));}
+            if let Some(prompt)=&s.refine_prompt {ui.label(format!("Editing prompt: {prompt}"));}
             ui.label(format!("Negative: {}", if s.auto_negative { "Automatic" } else { &s.negative }));
         });
         ui.horizontal(|ui| {
@@ -2005,6 +2041,11 @@ impl PixelForge {
         std::mem::swap(&mut self.generation_project_path, &mut other.generation_project_path);
         std::mem::swap(&mut self.refinement_source, &mut other.refinement_source);
         std::mem::swap(&mut self.refinement_strength, &mut other.refinement_strength);
+        std::mem::swap(&mut self.refinement_prompt, &mut other.refinement_prompt);
+        std::mem::swap(&mut self.refinement_masked, &mut other.refinement_masked);
+        std::mem::swap(&mut self.refinement_brush, &mut other.refinement_brush);
+        std::mem::swap(&mut self.refinement_mask, &mut other.refinement_mask);
+        std::mem::swap(&mut self.refinement_mask_texture, &mut other.refinement_mask_texture);
         std::mem::swap(&mut self.generation_batch_settings, &mut other.generation_batch_settings);
         std::mem::swap(
             &mut self.generation_selected,
