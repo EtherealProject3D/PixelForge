@@ -436,6 +436,13 @@ fn generation_dimensions(ratio: usize, resolution: usize) -> (u32, u32) {
     )
 }
 
+#[derive(Clone)]
+struct EditVersion {
+    global: adjustments::Adjustments,
+    local: adjustments::Adjustments,
+    mask: Option<masking::SelectionMask>,
+}
+
 struct PixelForge {
     inactive_tabs: Vec<(usize, Box<PixelForge>)>,
     active_tab: usize,
@@ -602,6 +609,7 @@ struct PixelForge {
     status: String,
     project_path: Option<PathBuf>,
     project_dirty: bool,
+    edit_versions: Vec<EditVersion>,
     pending_open: Option<PendingOpen>,
     exit_confirmation: bool,
     exit_allowed: bool,
@@ -767,6 +775,7 @@ impl Default for PixelForge {
             status: "Ready".into(),
             project_path: None,
             project_dirty: false,
+            edit_versions: Vec::new(),
             pending_open: None,
             exit_confirmation: false,
             exit_allowed: false,
@@ -775,6 +784,32 @@ impl Default for PixelForge {
 }
 
 impl PixelForge {
+    fn current_adjustments(&self) -> adjustments::Adjustments {
+        adjustments::Adjustments {
+            brightness: self.brightness, contrast: self.contrast,
+            exposure: self.exposure, saturation: self.saturation,
+            temperature: self.temperature, tint: self.tint,
+            highlights: self.highlights, shadows: self.shadows,
+            whites: self.whites, blacks: self.blacks,
+            vibrance: self.vibrance, gamma: self.gamma,
+        }
+    }
+
+    fn set_current_adjustments(&mut self, a: adjustments::Adjustments) {
+        self.brightness = a.brightness;
+        self.contrast = a.contrast;
+        self.exposure = a.exposure;
+        self.saturation = a.saturation;
+        self.temperature = a.temperature;
+        self.tint = a.tint;
+        self.highlights = a.highlights;
+        self.shadows = a.shadows;
+        self.whites = a.whites;
+        self.blacks = a.blacks;
+        self.vibrance = a.vibrance;
+        self.gamma = a.gamma;
+    }
+
     fn open_image(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
@@ -810,6 +845,7 @@ impl PixelForge {
                 self.ai_inspect_texture = None;
                 self.ai_result_path = None;
                 self.original_pixels = Some(rgba);
+                self.edit_versions.clear();
                 self.prepare_preview_source();
                 self.project_path = None;
                 self.saved_selections.clear();
@@ -1914,6 +1950,7 @@ impl PixelForge {
         self.texture = None;
         self.processed_texture = None;
         self.original_pixels = None;
+        self.edit_versions.clear();
         self.histogram = histogram::Histogram::default();
         self.preview_source = None;
         self.preview_rx = None;
@@ -2173,6 +2210,7 @@ impl PixelForge {
         self.texture = Some(ctx.load_texture("current_image", color, TextureOptions::LINEAR));
 
         self.original_pixels = Some(data.pixels);
+        self.edit_versions.clear();
         self.prepare_preview_source();
         self.processed_texture = None;
 
@@ -4144,6 +4182,49 @@ impl PixelForge {
             std::mem::swap(&mut self.vibrance, &mut self.selection_adjustments.vibrance);
             std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
         }
+        ui.collapsing("Edit Versions", |ui| {
+            ui.label("Save adjustment checkpoints without copying the original image.");
+            if ui.button("Save Current Version").clicked() {
+                let current = self.current_adjustments();
+                let (global, local) = if self.selection_adjustment_target {
+                    (self.selection_adjustments, current)
+                } else {
+                    (current, self.selection_adjustments)
+                };
+                self.edit_versions.push(EditVersion {
+                    global, local, mask: self.selection_mask.clone(),
+                });
+                self.project_dirty = true;
+            }
+            let mut restore = None;
+            for index in 0..self.edit_versions.len() {
+                ui.horizontal(|ui| {
+                    ui.label(format!("Version {}", index + 1));
+                    if ui.button("Restore").clicked() {
+                        restore = Some(index);
+                    }
+                });
+            }
+            if let Some(index) = restore {
+                let version = self.edit_versions[index].clone();
+                let active = if self.selection_adjustment_target {
+                    version.local
+                } else {
+                    version.global
+                };
+                self.set_current_adjustments(active);
+                self.selection_adjustments = if self.selection_adjustment_target {
+                    version.global
+                } else {
+                    version.local
+                };
+                self.selection_mask = version.mask;
+                self.project_dirty = true;
+                self.update_processed_image(ui.ctx());
+                self.refresh_selection_overlay(ui.ctx());
+            }
+            ui.small("Session-only history; project persistence is planned for Stage 3.6.5.");
+        });
         let mut preview_needs_refresh = false;
         let before_adjustments = [
             self.brightness,
