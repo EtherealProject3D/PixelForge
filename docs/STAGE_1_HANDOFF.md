@@ -18,9 +18,7 @@ preparing the backend. Technical settings remain collapsed.
 The edit-model dropdown can follow the generation checkpoint or choose a different
 installed SDXL checkpoint. The resolved name is displayed before editing, saved in
 result metadata, and the independent selection is saved with the Studio project.
-Older projects default to following the generation model. This is a checkpoint
-selector for the current SDXL img2img/inpainting workflow, not support for arbitrary
-dedicated instruction-edit model architectures. Initial prompt text remains intact
+Older projects default to following the generation model. The selector now also exposes Qwen-Image-Edit 2509 (FP8), a separate instruction-edit pipeline. See QWEN_EDIT_SETUP.md and scripts/Install-QwenEdit.ps1 for the three model files and setup checks. Initial prompt text remains intact
 when applying changes. Less common actions remain under More.
 
 The first message creates one image; subsequent messages use the selected gallery
@@ -38,8 +36,7 @@ Save/open the Generation Studio project to preserve images, prompts, lineage,
 selection and comparison state. Existing PXG1 files remain compatible; no format
 migration is needed. The unsent composer draft is session-only.
 
-Stage 1 uses SDXL CLIP guidance and img2img, not a language-model interpreter or
-a dedicated instruction-following image editor. Prompt context accumulates from
+SDXL refinement uses CLIP guidance and img2img. The separate Qwen Edit option uses image-conditioned instruction encoding instead. No conversational language-model interpreter is included. Prompt context accumulates from
 the source version; long or contradictory instructions may reduce quality because
 CLIP has limited context. Describe the desired visual result and adjust strength.
 Whole-image editing may change other details. Use existing masked refinement for
@@ -80,11 +77,11 @@ cargo test --locked
    export metadata, cancellation and an unavailable backend followed by retry.
 8. Check layout at your normal window size and display scaling.
 
-Validation performed: Windows Rust debug build and 59 automated tests passed,
-including edit-model routing and new prompt/metadata and branched gallery project roundtrip tests.
+Validation performed: Windows Rust debug build and 61 automated tests passed,
+including dedicated Qwen graph/setup validation, edit-model routing and new prompt/metadata and branched gallery project roundtrip tests.
 Cargo.lock was synchronized with the already-declared backend dependencies;
 the previous lock omitted several required packages. Existing compiler warnings
-remain. The rebuilt Windows app was launched and the empty Studio layout was visually checked: a single bottom composer, right-side versions/settings and no misleading editor image status. Populated layout, real ComfyUI/GPU generation, model quality, VRAM usage, and release execution were not verified. Keep the feature branch unmerged until
+remain. The v0.5.1-stage1 Windows build was launched and visually checked: Initial prompt and Changes prompt both visible in the right sidebar, Qwen available in the edit dropdown, collapsed technical settings and no misleading editor image status. The top controls occupy two compact rows when an image is selected. A two-image fixture was also opened to verify the populated canvas, compact toolbar and bottom thumbnails. Required Qwen nodes were checked against the installed ComfyUI object_info schema. Actual Qwen/GPU edits, model quality, VRAM use and release execution remain unverified. Keep the feature branch unmerged until
 those manual checks pass.
 
 ## Continue development or return to the saved version

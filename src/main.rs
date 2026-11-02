@@ -114,7 +114,7 @@ mod native_window {
     }
 
     fn handle() -> *mut c_void {
-        let title: Vec<u16> = "PixelForge v0.5.0-dev".encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = "PixelForge v0.5.1-stage1".encode_utf16().chain(Some(0)).collect();
         unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
     }
 
@@ -1183,7 +1183,9 @@ impl PixelForge {
         }
         let checkpoint = editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, self.refinement_source.is_some()).to_owned();
         let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].1;
-        let prompt = if self.refinement_source.is_some() {
+        let prompt = if checkpoint == ai_generation::QWEN_EDIT {
+            self.refinement_prompt.clone()
+        } else if self.refinement_source.is_some() {
             // CLIP is not an instruction-following editor: retain scene context,
             // then append the requested correction as guidance.
             let base = self.generation_prompt.trim();
@@ -1206,8 +1208,8 @@ impl PixelForge {
             resolution: self.generation_resolution,
             width: self.generation_width,
             height: self.generation_height,
-            steps: self.generation_steps,
-            cfg: self.generation_cfg,
+            steps: if checkpoint == ai_generation::QWEN_EDIT { 20 } else { self.generation_steps },
+            cfg: if checkpoint == ai_generation::QWEN_EDIT { 4.0 } else { self.generation_cfg },
             seed: self.generation_seed,
             refine_parent: self.refinement_source,
             refine_strength: self.refinement_source.map(|_| self.refinement_strength),
@@ -1224,8 +1226,8 @@ impl PixelForge {
             } else {self.generation_negative.clone()},
             width: self.generation_width,
             height: self.generation_height,
-            steps: self.generation_steps,
-            cfg: self.generation_cfg,
+            steps: if checkpoint == ai_generation::QWEN_EDIT { 20 } else { self.generation_steps },
+            cfg: if checkpoint == ai_generation::QWEN_EDIT { 4.0 } else { self.generation_cfg },
             seed: self.generation_seed,
             source: self.refinement_source.and_then(|index|self.generation_gallery.get(index)).map(|item|item.pixels.clone()),
             denoise: self.refinement_strength,
@@ -1360,6 +1362,8 @@ impl PixelForge {
                 let mut settings = self.generation_batch_settings.clone()
                     .expect("running batch has generation settings");
                 settings.seed = seed;
+                settings.width = image.width();
+                settings.height = image.height();
                 self.generation_gallery.push(GeneratedItem {
                     settings,
                     pixels: image,
@@ -1865,15 +1869,23 @@ impl PixelForge {
         ui.heading("Changes prompt");
         egui::ComboBox::from_id_salt("edit_model").selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
             ui.selectable_value(&mut self.edit_checkpoint, String::new(), "Use generation model");
+            ui.selectable_value(&mut self.edit_checkpoint, ai_generation::QWEN_EDIT.into(), ai_generation::QWEN_EDIT);
             for model in &self.generation_checkpoints { ui.selectable_value(&mut self.edit_checkpoint, model.clone(), model); }
         });
         ui.label(format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
-        ui.small("Choose an installed SDXL checkpoint. Edits use image-to-image guidance; Edit Area limits changes to a painted region.");
+        if self.edit_checkpoint == ai_generation::QWEN_EDIT {
+            ui.small("Instruction-based editing · 20 steps · CFG 4 · whole image");
+            ui.hyperlink_to("Qwen model setup", "https://comfyanonymous.github.io/ComfyUI_examples/qwen_image/");
+        } else {
+            ui.small("SDXL image-to-image refinement. Choose Qwen Edit for instruction-based editing.");
+        }
         ui.add(egui::TextEdit::multiline(&mut self.conversation_draft).hint_text("Describe changes to the viewed image…").desired_width(f32::INFINITY).desired_rows(4));
         let has_image = self.generation_gallery.get(self.generation_selected).is_some();
         if has_image { ui.label(format!("Editing version {} · earlier versions are kept", self.generation_selected+1)); }
         else { ui.label("Create or import an image before applying changes."); }
-        ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Change strength"));
+        if self.edit_checkpoint != ai_generation::QWEN_EDIT {
+            ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Change strength"));
+        }
         let ready = has_image && !self.generation_running && !self.conversation_draft.trim().is_empty() && !editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true).is_empty();
         if ui.add_enabled(ready, egui::Button::new("Apply Edit").fill(ui.visuals().selection.bg_fill)).clicked() { self.submit_conversation(ui.ctx(), true); }
         self.show_generation_progress(ui);
@@ -1882,14 +1894,14 @@ impl PixelForge {
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.heading("Image Studio");
+            ui.strong("Image Studio · Stage 1");
             if ui.button("Import").clicked() { self.import_generation_images(ui.ctx()); }
             if ui.add_enabled(!self.generation_running, egui::Button::new("Save Project")).clicked() { self.save_generation_project(false); }
             if ui.add_enabled(!self.generation_gallery.is_empty(), egui::Button::new("Export Image")).clicked() { self.export_generation_selected(image::ImageFormat::Png, "png"); }
             if ui.button("Return to Editor").clicked() { self.generation_workspace = false; }
         });
         if self.generation_gallery.is_empty() {
-            ui.centered_and_justified(|ui| { ui.label("Describe an image below, or import one to start editing."); });
+            ui.centered_and_justified(|ui| { ui.label("Describe an image in the right sidebar, or import one to start editing."); });
             return;
         }
         let count = self.generation_gallery.len();
@@ -1915,6 +1927,16 @@ impl PixelForge {
                     self.generation_compare = false;
                 }
             }
+            if ui.button("Fit").clicked() {
+                self.generation_zoom = 1.0;
+                self.generation_pan = Vec2::ZERO;
+            }
+            if ui.button("−").clicked() {
+                self.generation_zoom = (self.generation_zoom / 1.25).max(0.1);
+            }
+            if ui.button("+").clicked() {
+                self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);
+            }
             ui.menu_button("More", |ui| {
                 if ui.button("Open in Editor").clicked() {
                     self.generation_image = Some(self.generation_gallery[self.generation_selected].pixels.clone());
@@ -1926,7 +1948,7 @@ impl PixelForge {
                 self.generation_prompt = s.prompt;
                 self.generation_negative = s.negative;
                 self.generation_auto_negative = s.auto_negative;
-                self.generation_checkpoint = s.checkpoint;
+                if s.checkpoint == ai_generation::QWEN_EDIT { self.edit_checkpoint = s.checkpoint; } else { self.generation_checkpoint = s.checkpoint; }
                 self.generation_style = s.style;
                 self.generation_size = s.ratio;
                 self.generation_custom_size = s.custom_size;
@@ -1958,29 +1980,13 @@ impl PixelForge {
         if self.generation_gallery.is_empty() { return; }
         if self.refinement_source == Some(self.generation_selected) && self.refinement_masked {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Paint the area to change, then describe the result below and Apply Edit.");
+                ui.label("Paint the area to change, then use the Changes prompt on the right and Apply Edit.");
                 ui.add(egui::Slider::new(&mut self.refinement_brush, 4.0..=150.0).text("Brush size"));
                 if ui.button("Clear Area").clicked() { self.refinement_mask.fill(0); self.refinement_mask_texture = None; }
             });
         }
-        ui.horizontal(|ui| {
-            if ui.button("Fit").clicked() {
-                self.generation_zoom = 1.0;
-                self.generation_pan = Vec2::ZERO;
-            }
-            if ui.button("−").clicked() {
-                self.generation_zoom = (self.generation_zoom / 1.25).max(0.1);
-            }
-            if ui.button("+").clicked() {
-                self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);
-            }
-            ui.label(format!(
-                "Zoom {:.0}% of fit | Scroll to zoom, drag to pan",
-                self.generation_zoom * 100.0
-            ));
-        });
         let available = ui.available_size();
-        // The composer is reserved by the bottom panel before the canvas.
+        // Reserve only the filmstrip; image uses all remaining canvas space.
         let viewer_height = (available.y - 104.0).max(1.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
@@ -6636,7 +6642,7 @@ fn main() -> eframe::Result {
         height: icon_image.height(),
     };
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("PixelForge v0.5.0-dev")
+        .with_title("PixelForge v0.5.1-stage1")
         .with_icon(icon_data)
         .with_min_inner_size([800.0, 500.0]);
     if let Some(saved) = WindowPlacement::load() {

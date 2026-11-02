@@ -17,6 +17,42 @@ pub struct Request {
     pub mask: Option<Vec<u8>>,
 }
 
+pub const QWEN_EDIT: &str = "Qwen-Image-Edit 2509 (FP8)";
+const QWEN_UNET: &str = "qwen_image_edit_2509_fp8_e4m3fn.safetensors";
+const QWEN_CLIP: &str = "qwen_2.5_vl_7b_fp8_scaled.safetensors";
+const QWEN_VAE: &str = "qwen_image_vae.safetensors";
+
+fn qwen_workflow(filename: &str, prompt: &str, seed: u64) -> Value {
+    json!({
+        "1":{"class_type":"UNETLoader","inputs":{"unet_name":QWEN_UNET,"weight_dtype":"default"}},
+        "2":{"class_type":"CLIPLoader","inputs":{"clip_name":QWEN_CLIP,"type":"qwen_image","device":"default"}},
+        "3":{"class_type":"VAELoader","inputs":{"vae_name":QWEN_VAE}},
+        "4":{"class_type":"LoadImage","inputs":{"image":filename}},
+        "9":{"class_type":"FluxKontextImageScale","inputs":{"image":["4",0]}},
+        "10":{"class_type":"TextEncodeQwenImageEditPlus","inputs":{"clip":["2",0],"vae":["3",0],"image1":["9",0],"prompt":prompt}},
+        "11":{"class_type":"TextEncodeQwenImageEditPlus","inputs":{"clip":["2",0],"vae":["3",0],"image1":["9",0],"prompt":""}},
+        "12":{"class_type":"ModelSamplingAuraFlow","inputs":{"model":["1",0],"shift":3.0}},
+        "13":{"class_type":"CFGNorm","inputs":{"model":["12",0],"strength":1.0,"pre_cfg":false}},
+        "8":{"class_type":"VAEEncode","inputs":{"pixels":["9",0],"vae":["3",0]}},
+        "5":{"class_type":"KSampler","inputs":{"model":["13",0],"positive":["10",0],"negative":["11",0],"latent_image":["8",0],"seed":seed,"steps":20,"cfg":4.0,"sampler_name":"euler","scheduler":"simple","denoise":1.0}},
+        "6":{"class_type":"VAEDecode","inputs":{"samples":["5",0],"vae":["3",0]}},
+        "7":{"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge_QwenEdit","images":["6",0]}}
+    })
+}
+
+fn validate_qwen_nodes(info: &Value) -> Result<(), String> {
+    for node in ["UNETLoader", "CLIPLoader", "VAELoader", "FluxKontextImageScale", "TextEncodeQwenImageEditPlus", "ModelSamplingAuraFlow", "CFGNorm"] {
+        if info.get(node).is_none() { return Err(format!("Qwen Edit needs ComfyUI node {node}. Update ComfyUI; see docs/QWEN_EDIT_SETUP.md.")); }
+    }
+    for (node, input, file, folder) in [("UNETLoader","unet_name",QWEN_UNET,"diffusion_models"),("CLIPLoader","clip_name",QWEN_CLIP,"text_encoders"),("VAELoader","vae_name",QWEN_VAE,"vae")] {
+        let names = info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array);
+        if !names.is_some_and(|names| names.iter().any(|v| v.as_str() == Some(file))) {
+            return Err(format!("Qwen Edit file missing: models/{folder}/{file}. See docs/QWEN_EDIT_SETUP.md, install the files and restart ComfyUI. No SDXL fallback was used."));
+        }
+    }
+    Ok(())
+}
+
 fn client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(25))
@@ -125,6 +161,13 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         return Err("Dimensions must be multiples of 64, between 256 and 4096".into());
     }
     if cancel.load(Ordering::Relaxed) { return Err("Generation cancelled".into()); }
+    let qwen = request.checkpoint == QWEN_EDIT;
+    if qwen {
+        if request.source.is_none() { return Err("Qwen Edit requires an existing image. Use a generation checkpoint to create one first.".into()); }
+        if request.mask.is_some() { return Err("Qwen Edit currently edits the whole image. Cancel Area Edit or choose an SDXL checkpoint for masked inpainting.".into()); }
+        let info: Value = client()?.get(format!("{BASE}/object_info")).send().map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
+        validate_qwen_nodes(&info)?;
+    }
     let mut workflow = json!({
         "1": {"class_type":"CheckpointLoaderSimple","inputs":{"ckpt_name":request.checkpoint}},
         "2": {"class_type":"CLIPTextEncode","inputs":{"text":request.prompt,"clip":["1",1]}},
@@ -169,6 +212,10 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
             .json().map_err(|e|e.to_string())?;
         let stored = uploaded["name"].as_str().ok_or("ComfyUI did not return an uploaded filename")?;
         let subfolder = uploaded["subfolder"].as_str().unwrap_or("");
+        if qwen {
+            let filename = if subfolder.is_empty() { stored.to_owned() } else { format!("{subfolder}/{stored}") };
+            workflow = qwen_workflow(&filename, &request.prompt, request.seed);
+        } else {
         workflow["4"] = json!({"class_type":"LoadImage","inputs":{"image": if subfolder.is_empty(){stored.to_owned()}else{format!("{subfolder}/{stored}")}}});
         workflow["8"] = if request.mask.is_some() {
             json!({"class_type":"VAEEncodeForInpaint","inputs":{"pixels":["4",0],"vae":["1",2],"mask":["4",1],"grow_mask_by":6}})
@@ -183,6 +230,8 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         } else {
             request.denoise
         });
+        }
+
     }
     // Each generation has a private websocket client ID; ComfyUI emits actual sampler steps.
     let client_id = format!("pixelforge-{}-{}", std::process::id(),
@@ -260,5 +309,30 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
             if job.get("outputs").is_some() { return Err("ComfyUI finished without a saved image".into()); }
         }
         std::thread::sleep(Duration::from_millis(750));
+    }
+}
+
+#[cfg(test)]
+mod qwen_tests {
+    use super::*;
+    #[test]
+    fn instruction_editor_uses_image_conditioning_and_dedicated_loaders() {
+        let w = qwen_workflow("source.png", "Make the hat blue", 42);
+        assert_eq!(w["1"]["class_type"], "UNETLoader");
+        assert_eq!(w["10"]["inputs"]["prompt"], "Make the hat blue");
+        assert_eq!(w["10"]["inputs"]["image1"], json!(["9",0]));
+        assert_eq!(w["5"]["inputs"]["seed"], 42);
+        assert_eq!(w["5"]["inputs"]["steps"], 20);
+        assert_eq!(w["7"]["class_type"], "SaveImage");
+        assert!(!w.as_object().unwrap().values().any(|n| n["class_type"] == "CheckpointLoaderSimple"));
+    }
+    #[test]
+    fn setup_check_requires_nodes_and_all_three_models() {
+        assert!(validate_qwen_nodes(&json!({})).unwrap_err().contains("Update ComfyUI"));
+        let mut info = json!({});
+        for node in ["UNETLoader","CLIPLoader","VAELoader","FluxKontextImageScale","TextEncodeQwenImageEditPlus","ModelSamplingAuraFlow","CFGNorm"] { info[node] = json!({}); }
+        assert!(validate_qwen_nodes(&info).unwrap_err().contains(QWEN_UNET));
+        for (node,input,file) in [("UNETLoader","unet_name",QWEN_UNET),("CLIPLoader","clip_name",QWEN_CLIP),("VAELoader","vae_name",QWEN_VAE)] { info[node] = json!({"input":{"required":{input:[[file]]}}}); }
+        assert!(validate_qwen_nodes(&info).is_ok());
     }
 }
