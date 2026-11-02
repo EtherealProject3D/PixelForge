@@ -176,7 +176,13 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
             json!({"class_type":"VAEEncode","inputs":{"pixels":["4",0],"vae":["1",2]}})
         };
         workflow["5"]["inputs"]["latent_image"] = json!(["8",0]);
-        workflow["5"]["inputs"]["denoise"] = json!(request.denoise);
+        // Inpainting requires sufficient noise to replace unwanted objects.
+        // Whole-image img2img keeps the user's chosen strength unchanged.
+        workflow["5"]["inputs"]["denoise"] = json!(if request.mask.is_some() {
+            request.denoise.max(0.75)
+        } else {
+            request.denoise
+        });
     }
     // Each generation has a private websocket client ID; ComfyUI emits actual sampler steps.
     let client_id = format!("pixelforge-{}-{}", std::process::id(),
