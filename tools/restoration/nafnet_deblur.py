@@ -17,7 +17,7 @@ def main():
         import numpy as np
         import onnxruntime as ort
     except ImportError as exc:
-        raise RuntimeError("Install Python dependencies: py -m pip install opencv-python numpy "onnxruntime-gpu[cuda,cudnn]"") from exc
+        raise RuntimeError("Install Python dependencies: py -m pip install opencv-python numpy onnxruntime-gpu") from exc
     if not Path(args.model).is_file():
         raise FileNotFoundError(f"NAFNet ONNX model missing: {args.model}")
     image = cv2.imread(args.input, cv2.IMREAD_UNCHANGED)
