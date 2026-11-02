@@ -10,6 +10,7 @@ const MAGIC_V6: &[u8; 4] = b"PXF6";
 const MAGIC_V7: &[u8; 4] = b"PXF7";
 const MAGIC_V8: &[u8; 4] = b"PXF8";
 const MAGIC_V9: &[u8; 4] = b"PXF9";
+const MAGIC_V10: &[u8; 4] = b"PX10";
 const MAX_SELECTIONS: usize = 128;
 pub const MAX_VERSIONS: usize = 128;
 const MAX_SELECTION_NAME: usize = 256;
@@ -23,6 +24,7 @@ pub struct ProjectVersion {
     pub global: [f32; 12],
     pub local: [f32; 12],
     pub mask: Option<Vec<u8>>,
+    pub raster: Option<image::RgbaImage>,
 }
 
 pub struct Project {
@@ -80,7 +82,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
     }
 
     let mut data = Vec::new();
-    data.extend_from_slice(MAGIC_V9);
+    data.extend_from_slice(MAGIC_V10);
     data.extend_from_slice(&project.brightness.to_le_bytes());
     data.extend_from_slice(&project.contrast.to_le_bytes());
     data.extend_from_slice(&project.exposure.to_le_bytes());
@@ -171,7 +173,7 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
         if !valid_adjustments(&version.global) || !valid_adjustments(&version.local) {
             return Err("Invalid edit version adjustments".into());
         }
-        data.push(0); // Adjustment payload
+        data.push(if version.raster.is_some() { 1 } else { 0 });
         for value in version.global {
             data.extend_from_slice(&value.to_le_bytes());
         }
@@ -195,6 +197,18 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
             data.extend_from_slice(&encoded);
         } else {
             data.push(0);
+        }
+        if let Some(raster) = &version.raster {
+            if raster.dimensions() != project.pixels.dimensions() {
+                return Err("Image version dimensions mismatch".into());
+            }
+            let mut output = Cursor::new(Vec::new());
+            image::DynamicImage::ImageRgba8(raster.clone())
+                .write_to(&mut output, image::ImageFormat::Png)
+                .map_err(|e| e.to_string())?;
+            let encoded = output.into_inner();
+            data.extend_from_slice(&(encoded.len() as u64).to_le_bytes());
+            data.extend_from_slice(&encoded);
         }
     }
 
@@ -295,6 +309,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         && &version != MAGIC_V7
         && &version != MAGIC_V8
         && &version != MAGIC_V9
+        && &version != MAGIC_V10
     {
         return Err("Unsupported PixelForge project format".into());
     }
@@ -304,7 +319,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let (exposure, saturation) = if matches!(
         &version,
-        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9
+        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9 | MAGIC_V10
     ) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -316,7 +331,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let (temperature, tint) = if matches!(
         &version,
-        MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9
+        MAGIC_V3 | MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9 | MAGIC_V10
     ) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -326,7 +341,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (highlights, shadows) = if matches!(&version, MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9) {
+    let (highlights, shadows) = if matches!(&version, MAGIC_V4 | MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9 | MAGIC_V10) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -335,7 +350,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (whites, blacks) = if matches!(&version, MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9) {
+    let (whites, blacks) = if matches!(&version, MAGIC_V5 | MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9 | MAGIC_V10) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -344,7 +359,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
         (0.0, 0.0)
     };
 
-    let (vibrance, gamma) = if matches!(&version, MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9) {
+    let (vibrance, gamma) = if matches!(&version, MAGIC_V6 | MAGIC_V7 | MAGIC_V8 | MAGIC_V9 | MAGIC_V10) {
         (
             f32::from_le_bytes(read::<4>(&mut reader)?),
             f32::from_le_bytes(read::<4>(&mut reader)?),
@@ -402,7 +417,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
     if image_length == 0
         || image_length > MAX_BYTES
         || image_length > bytes.len() as u64 - reader.position()
-        || (&version != MAGIC_V7 && &version != MAGIC_V8 && &version != MAGIC_V9 && image_length != bytes.len() as u64 - reader.position())
+        || (&version != MAGIC_V7 && &version != MAGIC_V8 && &version != MAGIC_V9 && &version != MAGIC_V10 && image_length != bytes.len() as u64 - reader.position())
     {
         return Err("Invalid or incomplete embedded image".into());
     }
@@ -420,7 +435,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 
     let mut saved_selections = Vec::new();
 
-    if matches!(&version, MAGIC_V7 | MAGIC_V8 | MAGIC_V9) {
+    if matches!(&version, MAGIC_V7 | MAGIC_V8 | MAGIC_V9 | MAGIC_V10) {
         reader.set_position(image_end as u64);
 
         let count = u32::from_le_bytes(read::<4>(&mut reader)?) as usize;
@@ -481,7 +496,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
     let mut selection_adjustments = [0.0_f32; 12];
     let mut active_mask = None;
     let mut selection_target = false;
-    if matches!(&version, MAGIC_V8 | MAGIC_V9) {
+    if matches!(&version, MAGIC_V8 | MAGIC_V9 | MAGIC_V10) {
         for value in &mut selection_adjustments {
             *value = f32::from_le_bytes(read::<4>(&mut reader)?);
             if !value.is_finite() { return Err("Invalid selection adjustment".into()); }
@@ -512,13 +527,14 @@ pub fn load(path: &Path) -> Result<Project, String> {
     }
 
     let mut edit_versions = Vec::new();
-    if &version == MAGIC_V9 {
+    if &version == MAGIC_V9 || &version == MAGIC_V10 {
         let count = u32::from_le_bytes(read::<4>(&mut reader)?) as usize;
         if count > MAX_VERSIONS {
             return Err("Too many edit versions".into());
         }
         for _ in 0..count {
-            if read::<1>(&mut reader)?[0] != 0 {
+            let tag = read::<1>(&mut reader)?[0];
+            if tag > 1 || (tag == 1 && &version != MAGIC_V10) {
                 return Err("Unsupported edit version payload".into());
             }
             let mut global = [0.0_f32; 12];
@@ -553,7 +569,22 @@ pub fn load(path: &Path) -> Result<Project, String> {
                 }
                 _ => return Err("Invalid edit version mask flag".into()),
             };
-            edit_versions.push(ProjectVersion { global, local, mask });
+            let raster = if tag == 1 {
+                let length = u64::from_le_bytes(read::<8>(&mut reader)?);
+                if length == 0 || length > bytes.len() as u64 - reader.position() {
+                    return Err("Invalid image version length".into());
+                }
+                let begin = reader.position() as usize;
+                let end = begin.checked_add(length as usize).ok_or("Invalid image version length")?;
+                let rgba = image::load_from_memory_with_format(&bytes[begin..end], image::ImageFormat::Png)
+                    .map_err(|e| e.to_string())?.to_rgba8();
+                if rgba.dimensions() != pixels.dimensions() {
+                    return Err("Image version dimensions mismatch".into());
+                }
+                reader.set_position(end as u64);
+                Some(rgba)
+            } else { None };
+            edit_versions.push(ProjectVersion { global, local, mask, raster });
         }
         if reader.position() != bytes.len() as u64 {
             return Err("Unexpected trailing project data".into());
@@ -626,11 +657,13 @@ mod tests {
                     global: [12.0, -10.0, 1.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0],
                     local: [0.0; 12],
                     mask: Some(vec![0, 64, 128, 255]),
+                    raster: None,
                 },
                 ProjectVersion {
                     global: [0.0; 12],
                     local: [0.0, 8.0, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
                     mask: None,
+                    raster: Some(image::RgbaImage::from_pixel(2, 2, image::Rgba([90, 80, 70, 255]))),
                 },
             ],
         };
