@@ -1423,6 +1423,17 @@ impl PixelForge {
                         self.refinement_mask_texture=None;
                     }
                 }
+                ui.separator();
+                if ui.add_enabled(
+                    !self.generation_running && !self.generation_checkpoint.is_empty(),
+                    egui::Button::new("Generate Refinement")
+                ).clicked() {
+                    self.start_generation(&ctx);
+                }
+                if self.generation_running && ui.button("Cancel Refinement").clicked() {
+                    self.generation_cancel.store(true,std::sync::atomic::Ordering::Relaxed);
+                    self.generation_status="Cancelling refinement...".into();
+                }
                 if ui.button("Cancel Refinement Mode").clicked() {
                     self.refinement_source=None;
                     self.refinement_mask.clear();
@@ -1725,25 +1736,20 @@ impl PixelForge {
             ui.label("Seed");
             ui.add(egui::DragValue::new(&mut self.generation_seed));
         });
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(
+        if self.refinement_source.is_none() {
+            ui.horizontal(|ui| {
+                if ui.add_enabled(
                     !self.generation_running && !self.generation_checkpoint.is_empty(),
-                    egui::Button::new(if self.refinement_source.is_some() {"Generate Refinement"} else {"Generate"}),
-                )
-                .clicked()
-            {
-                self.start_generation(&ctx);
-            }
-            if ui
-                .add_enabled(self.generation_running, egui::Button::new("Cancel"))
-                .clicked()
-            {
-                self.generation_cancel
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                self.generation_status = "Cancelling generation...".into();
-            }
-        });
+                    egui::Button::new("Generate")
+                ).clicked() {
+                    self.start_generation(&ctx);
+                }
+                if self.generation_running && ui.button("Cancel").clicked() {
+                    self.generation_cancel.store(true,std::sync::atomic::Ordering::Relaxed);
+                    self.generation_status="Cancelling generation...".into();
+                }
+            });
+        }
         if !self.generation_gallery.is_empty() && ui.button("Open Generation Gallery").clicked() {
             self.generation_workspace = true;
         }
