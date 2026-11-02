@@ -2595,6 +2595,14 @@ impl PixelForge {
 
         let generation = generation_counter.fetch_add(1, Ordering::Relaxed) + 1;
 
+        // Never show an old low-resolution adjusted texture stretched over
+        // a full-resolution image while a new native-size render is pending.
+        if self.processed_texture.as_ref().is_some_and(|texture| {
+            texture.size() != [source.width() as usize, source.height() as usize]
+        }) {
+            self.processed_texture = None;
+        }
+
         let settings = adjustments::Adjustments {
             brightness: self.brightness,
             contrast: self.contrast,
@@ -5191,12 +5199,18 @@ impl PixelForge {
             ui.label(format!("{:.1}%", self.zoom * 100.0));
         });
 
-        if self.preview_rx.is_some() {
-            ui.horizontal(|ui| {
+        ui.horizontal(|ui| {
+            if self.preview_rx.is_some() {
                 ui.spinner();
                 ui.small("Rendering adjusted preview...");
-            });
-        }
+            }
+            if let Some(texture) = &self.processed_texture {
+                let size = texture.size();
+                ui.small(format!("Adjusted: {} x {} px", size[0], size[1]));
+            } else {
+                ui.small("Adjusted preview: pending");
+            }
+        });
         ui.separator();
 
         let available = ui.available_size();
