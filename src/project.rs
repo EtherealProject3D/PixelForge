@@ -731,7 +731,7 @@ mod tests {
         // PXF9 with zero versions is PXF8 plus a four-byte version count.
         let mut bytes = std::fs::read(&path).unwrap();
         bytes[0..4].copy_from_slice(MAGIC_V8);
-        bytes.truncate(bytes.len() - 4);
+        bytes.truncate(bytes.len() - 8);
         std::fs::write(&path, &bytes).unwrap();
         let loaded = load(&path).expect("PXF8 should load");
         std::fs::remove_file(&path).unwrap();
