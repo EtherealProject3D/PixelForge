@@ -2574,33 +2574,11 @@ impl PixelForge {
             return;
         };
 
-        // Keep enough detail for a sharp fitted preview on high-DPI / ultrawide
-        // displays. Adjustment rendering stays on the background worker.
-        // Cap texture size to avoid excessive VRAM use on very large images.
-        const MAX_PREVIEW_EDGE: u32 = 2048;
-
-        let width = original.width();
-        let height = original.height();
-        let longest = width.max(height);
-
-        let preview = if longest > MAX_PREVIEW_EDGE {
-            let scale = MAX_PREVIEW_EDGE as f64 / longest as f64;
-
-            let new_width = ((width as f64 * scale).round() as u32).max(1);
-            let new_height = ((height as f64 * scale).round() as u32).max(1);
-
-            image::imageops::resize(
-                original,
-                new_width,
-                new_height,
-                image::imageops::FilterType::Lanczos3,
-            )
-        } else {
-            original.clone()
-        };
-
-        self.histogram = histogram::Histogram::from_image(&preview);
-        self.preview_source = Some(std::sync::Arc::new(preview));
+        // Edit previews use the exact source dimensions. The GPU already
+        // displays the resulting egui texture; never downscale the edited
+        // side relative to the original before/after comparison.
+        self.histogram = histogram::Histogram::from_image(original);
+        self.preview_source = Some(std::sync::Arc::new(original.clone()));
     }
 
     fn update_processed_image(&mut self, ctx: &egui::Context) {
@@ -2610,10 +2588,8 @@ impl PixelForge {
             return;
         };
 
-        // Keep interactive adjustment rendering bounded. The previous
-        // full-image branch cloned and processed every source pixel (24 MP
-        // for a 6000x4000 photo), which could appear to hang indefinitely.
-        // A viewport-tiled 1:1 preview will be added separately.
+        // Process at native resolution on the background worker. GPU texture
+        // rendering remains hardware accelerated by egui/eframe.
         let source = std::sync::Arc::clone(original);
         let generation_counter = std::sync::Arc::clone(&self.preview_generation);
 
