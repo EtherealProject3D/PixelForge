@@ -4927,6 +4927,10 @@ impl PixelForge {
             std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
         }
         if preview_needs_refresh {
+            self.version_comparison = false;
+            self.version_texture_a = None;
+            self.version_texture_b = None;
+            self.comparison_enabled = false;
             self.update_processed_image(ui.ctx());
         }
     }
