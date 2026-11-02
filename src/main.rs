@@ -1828,15 +1828,6 @@ impl PixelForge {
                 self.open_generated_image(ui.ctx());
             }
         });
-        {
-            let s=&self.generation_gallery[self.generation_selected].settings;
-            ui.group(|ui| {
-                ui.strong("Selected Image Prompt");
-                if s.prompt.trim().is_empty() {ui.label("No prompt recorded (imported image)");}
-                else {ui.label(&s.prompt);}
-                if !s.negative.trim().is_empty() {ui.label(format!("Additional negative: {}",s.negative));}
-            });
-        }
         ui.collapsing("Selected Image Details", |ui| {
             let s = &self.generation_gallery[self.generation_selected].settings;
             ui.label(format!("Model: {}", s.checkpoint));
@@ -1865,7 +1856,7 @@ impl PixelForge {
         });
         let available = ui.available_size();
         let thumbnail_height = 110.0;
-        let viewer_height = (available.y - thumbnail_height - 10.0).max(120.0);
+        let viewer_height = (available.y - thumbnail_height - 145.0).max(120.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::drag(),
@@ -1935,6 +1926,18 @@ impl PixelForge {
                     }
                 });
             });
+        ui.separator();
+        ui.group(|ui| {
+            let settings=&self.generation_gallery[self.generation_selected].settings;
+            ui.strong("Selected Image Prompt");
+            egui::ScrollArea::vertical().max_height(100.0).show(ui, |ui| {
+                if settings.prompt.trim().is_empty() {ui.label("No prompt recorded (imported image)");}
+                else {ui.label(&settings.prompt);}
+                if !settings.negative.trim().is_empty() {
+                    ui.label(format!("Additional negative: {}",settings.negative));
+                }
+            });
+        });
     }
 
     // Keep Generation Studio alive across document changes; editor state belongs to each tab.
