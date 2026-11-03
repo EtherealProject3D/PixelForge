@@ -2,6 +2,7 @@
 
 mod adjustments;
 mod theme;
+mod profile;
 mod updater;
 mod ai_denoise;
 mod ai_generation;
@@ -75,7 +76,7 @@ struct WindowPlacement {
 
 impl WindowPlacement {
     fn path() -> Option<PathBuf> {
-        Some(PathBuf::from(std::env::var_os("APPDATA")?).join("PixelForge").join("window.cfg"))
+        Some(profile::settings_root()?.join("window.cfg"))
     }
 
     fn load() -> Option<Self> {
@@ -129,13 +130,12 @@ mod native_window {
     }
 
     fn handle() -> *mut c_void {
-        let title: Vec<u16> = concat!("PixelForge v", env!("CARGO_PKG_VERSION")).encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = crate::profile::window_title().encode_utf16().chain(Some(0)).collect();
         unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
     }
 
     fn path() -> Option<PathBuf> {
-        Some(PathBuf::from(std::env::var_os("APPDATA")?)
-            .join("PixelForge").join("window_native.cfg"))
+        Some(crate::profile::settings_root()?.join("window_native.cfg"))
     }
 
     pub fn restore() {
@@ -196,8 +196,7 @@ impl Default for Controls {
 
 impl Controls {
     fn config_path() -> Option<PathBuf> {
-        let base = std::env::var_os("APPDATA")?;
-        Some(PathBuf::from(base).join("PixelForge").join("controls.cfg"))
+        Some(profile::settings_root()?.join("controls.cfg"))
     }
 
     fn load() -> Self {
@@ -1003,12 +1002,7 @@ impl Default for PixelForge {
             show_settings: false,
             selection_tools_tab: false,
             generation_tools_tab: false,
-            ai_tools_tab: std::env::var_os("APPDATA")
-                .map(|base| {
-                    std::path::PathBuf::from(base)
-                        .join("PixelForge")
-                        .join("sidebar_tab.txt")
-                })
+            ai_tools_tab: profile::settings_root().map(|base|base.join("sidebar_tab.txt"))
                 .and_then(|path| std::fs::read_to_string(path).ok())
                 .map(|value| value.trim() == "ai")
                 .unwrap_or(false),
@@ -6637,8 +6631,7 @@ impl eframe::App for PixelForge {
                         self.selection_stroke_active = false;
                         self.panning = false;
 
-                        if let Some(base) = std::env::var_os("APPDATA") {
-                            let folder = std::path::PathBuf::from(base).join("PixelForge");
+                        if let Some(folder) = profile::settings_root() {
 
                             if std::fs::create_dir_all(&folder).is_ok() {
                                 let selected = if selection_clicked {
@@ -7006,7 +6999,7 @@ fn main() -> eframe::Result {
         height: icon_image.height(),
     };
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title(concat!("PixelForge v", env!("CARGO_PKG_VERSION")))
+        .with_title(profile::window_title())
         .with_icon(icon_data)
         .with_min_inner_size([800.0, 500.0]);
     if let Some(saved) = WindowPlacement::load() {

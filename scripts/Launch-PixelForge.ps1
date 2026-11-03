@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param()
 $ErrorActionPreference = 'Stop'
+$env:PIXELFORGE_DEV = '1'
 $repositoryRoot = Split-Path -Parent $PSScriptRoot
 $logPath = Join-Path $repositoryRoot 'target\launcher.log'
 try {
