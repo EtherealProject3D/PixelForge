@@ -1,6 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 mod adjustments;
+mod theme;
 mod ai_denoise;
 mod ai_generation;
 mod ai_restoration;
@@ -1961,7 +1962,7 @@ impl PixelForge {
     }
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Initial prompt");
+        theme::section(ui, "Initial prompt");
         let checkpoint_before_selection = self.generation_checkpoint.clone();
         egui::ComboBox::from_id_salt("initial_generation_model").width(ui.available_width()).truncate()
             .selected_text(if self.generation_checkpoint.is_empty() {
@@ -1996,11 +1997,11 @@ impl PixelForge {
             self.generation_status = format!("Applied recommended settings: {steps} steps, CFG {cfg:.1}. You can still adjust them manually.");
         }
         self.prompt_spelling.edit(ui,&mut self.generation_prompt,0,"Describe a new image…",4);
-        if ui.add_enabled(!self.generation_running && !self.ai_running && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty(), egui::Button::new("Create New Image")).clicked() {
+        if ui.add_enabled(!self.generation_running && !self.ai_running && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty(), theme::primary("Create New Image")).clicked() {
             self.submit_conversation(ui.ctx(), false);
         }
         ui.separator();
-        ui.heading("Negative prompt");
+        theme::section(ui, "Negative prompt");
         if self.generation_checkpoint==ai_generation::FLUX_KLEIN || editing_checkpoint(&self.generation_checkpoint,&self.edit_checkpoint,true)==ai_generation::FLUX_KLEIN {
             ui.label("FLUX Klein uses CFG 1: negative prompts do not affect its output.");
         }
@@ -2012,7 +2013,7 @@ impl PixelForge {
         }
         self.prompt_spelling.edit(ui,&mut self.generation_negative,2,"Additional negative prompts…",2);
         ui.separator();
-        ui.heading("Changes prompt");
+        theme::section(ui, "Changes prompt");
         egui::ComboBox::from_id_salt("edit_model").width(ui.available_width()).truncate().selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
             ui.selectable_value(&mut self.edit_checkpoint, String::new(), "Use generation model");
             for name in [ai_generation::QWEN_EDIT,ai_generation::QWEN_EDIT_2511,ai_generation::FLUX_KLEIN] {
@@ -2048,7 +2049,7 @@ impl PixelForge {
         let ready = has_image && !self.generation_running && !self.ai_running && !self.conversation_draft.trim().is_empty() && !editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true).is_empty();
         let has_selection = self.has_edit_selection();
         ui.horizontal_wrapped(|ui| {
-            if ui.add_enabled(ready, egui::Button::new("Apply Edit").fill(ui.visuals().selection.bg_fill)).on_hover_text("Edit the whole image").clicked() {
+            if ui.add_enabled(ready, theme::primary("Apply Edit")).on_hover_text("Edit the whole image").clicked() {
                 self.refinement_masked=false;
                 self.submit_conversation(ui.ctx(), true);
             }
@@ -4986,7 +4987,7 @@ impl PixelForge {
 
         let before_comparison = (self.comparison_enabled, self.comparison_position);
         ui.horizontal(|ui| {
-            ui.heading("Image Adjustments");
+            theme::section(ui, "Image Adjustments");
 
             let can_reset = self.brightness != 0.0
                 || self.contrast != 0.0
@@ -5410,7 +5411,7 @@ impl PixelForge {
             Some(ctx.load_texture("selection_mask_overlay", image, TextureOptions::LINEAR));
     }
     fn show_selection_sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Selection Tools");
+        theme::section(ui, "Selection Tools");
         ui.separator();
 
         if self.texture.is_none() {
@@ -5421,7 +5422,7 @@ impl PixelForge {
         // Keep a separate Context handle so column
         // closures do not borrow the parent Ui.
         let ctx = ui.ctx().clone();
-        ui.heading("Saved Selections");
+        theme::section(ui, "Saved Selections");
 
         if self.saved_selections.is_empty() {
             ui.small("No saved selections yet.");
@@ -5726,7 +5727,7 @@ impl PixelForge {
         // Smart Selection
         // ========================================
 
-        ui.heading("Smart Selection");
+        theme::section(ui, "Smart Selection");
 
         ui.add_enabled_ui(false, |ui| {
             ui.add_sized(
@@ -6374,6 +6375,8 @@ impl eframe::App for PixelForge {
                 ui.spacing_mut().combo_width=160.0;
                 ui.spacing_mut().slider_width=(ui.available_width()-150.0).max(60.0);
                 ui.horizontal_wrapped(|ui| {
+                    // Keep all four tool tabs compact at the existing sidebar width.
+                    ui.spacing_mut().button_padding = egui::vec2(4.0, 5.0);
                     let edit_clicked = ui
                         .selectable_label(!self.ai_tools_tab && !self.selection_tools_tab && !self.generation_tools_tab, "Edit")
                         .clicked();
@@ -6463,7 +6466,7 @@ impl eframe::App for PixelForge {
                             self.show_selection_sidebar(ui);
                         } else if !self.ai_tools_tab {
                             if self.texture.is_some() {
-                                ui.heading("Auto Enhance");
+                                theme::section(ui, "Auto Enhance");
 
                                 if ui
                                     .add_enabled(
@@ -6490,7 +6493,7 @@ impl eframe::App for PixelForge {
                             }
 
                         } else {
-                            ui.heading("AI Tools");
+                            theme::section(ui, "AI Tools");
                             ui.horizontal(|ui| {
                                                             ui.label("AI Result Strength");
 
@@ -6524,7 +6527,7 @@ impl eframe::App for PixelForge {
 
                                                         ui.label("Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
                             ui.separator();
-                            ui.heading("AI Upscaling");
+                            theme::section(ui, "AI Upscaling");
                             ui.separator();
                             ui.label("Real-ESRGAN");
                             if self.ai_gpus.is_empty() && self.ai_gpu_error.is_none() { self.refresh_vulkan_gpus(); }
@@ -6649,7 +6652,7 @@ impl eframe::App for PixelForge {
                             ui.add_space(12.0);
                             ui.separator();
 
-                            ui.heading("Restoration");
+                            theme::section(ui, "Restoration");
                             ui.label("Photo denoising (Waifu2x Vulkan)");
                             ui.add_enabled_ui(!self.ai_running && !self.ai_saving, |ui| {
                                 ui.label("Noise reduction");
@@ -6754,7 +6757,7 @@ impl eframe::App for PixelForge {
                 }
             });
         });
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().frame(egui::Frame::central_panel(&ctx.style()).fill(theme::CANVAS)).show(ctx, |ui| {
             if self.generation_workspace {
                 self.show_generation_workspace(ui);
             } else if self.ai_show_result {
@@ -6808,7 +6811,7 @@ fn main() -> eframe::Result {
         "PixelForge",
         options,
         Box::new(|cc| {
-            cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            theme::apply(&cc.egui_ctx);
             // A single readable default for all non-heading text, including small labels.
             cc.egui_ctx.style_mut(|style| {
                 style.spacing.icon_width=22.0;
