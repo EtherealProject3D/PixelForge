@@ -2016,14 +2016,8 @@ impl PixelForge {
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
         self.bind_workspace_editor(ui.ctx());
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("Image Studio");
-            if ui.button("Import").clicked() { self.import_generation_images(ui.ctx()); }
-            if ui.add_enabled(!self.generation_running, egui::Button::new("Save Project")).clicked() { self.save_generation_project(false); }
-            if ui.add_enabled(!self.generation_gallery.is_empty(), egui::Button::new("Export Image")).clicked() { self.export_generation_selected(image::ImageFormat::Png, "png"); }
-            if ui.add_enabled(!self.generation_running && !self.ai_running, egui::Button::new("Keep Edits as Version")).clicked() { self.keep_workspace_version(ui.ctx(), "Manual edits"); }
-        });
         if self.generation_gallery.is_empty() {
+            ui.strong("Image Studio");
             ui.centered_and_justified(|ui| { ui.label("Import an image, or choose Generate to create one."); });
             return;
         }
@@ -2031,6 +2025,8 @@ impl PixelForge {
         self.generation_selected = self.generation_selected.min(count-1);
         self.generation_compare_index = self.generation_compare_index.min(count-1);
         ui.horizontal_wrapped(|ui| {
+            ui.strong("Image Studio");
+            ui.separator();
             ui.strong(format!("Version {}", self.generation_selected+1));
             ui.small(format!("{} × {}", self.image_size[0],self.image_size[1]));
             ui.add_enabled(count > 1, egui::Checkbox::new(&mut self.generation_compare, "Compare"));
@@ -2219,6 +2215,16 @@ impl PixelForge {
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
         self.capture_workspace_editor();
         ui.separator();
+        let mut save_version=false;
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.strong("Versions");
+                save_version=ui.add_enabled(!self.generation_running && !self.ai_running,
+                    egui::Button::new("+ Save New Version"))
+                    .on_hover_text("Create a new thumbnail with the current adjustments. Earlier versions stay available for comparison or reverting. Use File > Save Project to save the whole history to disk.")
+                    .clicked();
+            });
+            ui.separator();
         egui::ScrollArea::horizontal().id_salt("studio_filmstrip").max_height(96.0).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (index, item) in self.generation_gallery.iter().enumerate() {
@@ -2238,6 +2244,8 @@ impl PixelForge {
             });
         });
 
+        });
+        if save_version {self.keep_workspace_version(ui.ctx(),"Manual edits");}
     }
 
     // Keep Generation Studio alive across document changes; editor state belongs to each tab.

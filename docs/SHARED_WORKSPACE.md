@@ -17,20 +17,22 @@ Open in Editor handoff, temporary generated PNG, or AI result screen in this flo
   successful result joins the common thumbnail history automatically. The source
   is pinned when the job starts. Further blend-strength choices can be kept as
   additional versions using Keep AI Blend as Version.
-- Keep Edits as Version creates a raster snapshot with a parent link, retaining
+- Save New Version, beside the bottom thumbnails, creates a raster snapshot with a parent link, retaining
   the previous source and settings. This replaces the separate manual parameter
   history controls in the shared workspace.
 - Export Image renders the viewed version with its adjustments. Save Project
   keeps original raster snapshots plus per-version global/local adjustments,
   active masks and named selections. Masks are run-length encoded and validated.
   Existing gallery files without this optional metadata still load. Older app
-  builds ignore the new editor metadata; Keep Edits as Version or export a flat
+  builds ignore the new editor metadata; Save New Version or export a flat
   image before sharing edited results with those builds.
 
 Save retains the existing project image/metadata size limits. Project-load errors
 reject invalid mask data instead of silently dropping edits. Native AI outputs
 that exceed available image/texture memory may fail to enter shared history;
 existing AI result files and Save Result remain available in that case.
+
+Import, Save Project and Export remain in the main menus; the canvas toolbar contains only image/view controls. Save New Version creates a snapshot in memory; File > Save Project writes the complete history to disk.
 
 ## Verification
 
