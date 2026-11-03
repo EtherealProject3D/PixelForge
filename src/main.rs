@@ -363,6 +363,13 @@ struct GeneratedItem {
     seed: u64,
 }
 
+impl GeneratedItem {
+    fn version_label(&self, index: usize) -> String {
+        if self.editor.name.trim().is_empty() {format!("Version {}", index+1)}
+        else {format!("{} · V{}", self.editor.name, index+1)}
+    }
+}
+
 const GENERATION_STYLES: &[(&str, &str)] = &[
     ("Default", ""),
     (
@@ -646,6 +653,7 @@ struct PixelForge {
     generation_compare: bool,
     generation_compare_position: f32,
     generation_compare_index: usize,
+    rename_version: Option<(usize, String)>,
     generation_workspace: bool,
     generation_prompt: String,
     generation_negative: String,
@@ -853,6 +861,7 @@ impl Default for PixelForge {
             generation_compare: false,
             generation_compare_position: 0.5,
             generation_compare_index: 0,
+            rename_version: None,
             generation_workspace: true,
             generation_prompt: String::new(),
             generation_negative: String::new(),
@@ -1479,7 +1488,7 @@ impl PixelForge {
         // The slider UI restores these banks before the shared canvas/save path.
         let (global,local) = (current,self.selection_adjustments);
         if let Some(item) = self.generation_gallery.get_mut(index) {
-            let editor = studio::EditorState {global,local,mask:self.selection_mask.clone(),saved_selections:self.saved_selections.clone()};
+            let editor = studio::EditorState {name:item.editor.name.clone(),global,local,mask:self.selection_mask.clone(),saved_selections:self.saved_selections.clone()};
             if item.editor!=editor {self.project_dirty=true;}
             item.editor=editor;
             if let Some(texture)=&self.processed_texture {item.texture=texture.clone();}
@@ -2143,18 +2152,18 @@ impl PixelForge {
         ui.horizontal_wrapped(|ui| {
             ui.strong("Image Studio");
             ui.separator();
-            ui.strong(format!("Version {}", self.generation_selected+1));
+            ui.strong(self.generation_gallery[self.generation_selected].version_label(self.generation_selected));
             ui.small(format!("{} × {}", self.image_size[0],self.image_size[1]));
             egui::ComboBox::from_id_salt("compare_left_version")
-                .selected_text(format!("Left: Version {}", self.generation_compare_index+1))
+                .selected_text(format!("Left: {}", self.generation_gallery[self.generation_compare_index].version_label(self.generation_compare_index)))
                 .show_ui(ui, |ui| {
-                    for index in 0..count { ui.selectable_value(&mut self.generation_compare_index, index, format!("Version {}", index+1)); }
+                    for index in 0..count { ui.selectable_value(&mut self.generation_compare_index, index, self.generation_gallery[index].version_label(index)); }
                 });
             ui.add_enabled(count > 1, egui::Checkbox::new(&mut self.generation_compare, "Compare"));
             egui::ComboBox::from_id_salt("compare_right_version")
-                .selected_text(format!("Right: Version {}", self.generation_selected+1))
+                .selected_text(format!("Right: {}", self.generation_gallery[self.generation_selected].version_label(self.generation_selected)))
                 .show_ui(ui, |ui| {
-                    for index in 0..count { ui.selectable_value(&mut self.generation_selected, index, format!("Version {}", index+1)); }
+                    for index in 0..count { ui.selectable_value(&mut self.generation_selected, index, self.generation_gallery[index].version_label(index)); }
                 });
             if self.has_edit_selection() {
                 ui.colored_label(egui::Color32::from_rgb(255,150,150),"Selection active");
@@ -2281,6 +2290,7 @@ impl PixelForge {
 
     fn remove_workspace_version(&mut self, removed:usize) {
         if self.generation_running || self.ai_running || removed>=self.generation_gallery.len() {return;}
+        self.rename_version=None;
         self.capture_workspace_editor();
         self.workspace_editor=None;
         self.original_pixels=None;
@@ -2323,6 +2333,7 @@ impl PixelForge {
         ui.separator();
         let mut save_version=false;
         let mut remove_version=None;
+        let mut rename_version=None;
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.strong("Versions");
@@ -2346,12 +2357,16 @@ impl PixelForge {
                             self.refinement_mask_texture=None;
                         }
                         response.context_menu(|ui| {
+                            if ui.button("Rename Version…").clicked() {
+                                rename_version=Some((index,item.editor.name.clone()));
+                                ui.close();
+                            }
                             if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Image Version")).clicked() {
                                 remove_version=Some(index);
                                 ui.close();
                             }
                         });
-                        ui.small(format!("Version {}", index+1));
+                        ui.add_sized([100.0,ui.text_style_height(&egui::TextStyle::Small)],egui::Label::new(egui::RichText::new(item.version_label(index)).small()).truncate()).on_hover_text(item.version_label(index));
                     });
                 }
             });
@@ -2360,10 +2375,30 @@ impl PixelForge {
         });
         if let Some(index)=remove_version {self.remove_workspace_version(index);}
         if save_version {self.keep_workspace_version(ui.ctx(),"Manual edits");}
+        if let Some(rename)=rename_version {self.rename_version=Some(rename);}
+        if let Some((index, mut name))=self.rename_version.take() {
+            let mut open=true;
+            let mut save=false;
+            let mut cancel=false;
+            egui::Window::new("Rename Version").collapsible(false).resizable(false).open(&mut open).show(ui.ctx(),|ui| {
+                ui.label("Version name (leave empty to use the version number)");
+                let response=ui.text_edit_singleline(&mut name);
+                if response.lost_focus() && ui.input(|i|i.key_pressed(egui::Key::Enter)) {save=true;}
+                ui.horizontal(|ui| {
+                    save |= ui.button("Save Name").clicked();
+                    cancel = ui.button("Cancel").clicked();
+                });
+                cancel |= ui.input(|i|i.key_pressed(egui::Key::Escape));
+            });
+            if save {
+                if let Some(item)=self.generation_gallery.get_mut(index) {item.editor.name=name.trim().chars().take(100).collect();self.project_dirty=true;}
+            } else if open && !cancel {self.rename_version=Some((index,name));}
+        }
     }
 
     // Keep Generation Studio alive across document changes; editor state belongs to each tab.
     fn swap_generation_state(&mut self, other: &mut PixelForge) {
+        std::mem::swap(&mut self.rename_version, &mut other.rename_version);
         std::mem::swap(&mut self.generation_style, &mut other.generation_style);
         std::mem::swap(&mut self.generation_size, &mut other.generation_size);
         std::mem::swap(

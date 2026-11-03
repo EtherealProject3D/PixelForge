@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 
 #[derive(Clone, Default)]
 pub struct EditorState {
+    pub name: String,
     pub global: adjustments::Adjustments,
     pub local: adjustments::Adjustments,
     pub mask: Option<masking::SelectionMask>,
@@ -11,7 +12,7 @@ pub struct EditorState {
 
 impl PartialEq for EditorState {
     fn eq(&self, other: &Self) -> bool {
-        crate::adjustment_values(self.global)==crate::adjustment_values(other.global)
+        self.name==other.name && crate::adjustment_values(self.global)==crate::adjustment_values(other.global)
             && crate::adjustment_values(self.local)==crate::adjustment_values(other.local)
             && self.mask==other.mask && self.saved_selections==other.saved_selections
     }
@@ -38,7 +39,7 @@ impl EditorState {
     }
 
     pub fn to_json(&self) -> Value {
-        json!({"global":crate::adjustment_values(self.global),"local":crate::adjustment_values(self.local),
+        json!({"name":self.name,"global":crate::adjustment_values(self.global),"local":crate::adjustment_values(self.local),
             "mask":self.mask.as_ref().map(encode_mask),
             "saved":self.saved_selections.iter().map(|(name,mask)|json!({"name":name,"mask":encode_mask(mask)})).collect::<Vec<_>>()})
     }
@@ -57,7 +58,7 @@ impl EditorState {
                 saved_selections.push((entry["name"].as_str().unwrap_or("Selection").to_owned(), decode_mask(&entry["mask"],width,height)?));
             }
         }
-        Ok(Self {global:adjustment(&value["global"] )?,local:adjustment(&value["local"] )?,
+        Ok(Self {name:value["name"].as_str().unwrap_or("").into(),global:adjustment(&value["global"] )?,local:adjustment(&value["local"] )?,
             mask:if value["mask"].is_null(){None}else{Some(decode_mask(&value["mask"],width,height)?)}, saved_selections})
     }
 }
@@ -89,6 +90,7 @@ mod tests {
     #[test]
     fn studio_state_roundtrip_retains_local_edits_and_named_selections() {
         let mut state = EditorState::default();
+        state.name="Restored photo".into();
         state.global.exposure=1.0;
         state.local.brightness=20.0;
         let mask=masking::SelectionMask::from_pixels(2,1,vec![255,0]).unwrap();
