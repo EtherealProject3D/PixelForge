@@ -1537,13 +1537,22 @@ impl PixelForge {
     }
 
     fn show_generation_sidebar(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
         if !self.generation_workspace {
             if ui.button("Open Image Studio").clicked() { self.generation_workspace = true; }
         }
         self.show_conversation(ui);
         ui.separator();
-        ui.collapsing("Generation settings", |ui| {
+        ui.collapsing("Generation settings", |ui| self.show_generation_settings(ui));
+        if self.generation_checkpoint.is_empty() {
+            ui.label("Connect a local model to begin.");
+            if ui.button("Connect Models").clicked() { self.refresh_generation_models(ui.ctx()); }
+        }
+
+    }
+
+    fn show_generation_settings(&mut self,ui:&mut egui::Ui) {
+        let ctx=ui.ctx().clone();
+        ui.spacing_mut().slider_width=(ui.available_width()-80.0).max(60.0);
         ui.checkbox(&mut self.prompt_spelling.enabled,"Check English spelling");
         ui.hyperlink_to("Qwen installation help (only needed for setup)", "https://comfyanonymous.github.io/ComfyUI_examples/qwen_image/");
         ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
@@ -1810,18 +1819,14 @@ impl PixelForge {
         });
         ui.checkbox(&mut self.generation_random_seeds, "Random seeds per image");
         ui.label("When disabled, seeds increment from the starting seed.");
-        ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
-        ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0).text("CFG"));
+        ui.label("Steps");
+        ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100));
+        ui.label("CFG");
+        ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0));
         ui.horizontal(|ui| {
             ui.label("Seed");
             ui.add(egui::DragValue::new(&mut self.generation_seed));
         });
-        });
-        if self.generation_checkpoint.is_empty() {
-            ui.label("Connect a local model to begin.");
-            if ui.button("Connect Models").clicked() { self.refresh_generation_models(&ctx); }
-        }
-
     }
 
     fn save_generation_project(&mut self, save_as:bool) {
@@ -1981,7 +1986,9 @@ impl PixelForge {
         ui.label(format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
         if self.edit_checkpoint == ai_generation::QWEN_EDIT {
             ui.small("Instruction-based editing · CFG 4");
-            ui.add(egui::Slider::new(&mut self.qwen_steps,1..=100).text("Qwen steps"))
+            ui.label("Qwen steps");
+            ui.spacing_mut().slider_width=(ui.available_width()-80.0).max(60.0);
+            ui.add(egui::Slider::new(&mut self.qwen_steps,1..=100))
                 .on_hover_text("20 is the default for the standard model. Fewer steps reduce sampling time but may reduce quality; model loading and encoding still take time.");
         } else {
             ui.small("SDXL image-to-image refinement. Choose Qwen Edit for instruction-based editing.");
@@ -1991,7 +1998,9 @@ impl PixelForge {
         if has_image { ui.label(format!("Editing version {} · earlier versions are kept", self.generation_selected+1)); }
         else { ui.label("Create or import an image before applying changes."); }
         if self.edit_checkpoint != ai_generation::QWEN_EDIT {
-            ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Change strength"));
+            ui.label("Change strength");
+            ui.spacing_mut().slider_width=(ui.available_width()-80.0).max(60.0);
+            ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0));
         }
         let ready = has_image && !self.generation_running && !self.ai_running && !self.conversation_draft.trim().is_empty() && !editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true).is_empty();
         let has_selection = self.has_edit_selection();
@@ -6307,7 +6316,7 @@ impl eframe::App for PixelForge {
                 ui.spacing_mut().icon_width=22.0;
                 ui.spacing_mut().icon_width_inner=16.0;
                 ui.spacing_mut().combo_width=160.0;
-                ui.spacing_mut().slider_width=(ui.available_width()-100.0).max(100.0);
+                ui.spacing_mut().slider_width=(ui.available_width()-150.0).max(60.0);
                 ui.horizontal_wrapped(|ui| {
                     let edit_clicked = ui
                         .selectable_label(!self.ai_tools_tab && !self.selection_tools_tab && !self.generation_tools_tab, "Edit")
@@ -6950,6 +6959,34 @@ mod workspace_tests {
             let input=egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1400.0,900.0))),..Default::default()};
             let output=ctx.run(input,|ctx| {egui::CentralPanel::default().show(ctx,|ui|app.show_generation_workspace(ui));});
             assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Mesh(mesh) if mesh.texture_id==overlay)),"Selection missing from tab {tab}");
+        }
+    }
+
+    #[test]
+    fn generation_controls_fit_narrow_sidebar_with_expanded_settings() {
+        let ctx=egui::Context::default();let mut app=PixelForge::default();
+        app.prompt_spelling.enabled=false;
+        app.edit_checkpoint=ai_generation::QWEN_EDIT.into();
+        app.generation_checkpoint="CyberRealisticPony_V18.0_F16.safetensors".into();
+        app.generation_custom_size=true;app.generation_unlock_dimensions=true;
+        for width in [270.0,300.0,330.0] {
+            let input=egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(width,2400.0))),..Default::default()};
+            let output=ctx.run(input,|ctx| {
+                egui::CentralPanel::default().show(ctx,|ui| {
+                    ui.style_mut().wrap_mode=Some(egui::TextWrapMode::Wrap);
+                    ui.style_mut().animation_time=0.0;
+                    for style in [egui::TextStyle::Body,egui::TextStyle::Button,egui::TextStyle::Small] {
+                        ui.style_mut().text_styles.get_mut(&style).unwrap().size=16.0;
+                    }
+                    ui.spacing_mut().icon_width=22.0;
+                    ui.spacing_mut().slider_width=width-100.0;
+                    let right=ui.max_rect().right();
+                    app.show_conversation(ui);
+                    ui.indent("expanded_settings",|ui|app.show_generation_settings(ui));
+                    assert!(ui.min_rect().right()<=right+1.0,"Sidebar width {width}: content right {} exceeds {right}",ui.min_rect().right());
+                });
+            });
+            assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Text(t) if t.galley.job.text=="CFG")),"Expanded settings were not rendered");
         }
     }
 

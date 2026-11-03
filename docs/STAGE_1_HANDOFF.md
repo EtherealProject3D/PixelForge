@@ -162,3 +162,15 @@ cannot correct semantic mismatch between independently generated regions.
 Validation: 78 tests pass and Windows debug build passes. Added regression tests
 for overlay rendering across tabs/comparison and gradual blending at hard edges.
 Live GPU image quality and native layout at user scaling still need acceptance.
+
+## Remaining generation-sidebar overflow fix
+
+Qwen steps, generation Steps/CFG, and Change strength now place their labels
+above the slider. Slider widths are calculated from their current container,
+including the indentation inside expanded Generation settings. Sidebar width
+and existing font sizes are unchanged. Generation-settings rendering is factored
+into one reusable function so its expanded content can be tested directly.
+
+Validation: 79 tests pass and Windows debug build passes. A layout regression
+renders Qwen plus expanded settings at 270, 300, and 330 logical pixels, verifies
+settings were drawn, and rejects content extending beyond the right boundary.
