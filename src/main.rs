@@ -22,6 +22,14 @@ use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 use std::path::PathBuf;
 
+fn restoration_preset_settings(preset: usize) -> (u32, f32) {
+    match preset {
+        1 => (2, 0.80),
+        2 => (0, 0.75),
+        _ => (1, 0.65),
+    }
+}
+
 /// Decode high-resolution PNG files for native AI inspection.
 fn load_inspection_png(path: &std::path::Path, label: &str) -> Result<image::RgbaImage, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("Cannot open {label}: {e}"))?;
@@ -671,6 +679,8 @@ struct PixelForge {
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
     ai_running: bool,
     ai_denoise_level: u32,
+    restoration_preset: usize,
+    restoration_strength: f32,
     ai_is_denoise: bool,
     ai_restoration: Option<ai_restoration::Operation>,
     ai_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -872,7 +882,9 @@ impl Default for PixelForge {
             install_folder_manual: false,
             ai_rx: None,
             ai_running: false,
-            ai_denoise_level: 2,
+            ai_denoise_level: 1,
+            restoration_preset: 0,
+            restoration_strength: 0.65,
             ai_is_denoise: false,
             ai_restoration: None,
             ai_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3633,6 +3645,56 @@ impl PixelForge {
         }
     }
 
+    fn show_photo_restoration(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        theme::section(ui, "Photo Restoration");
+        ui.label("Clean up the viewed photo. Each result becomes a new version at the original size.");
+        let ready = self.original_pixels.is_some() && !self.ai_running && !self.ai_saving
+            && !self.generation_running && !self.exporting && !self.dependency_manager.busy();
+        ui.add_enabled_ui(!self.ai_running, |ui| {
+            ui.label("Cleanup preset");
+            let before = self.restoration_preset;
+            egui::ComboBox::from_id_salt("restoration_preset").width(ui.available_width()).truncate()
+                .selected_text(["Gentle · preserve texture", "Grainy photo · reduce noise", "Soft photo · recover clarity"][self.restoration_preset.min(2)])
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.restoration_preset, 0, "Gentle · preserve texture");
+                    ui.selectable_value(&mut self.restoration_preset, 1, "Grainy photo · reduce noise");
+                    ui.selectable_value(&mut self.restoration_preset, 2, "Soft photo · recover clarity");
+                });
+            if before != self.restoration_preset {
+                let (noise, strength) = restoration_preset_settings(self.restoration_preset);
+                self.ai_denoise_level = noise;
+                self.restoration_strength = strength;
+            }
+            ui.label("Strength for next cleanup");
+            ui.spacing_mut().slider_width = (ui.available_width()-80.0).max(60.0);
+            ui.add(egui::Slider::new(&mut self.restoration_strength, 0.0..=1.0).custom_formatter(|v,_|format!("{:.0}%",v*100.0)));
+            ui.label("Noise reduction");
+            egui::ComboBox::from_id_salt("restoration_noise").width(ui.available_width()).truncate()
+                .selected_text(["Very light", "Light", "Medium", "Strong"][self.ai_denoise_level.min(3) as usize])
+                .show_ui(ui, |ui| {
+                    for (level, name) in ["Very light", "Light", "Medium", "Strong"].iter().enumerate() {
+                        ui.selectable_value(&mut self.ai_denoise_level, level as u32, *name);
+                    }
+                });
+        });
+        ui.label("1. Reduce grain and speckles");
+        if ui.add_enabled(ready, theme::primary("Denoise Photo")).on_hover_text("Waifu2x noise-only model; keeps the original dimensions.").clicked() {
+            self.start_ai_job(ctx, 1, true);
+        }
+        ui.label("2. Improve clarity if needed");
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(ready, egui::Button::new("Reduce Blur")).on_hover_text("NAFNet deblurring. Best for mild photographic blur; processing can take time.").clicked() {
+                self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Deblur));
+            }
+            if ui.add_enabled(ready, egui::Button::new("Sharpen Details")).on_hover_text("Real-ESRGAN assists luminance detail while preserving the original colors.").clicked() {
+                self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Sharpen));
+            }
+        });
+        ui.label("Try one step, then compare with the original using Compare above the image. Enlarge last using Upscaling below.");
+        if ui.button("Check Restoration Dependencies").clicked() { self.dependency_manager.open = true; }
+        ui.separator();
+    }
+
     fn start_ai_upscale(&mut self, ctx: &egui::Context, scale: u32) {
         self.start_ai_job(ctx, scale, false);
     }
@@ -3653,6 +3715,7 @@ impl PixelForge {
             return;
         }
 
+        self.bind_workspace_editor(ctx);
         self.capture_workspace_editor();
         let Some(original) = &self.original_pixels else {
             self.ai_status = "Open an image first".into();
@@ -3697,6 +3760,8 @@ impl PixelForge {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // A new cleanup uses its own requested strength, not the previous preview blend.
+        self.ai_strength = if denoise || restoration.is_some() { self.restoration_strength } else { 1.0 };
         self.ai_cancel = cancel.clone();
         self.ai_rx = Some(rx);
         self.workspace_ai_parent=self.workspace_editor;
@@ -3816,7 +3881,7 @@ impl PixelForge {
                     "AI upscale"
                 };
                 self.ai_status = format!(
-                    "{operation} complete: {} x {}. Not saved.",
+                    "{operation} complete: {} x {}.",
                     result.dimensions[0], result.dimensions[1]
                 );
 
@@ -3832,8 +3897,12 @@ impl PixelForge {
                 self.refresh_ai_preview(ctx);
                 self.ai_show_result = true;
                 if self.generation_workspace {
-                    if let Err(error)=self.append_ai_workspace_result(ctx,operation) {self.ai_status=error;}
+                    match self.append_ai_workspace_result(ctx,operation) {
+                        Ok(()) => self.ai_status.push_str(" Added to version history; save the project to keep it."),
+                        Err(error) => self.ai_status=error,
+                    }
                 }
+                self.status = self.ai_status.clone();
 
             }
             Err(error) => {
@@ -6508,7 +6577,7 @@ impl eframe::App for PixelForge {
                             }
 
                         } else {
-                            theme::section(ui, "AI Tools");
+                            self.show_photo_restoration(ui, ctx);
                             ui.horizontal(|ui| {
                                                             ui.label("AI Result Strength");
 
@@ -6528,7 +6597,7 @@ impl eframe::App for PixelForge {
                                                         ui.spacing_mut().slider_width = (ui.available_width() - 20.0).max(80.0);
 
                                                         if ui
-                                                            .add(
+                                                            .add_enabled(!self.ai_running,
                                                                 egui::Slider::new(&mut self.ai_strength, 0.0..=1.0)
                                                                     .step_by(0.05)
                                                                     .show_value(false),
@@ -6667,37 +6736,7 @@ impl eframe::App for PixelForge {
                             ui.add_space(12.0);
                             ui.separator();
 
-                            theme::section(ui, "Restoration");
-                            ui.label("Photo denoising (Waifu2x Vulkan)");
-                            ui.add_enabled_ui(!self.ai_running && !self.ai_saving, |ui| {
-                                ui.label("Noise reduction");
-                                egui::ComboBox::from_id_salt("sidebar_Noise_reduction").width(ui.available_width()).truncate()
-                                    .selected_text(match self.ai_denoise_level { 0 => "Very light", 1 => "Light", 2 => "Medium", _ => "Strong" })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut self.ai_denoise_level, 0, "Very light");
-                                        ui.selectable_value(&mut self.ai_denoise_level, 1, "Light");
-                                        ui.selectable_value(&mut self.ai_denoise_level, 2, "Medium");
-                                        ui.selectable_value(&mut self.ai_denoise_level, 3, "Strong");
-                                    });
-                                if ui.button("AI Denoise (Original Size)").clicked() {
-                                    self.start_ai_job(ctx, 1, true);
-                                }
-                            });
-                            ui.label("Requires waifu2x-ncnn-vulkan and its models-cunet folder in tools/waifu2x.");
 
-                            ui.separator();
-                            ui.label("AI Sharpen / Deblur");
-                            ui.add_enabled_ui(!self.ai_running && !self.ai_saving, |ui| {
-                                if ui.button("AI Sharpen").clicked() {
-                                    self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Sharpen));
-                                }
-                                if ui.button("AI Deblur").clicked() {
-                                    self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Deblur));
-                                }
-                            });
-                            ui.label("Sharpen uses Real-ESRGAN. Deblur uses NAFNet ONNX (Python/OpenCV); see AI_RESTORATION_RUNNERS.md.");
-
-                            ui.add_enabled(false, egui::Button::new("Restore Faces"));
                         }
                     });
             });
@@ -6865,6 +6904,15 @@ impl Drop for PixelForge {
 #[cfg(test)]
 mod conversation_tests {
     use super::*;
+    #[test]
+    fn photo_presets_favor_texture_and_keep_cleanup_strength_separate() {
+        assert_eq!(restoration_preset_settings(0), (1, 0.65));
+        assert_eq!(restoration_preset_settings(1), (2, 0.80));
+        assert_eq!(restoration_preset_settings(2), (0, 0.75));
+        let mut app = PixelForge::default();
+        app.ai_strength = 0.2;
+        assert_eq!(app.restoration_strength, 0.65);
+    }
     #[test]
     fn edit_model_selection_does_not_change_generation_model() {
         assert_eq!(editing_checkpoint("base.safetensors", "edit.safetensors", true), "edit.safetensors");

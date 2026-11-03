@@ -201,6 +201,7 @@ fn upscale_inner(
     // Drain stderr concurrently so Real-ESRGAN cannot block on a full pipe.
     // Keep a bounded diagnostic tail for reporting engine failures.
     let mut command = Command::new(engine);
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
     command.current_dir(engine_dir)
         .arg("-i").arg(&input)
         .arg("-o").arg(&output)

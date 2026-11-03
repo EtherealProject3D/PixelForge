@@ -51,6 +51,7 @@ pub fn denoise(
         original.save(&input).map_err(|e| format!("Cannot prepare denoise input: {e}"))?;
         if cancel.load(Ordering::Relaxed) { return Err("AI denoise cancelled".into()); }
         let mut command = Command::new(&engine);
+        #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
         command.current_dir(engine_dir)
             .arg("-i").arg(&input).arg("-o").arg(&output)
             .arg("-n").arg(level.to_string()).arg("-s").arg("1")
@@ -100,11 +101,12 @@ pub fn denoise(
             }
         }
         if cancel.load(Ordering::Relaxed) { return Err("AI denoise cancelled".into()); }
-        let denoised = image::open(&output)
+        let mut denoised = image::open(&output)
             .map_err(|e| format!("Cannot read AI denoise output: {e}"))?.to_rgba8();
         if denoised.dimensions() != original.dimensions() {
             return Err(format!("Denoise changed image dimensions: {:?} -> {:?}", original.dimensions(), denoised.dimensions()));
         }
+        crate::ai_restoration::preserve_alpha(&original, &mut denoised);
         let baseline_path = work.join("original.png");
         let ai_path = work.join("denoised.png");
         original.save(&baseline_path).map_err(|e| format!("Cannot save original comparison: {e}"))?;

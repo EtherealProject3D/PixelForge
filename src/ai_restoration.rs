@@ -7,6 +7,13 @@ use std::{io::Read, path::PathBuf, process::{Command, Stdio}, sync::{Arc, atomic
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation { Sharpen, Deblur }
 
+/// Restoration changes RGB detail, never the source photo's transparency.
+pub fn preserve_alpha(original: &RgbaImage, restored: &mut RgbaImage) {
+    for (source, target) in original.pixels().zip(restored.pixels_mut()) {
+        target[3] = source[3];
+    }
+}
+
 impl Operation {
     pub fn name(self) -> &'static str { match self { Self::Sharpen => "Sharpen", Self::Deblur => "Deblur" } }
     fn executable(self) -> &'static str { match self { Self::Sharpen => "sharpen.exe", Self::Deblur => "deblur.exe" } }
@@ -129,6 +136,7 @@ pub fn run(
         let output = work.join("output.png");
         original.save(&input).map_err(|e| format!("Cannot prepare AI restoration input: {e}"))?;
         let mut command=if let Some(python)=crate::dependencies::deblur_python() {Command::new(python)} else {let mut command=Command::new("py");command.arg("-3");command};
+        #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
         let mut process = command.arg(&script)
             .arg("--input").arg(&input).arg("--output").arg(&output)
             .arg("--model").arg(&model)
@@ -169,10 +177,11 @@ pub fn run(
             }
         }
         if cancel.load(Ordering::Relaxed) { return Err("AI restoration cancelled".into()); }
-        let restored = image::open(&output).map_err(|e| format!("Cannot decode neural restoration output: {e}"))?.to_rgba8();
+        let mut restored = image::open(&output).map_err(|e| format!("Cannot decode neural restoration output: {e}"))?.to_rgba8();
         if restored.dimensions() != original.dimensions() {
             return Err(format!("AI {} must preserve image dimensions", operation.name()));
         }
+        preserve_alpha(&original, &mut restored);
         let baseline_path = work.join("original.png");
         let ai_path = work.join("restored.png");
         original.save(&baseline_path).map_err(|e| e.to_string())?;
@@ -195,6 +204,16 @@ pub fn run(
 #[cfg(test)]
 mod sharpening_tests {
     use super::*;
+
+    #[test]
+    fn opaque_engine_output_keeps_source_transparency_and_restored_rgb() {
+        let source = RgbaImage::from_fn(3, 1, |x, _| image::Rgba([10, 20, 30, [0, 127, 255][x as usize]]));
+        let mut output = RgbaImage::from_pixel(3, 1, image::Rgba([40, 50, 60, 255]));
+        preserve_alpha(&source, &mut output);
+        for (x, pixel) in output.pixels().enumerate() {
+            assert_eq!(*pixel, image::Rgba([40, 50, 60, [0, 127, 255][x]]));
+        }
+    }
 
     #[test]
     fn flat_image_keeps_original_color_and_alpha() {
