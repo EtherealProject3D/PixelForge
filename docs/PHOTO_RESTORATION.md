@@ -1,6 +1,15 @@
 # Photo cleanup
 
 Open or import a photo, then choose **AI Tools > Photo Restoration**.
+**AI Restore** uses FLUX Klein by default, with Qwen 2509 and 2511 alternatives.
+Edit the supplied preservation-focused instructions and sampling steps, then choose
+**Restore Photo**. It runs the existing local ComfyUI editing pipeline against the
+viewed version, keeps source dimensions/orientation, and appends a new result without
+changing the left comparison reference. Models must be installed from Model Library.
+These controls are independent of the Generate prompts and model selection.
+Compare faces carefully: generative restoration can invent plausible fine detail.
+
+For targeted cleanup without instruction-based generation:
 Choose a starting preset, adjust the strength for the next cleanup if needed,
 and run one operation at a time:
 
@@ -28,5 +37,5 @@ retain that history. A failed/cancelled operation does not add a version.
 Use **Check Restoration Dependencies** to install or check the existing engines.
 The GPU and tile controls below apply to Waifu2x/Real-ESRGAN. NAFNet uses its separate
 Python runtime; large photos may take time. These tools cannot recover missing real
-details reliably. Selection-based generative damage repair and colorization are not
-part of this cleanup pass.
+details reliably. The AI Restore button processes the whole image; for selection-based
+generative damage repair, use Apply Edit to Selection on Generate.

@@ -681,6 +681,9 @@ struct PixelForge {
     ai_denoise_level: u32,
     restoration_preset: usize,
     restoration_strength: f32,
+    restoration_prompt: String,
+    restoration_model: String,
+    restoration_steps: u32,
     ai_is_denoise: bool,
     ai_restoration: Option<ai_restoration::Operation>,
     ai_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -885,6 +888,9 @@ impl Default for PixelForge {
             ai_denoise_level: 1,
             restoration_preset: 0,
             restoration_strength: 0.65,
+            restoration_prompt: "Restore this photograph. Reduce grain, compression artifacts, and blur. Recover natural-looking detail while preserving the person's identity, facial features, expression, age, skin texture, clothing, composition, and original colors. Do not beautify, change facial proportions, or add objects.".into(),
+            restoration_model: ai_generation::FLUX_KLEIN.into(),
+            restoration_steps: 4,
             ai_is_denoise: false,
             ai_restoration: None,
             ai_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3690,11 +3696,58 @@ impl PixelForge {
         }
     }
 
+    fn submit_photo_restoration(&mut self, ctx: &egui::Context) {
+        if self.generation_running || self.ai_running || self.ai_saving || self.exporting || self.dependency_manager.busy() || self.restoration_prompt.trim().is_empty() { return; }
+        self.ensure_workspace(ctx);
+        if self.generation_gallery.is_empty() { return; }
+        // Reuse the normal local editing pipeline without overwriting Generate's controls.
+        let draft = std::mem::replace(&mut self.conversation_draft, self.restoration_prompt.clone());
+        let model = std::mem::replace(&mut self.edit_checkpoint, self.restoration_model.clone());
+        let negative = std::mem::take(&mut self.generation_negative);
+        let previous = (self.qwen_steps, self.flux_steps, self.refinement_masked,
+            self.generation_width, self.generation_height, self.generation_custom_size, self.generation_unlock_dimensions);
+        self.qwen_steps = self.restoration_steps;
+        self.flux_steps = self.restoration_steps;
+        self.refinement_masked = false;
+        self.submit_conversation(ctx, true);
+        self.conversation_draft = draft;
+        self.edit_checkpoint = model;
+        self.generation_negative = negative;
+        (self.qwen_steps, self.flux_steps, self.refinement_masked,
+            self.generation_width, self.generation_height, self.generation_custom_size, self.generation_unlock_dimensions) = previous;
+    }
+
     fn show_photo_restoration(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         theme::section(ui, "Photo Restoration");
         ui.label("Clean up the viewed photo. Each result becomes a new version at the original size.");
         let ready = self.original_pixels.is_some() && !self.ai_running && !self.ai_saving
             && !self.generation_running && !self.exporting && !self.dependency_manager.busy();
+        theme::section(ui, "AI Restore");
+        ui.label("Restore a grainy or damaged photo with FLUX or Qwen. Fine details may be reconstructed; compare faces with the original.");
+        ui.add_enabled_ui(!self.generation_running && !self.ai_running, |ui| {
+            ui.label("Restoration model");
+            let previous = self.restoration_model.clone();
+            egui::ComboBox::from_id_salt("photo_restoration_model").width(ui.available_width()).truncate()
+                .selected_text(&self.restoration_model).show_ui(ui, |ui| {
+                    for model in [ai_generation::FLUX_KLEIN, ai_generation::QWEN_EDIT, ai_generation::QWEN_EDIT_2511] {
+                        ui.selectable_value(&mut self.restoration_model, model.into(), model);
+                    }
+                });
+            if previous != self.restoration_model {
+                self.restoration_steps = if self.restoration_model == ai_generation::FLUX_KLEIN {4} else if self.restoration_model == ai_generation::QWEN_EDIT {20} else {40};
+            }
+            ui.label("Restoration instructions");
+            self.prompt_spelling.edit(ui, &mut self.restoration_prompt, 3, "Describe how to restore this photo…", 4);
+            ui.label("Sampling steps");
+            ui.spacing_mut().slider_width = (ui.available_width()-80.0).max(60.0);
+            ui.add(egui::Slider::new(&mut self.restoration_steps, 1..=100));
+        });
+        if ui.add_enabled(ready && !self.restoration_prompt.trim().is_empty(), theme::primary("Restore Photo")).clicked() {
+            self.submit_photo_restoration(ctx);
+        }
+        ui.label("Uses the viewed version and keeps its size and orientation. The result is added to the right side of Compare.");
+        ui.separator();
+        ui.strong("Targeted cleanup");
         ui.add_enabled_ui(!self.ai_running, |ui| {
             ui.label("Cleanup preset");
             let before = self.restoration_preset;
@@ -6985,6 +7038,22 @@ mod conversation_tests {
 #[cfg(test)]
 mod workspace_tests {
     use super::*;
+    #[test]
+    fn restoration_panel_renders_with_independent_prompt_and_model() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.generation_prompt = "A landscape".into();
+        app.conversation_draft = "Change the sky".into();
+        app.edit_checkpoint = ai_generation::QWEN_EDIT.into();
+        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(320.0,1200.0))), ..Default::default() };
+        let output = ctx.run(input, |ctx| {egui::CentralPanel::default().show(ctx, |ui| app.show_photo_restoration(ui, ctx));});
+        assert!(!output.shapes.is_empty());
+        assert_eq!(app.restoration_model, ai_generation::FLUX_KLEIN);
+        assert_eq!(app.restoration_steps, 4);
+        assert_eq!(app.generation_prompt, "A landscape");
+        assert_eq!(app.conversation_draft, "Change the sky");
+        assert_eq!(app.edit_checkpoint, ai_generation::QWEN_EDIT);
+    }
     #[test]
     fn rotation_updates_in_place_and_subsequent_versions_keep_orientation() {
         let ctx = egui::Context::default();

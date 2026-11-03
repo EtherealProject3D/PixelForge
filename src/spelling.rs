@@ -31,7 +31,7 @@ impl Default for Field {
 }
 pub struct PromptSpelling {
     pub enabled: bool,
-    fields: [Field;3], service: Option<Service>, ignored: HashSet<String>,
+    fields: [Field;4], service: Option<Service>, ignored: HashSet<String>,
 }
 impl Default for PromptSpelling {
     fn default() -> Self {Self {enabled:true,fields:Default::default(),service:None,
