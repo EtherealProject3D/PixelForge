@@ -774,7 +774,6 @@ struct PixelForge {
     offset: Vec2,
     fit_pending: bool,
     panning: bool,
-    advanced: bool,
     show_settings: bool,
     ai_tools_tab: bool,
     generation_tools_tab: bool,
@@ -959,7 +958,6 @@ impl Default for PixelForge {
             offset: Vec2::ZERO,
             fit_pending: false,
             panning: false,
-            advanced: false,
             show_settings: false,
             selection_tools_tab: false,
             generation_tools_tab: false,
@@ -1572,38 +1570,6 @@ impl PixelForge {
         if ui.button("Connect / Refresh Models").clicked() {
             self.refresh_generation_models(&ctx);
         }
-        let checkpoint_before_selection = self.generation_checkpoint.clone();
-        egui::ComboBox::from_label("Checkpoint").width(220.0).truncate()
-            .selected_text(if self.generation_checkpoint.is_empty() {
-                "Select a checkpoint"
-            } else {
-                &self.generation_checkpoint
-            })
-            .show_ui(ui, |ui| {
-                for checkpoint in &self.generation_checkpoints {
-                    let lower = checkpoint.to_ascii_lowercase();
-                    let best_for = if lower.contains("realvis") {
-                        "Natural photography, portraits, landscapes"
-                    } else if lower.contains("juggernaut") {
-                        "Detailed images, cinematic scenes, dramatic lighting"
-                    } else if lower.contains("sd_xl_base") || lower.contains("sdxl_base") {
-                        "General-purpose images, illustration, prompt testing"
-                    } else {
-                        "Custom checkpoint"
-                    };
-                    ui.selectable_value(
-                        &mut self.generation_checkpoint,
-                        checkpoint.clone(),
-                        format!("{checkpoint} — {best_for}"),
-                    );
-                }
-            });
-        if self.generation_checkpoint != checkpoint_before_selection {
-            let (steps, cfg, _) = Self::recommended_generation_settings(&self.generation_checkpoint);
-            self.generation_steps = steps;
-            self.generation_cfg = cfg;
-            self.generation_status = format!("Applied recommended settings: {steps} steps, CFG {cfg:.1}. You can still adjust them manually.");
-        }
         let (recommended_steps, recommended_cfg, recommendation) =
             Self::recommended_generation_settings(&self.generation_checkpoint);
         ui.small(recommendation);
@@ -1977,19 +1943,54 @@ impl PixelForge {
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
         ui.heading("Initial prompt");
-        ui.label(format!("Generation model: {}", if self.generation_checkpoint.is_empty() { "Not selected" } else { &self.generation_checkpoint }));
+        let checkpoint_before_selection = self.generation_checkpoint.clone();
+        egui::ComboBox::from_id_salt("initial_generation_model").width(ui.available_width()).truncate()
+            .selected_text(if self.generation_checkpoint.is_empty() {
+                "Select a checkpoint"
+            } else {
+                &self.generation_checkpoint
+            })
+            .show_ui(ui, |ui| {
+                for checkpoint in &self.generation_checkpoints {
+                    let lower = checkpoint.to_ascii_lowercase();
+                    let best_for = if lower.contains("realvis") {
+                        "Natural photography, portraits, landscapes"
+                    } else if lower.contains("juggernaut") {
+                        "Detailed images, cinematic scenes, dramatic lighting"
+                    } else if lower.contains("sd_xl_base") || lower.contains("sdxl_base") {
+                        "General-purpose images, illustration, prompt testing"
+                    } else {
+                        "Custom checkpoint"
+                    };
+                    ui.selectable_value(
+                        &mut self.generation_checkpoint,
+                        checkpoint.clone(),
+                        format!("{checkpoint} — {best_for}"),
+                    );
+                }
+            });
+        if self.generation_checkpoint != checkpoint_before_selection {
+            let (steps, cfg, _) = Self::recommended_generation_settings(&self.generation_checkpoint);
+            self.generation_steps = steps;
+            self.generation_cfg = cfg;
+            self.generation_status = format!("Applied recommended settings: {steps} steps, CFG {cfg:.1}. You can still adjust them manually.");
+        }
         self.prompt_spelling.edit(ui,&mut self.generation_prompt,0,"Describe a new image…",4);
         if ui.add_enabled(!self.generation_running && !self.ai_running && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty(), egui::Button::new("Create New Image")).clicked() {
             self.submit_conversation(ui.ctx(), false);
         }
         ui.separator();
         ui.heading("Negative prompt");
-        self.prompt_spelling.edit(ui,&mut self.generation_negative,2,"What should be excluded?",2);
-        ui.checkbox(&mut self.generation_auto_negative,"Add automatic negative prompts (SDXL)")
-            .on_hover_text("SDXL also receives the automatic exclusions for the selected style. Qwen receives your typed negative prompt only.");
+        ui.checkbox(&mut self.generation_auto_negative,"Use automatic negative prompts")
+            .on_hover_text("Adds the selected style's exclusions to SDXL generation and editing. Qwen uses your typed negative prompt only.");
+        if self.generation_auto_negative {
+            let automatic=automatic_negative_prompt(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0);
+            ui.label(format!("Automatic (SDXL): {automatic}"));
+        }
+        self.prompt_spelling.edit(ui,&mut self.generation_negative,2,"Additional negative prompts…",2);
         ui.separator();
         ui.heading("Changes prompt");
-        egui::ComboBox::from_id_salt("edit_model").width(220.0).truncate().selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
+        egui::ComboBox::from_id_salt("edit_model").width(ui.available_width()).truncate().selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
             ui.selectable_value(&mut self.edit_checkpoint, String::new(), "Use generation model");
             ui.selectable_value(&mut self.edit_checkpoint, ai_generation::QWEN_EDIT.into(), ai_generation::QWEN_EDIT);
             for model in &self.generation_checkpoints { ui.selectable_value(&mut self.edit_checkpoint, model.clone(), model); }
@@ -2066,15 +2067,6 @@ impl PixelForge {
             if ui.button("+").clicked() {
                 self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);
             }
-            ui.menu_button("Image Details", |ui| {
-                let item=&self.generation_gallery[self.generation_selected];
-                ui.set_max_width(420.0);
-                ui.label(format!("{} × {} pixels",item.pixels.width(),item.pixels.height()));
-                ui.label(format!("Model: {}",item.settings.checkpoint));
-                ui.label(format!("Seed: {} · Steps: {} · CFG: {}",item.seed,item.settings.steps,item.settings.cfg));
-                ui.label(format!("Original prompt: {}",item.settings.prompt));
-                ui.label(format!("Negative: {}",item.settings.negative));
-            });
             if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Version")).clicked() {
                 self.remove_workspace_version(self.generation_selected);
             }
@@ -2084,7 +2076,7 @@ impl PixelForge {
         self.bind_workspace_editor(ui.ctx());
         let available = ui.available_size();
         if !self.generation_compare {
-            let size=egui::vec2(available.x,(available.y-104.0).max(1.0));
+            let size=egui::vec2(available.x,(available.y-Self::workspace_filmstrip_height(ui)).max(1.0));
             let fit=(size.x/self.image_size[0].max(1) as f32).min(size.y/self.image_size[1].max(1) as f32);
             self.zoom=fit*self.generation_zoom;
             self.offset=self.generation_pan;
@@ -2097,7 +2089,7 @@ impl PixelForge {
             return;
         }
         // Reserve only the filmstrip; image uses all remaining canvas space.
-        let viewer_height = (available.y - 104.0).max(1.0);
+        let viewer_height = (available.y - Self::workspace_filmstrip_height(ui)).max(1.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::drag(),
@@ -2182,6 +2174,21 @@ impl PixelForge {
         self.generation_status="Removed image version (original files were not deleted)".into();
     }
 
+    fn workspace_filmstrip_height(ui:&egui::Ui) -> f32 {
+        // Thumbnail, button padding, caption, spacing, separator and scrollbar.
+        68.0+ui.spacing().button_padding.y*2.0+ui.text_style_height(&egui::TextStyle::Small)+ui.spacing().item_spacing.y*3.0+24.0
+    }
+
+    fn show_workspace_details(&self,ui:&mut egui::Ui) {
+        let Some(item)=self.generation_gallery.get(self.generation_selected) else {return};
+        let details=format!("Version {} · {} × {} · Model: {} · Seed: {} · Steps: {} · CFG: {}",
+            self.generation_selected+1,item.pixels.width(),item.pixels.height(),item.settings.checkpoint,item.seed,item.settings.steps,item.settings.cfg);
+        ui.add(egui::Label::new(&details).truncate()).on_hover_text(&details);
+        let prompts=format!("Prompt: {}{} · Negative: {}",item.settings.prompt,
+            item.settings.refine_prompt.as_ref().map(|p|format!(" · Changes: {p}")).unwrap_or_default(),item.settings.negative);
+        ui.add(egui::Label::new(&prompts).truncate()).on_hover_text(&prompts);
+    }
+
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
         self.capture_workspace_editor();
         ui.separator();
@@ -2196,7 +2203,7 @@ impl PixelForge {
                     .clicked();
             });
             ui.separator();
-        egui::ScrollArea::horizontal().id_salt("studio_filmstrip").max_height(96.0).show(ui, |ui| {
+        egui::ScrollArea::horizontal().id_salt("studio_filmstrip").max_height(Self::workspace_filmstrip_height(ui)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (index, item) in self.generation_gallery.iter().enumerate() {
                     ui.vertical(|ui| {
@@ -6279,34 +6286,6 @@ impl eframe::App for PixelForge {
                     }
                 });
 
-                ui.menu_button("View", |ui| {
-                    if ui
-                        .add_enabled(
-                            self.original_pixels.is_some(),
-                            egui::Button::new("Fit Image to Window"),
-                        )
-                        .clicked()
-                    {
-                        ui.close();
-                        self.fit_pending = true;
-                    }
-
-                    ui.separator();
-
-                    if ui.selectable_label(!self.advanced, "Simple Mode").clicked() {
-                        self.advanced = false;
-                        ui.close();
-                    }
-
-                    if ui
-                        .selectable_label(self.advanced, "Advanced Mode")
-                        .clicked()
-                    {
-                        self.advanced = true;
-                        ui.close();
-                    }
-                });
-
                 ui.separator();
                 ui.strong("PixelForge");
 
@@ -6321,7 +6300,12 @@ impl eframe::App for PixelForge {
             .max_width(480.0)
             .resizable(true)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
+                // Sidebar sections and model controls are larger than canvas/status text.
+                for text in [egui::TextStyle::Body,egui::TextStyle::Button,egui::TextStyle::Small,egui::TextStyle::Monospace] {
+                    if let Some(font)=ui.style_mut().text_styles.get_mut(&text) {font.size=18.0;}
+                }
+                if let Some(font)=ui.style_mut().text_styles.get_mut(&egui::TextStyle::Heading) {font.size=23.0;}
+                ui.horizontal_wrapped(|ui| {
                     let edit_clicked = ui
                         .selectable_label(!self.ai_tools_tab && !self.selection_tools_tab && !self.generation_tools_tab, "Edit")
                         .clicked();
@@ -6437,11 +6421,6 @@ impl eframe::App for PixelForge {
                                 ui.add_space(12.0);
                             }
 
-                            if self.advanced {
-                                ui.separator();
-                                ui.heading("Advanced");
-                                ui.label("Layers and masks coming soon.");
-                            }
                         } else {
                             ui.heading("AI Tools");
                             ui.horizontal(|ui| {
@@ -6636,9 +6615,10 @@ impl eframe::App for PixelForge {
             if self.generation_workspace {
                 ui.set_min_height(60.0);
                 self.show_generation_progress(ui);
+                self.show_workspace_details(ui);
                 if self.ai_running {ui.spinner();ui.label(&self.ai_status);}
                 if self.exporting || self.ai_saving {ui.label(&self.export_stage);}
-                ui.small(&self.status);
+                if !self.status.is_empty() && self.status!="Ready" {ui.label(&self.status);}
                 return;
             }
             ui.allocate_ui_with_layout(
@@ -6911,6 +6891,37 @@ mod workspace_tests {
         app.remove_workspace_version(0);
         assert!(app.generation_gallery.is_empty());assert!(app.original_pixels.is_none());
         assert!(app.project_dirty);
+    }
+
+    #[test]
+    fn thumbnail_caption_fits_and_negative_controls_are_visible() {
+        let ctx=egui::Context::default();
+        let mut app=PixelForge::default();
+        app.prompt_spelling.enabled=false;
+        app.generation_auto_negative=true;
+        app.generation_checkpoint="Fixture generation model".into();
+        app.generation_prompt="Fixture initial prompt".into();
+        let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([40,40,40,255]));
+        let texture=ctx.load_texture("caption_fixture",ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
+        app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+        let input=||egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1000.0,700.0))),..Default::default()};
+        let output=ctx.run(input(),|ctx| {egui::CentralPanel::default().show(ctx,|ui|app.show_generation_workspace(ui));});
+        let captions:Vec<_>=output.shapes.iter().filter_map(|clipped|match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.job.text=="Version 1"=>Some((text,clipped.clip_rect)),_=>None,
+        }).collect();
+        assert!(!captions.is_empty());
+        for (text,clip) in captions {
+            assert!(text.pos.y+text.galley.size().y<=clip.bottom()+1.0,"Thumbnail caption clipped");
+        }
+        let output=ctx.run(input(),|ctx| {egui::CentralPanel::default().show(ctx,|ui|app.show_conversation(ui));});
+        let text:Vec<_>=output.shapes.iter().filter_map(|clipped|match &clipped.shape {
+            egui::Shape::Text(text)=>Some((text.galley.job.text.as_str(),text.pos.y)),_=>None,
+        }).collect();
+        assert!(text.iter().any(|(s,_)|*s=="Use automatic negative prompts"));
+        assert!(text.iter().any(|(s,_)|s.starts_with("Automatic (SDXL):")));
+        let model_y=text.iter().find(|(s,_)|*s=="Fixture generation model").unwrap().1;
+        let prompt_y=text.iter().find(|(s,_)|*s=="Fixture initial prompt").unwrap().1;
+        assert!(model_y<prompt_y);
     }
 
     #[test]

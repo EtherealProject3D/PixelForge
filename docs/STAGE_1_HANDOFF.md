@@ -127,3 +127,18 @@ Native mouse behavior and appearance still need a manual check at normal display
 - Validation: 75 tests pass and Windows debug build passes. Release executable
   replacement was blocked by the user's running app. Native file-picker automation
   did not complete the populated UI check; live GPU selection editing is unverified.
+
+## Prompt hierarchy and persistent details update
+
+The generation model dropdown now sits directly above the initial prompt.
+The negative prompt section displays its automatic-exclusions checkbox and,
+when enabled, the actual automatic SDXL terms above the additional prompt field.
+Sidebar controls use 18-point text and section headings use 23-point text.
+Image details and prompts remain visible in the existing bottom status area;
+long lines are truncated with full text available on hover. The details popup
+and View menu (including unused mode placeholders) were removed.
+The filmstrip reserves space for thumbnail captions based on font/padding size.
+
+Validation: 76 tests pass and Windows debug build passes. A rendered-layout
+regression test verifies caption clipping, automatic-negative visibility,
+and model selector placement above the initial prompt. No live GPU work needed.
