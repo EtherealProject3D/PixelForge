@@ -1,6 +1,6 @@
 # Isolated updater smoke test. Never replaces or launches the installed PixelForge.
 [CmdletBinding()]
-param()
+param([string]$Installer)
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $testRoot = Join-Path $repoRoot ('target\update-smoke-' + [guid]::NewGuid().ToString('N'))
@@ -26,6 +26,15 @@ if ((Get-FileHash $env:PF_UPDATE_STAGED).Hash -ne (Get-FileHash $builtExe).Hash)
 $env:PF_UPDATE_HASH = '0' * 64
 $env:PF_UPDATE_STAGED = Join-Path $testRoot 'must-not-exist.exe'
 if ((Invoke-TestHelper 'Stage-Update.ps1' 'invalid') -eq 0 -or (Test-Path $env:PF_UPDATE_STAGED)) {throw 'Corrupt package was accepted.'}
+if ($Installer) {
+    $env:PF_UPDATE_ZIP = (Resolve-Path -LiteralPath $Installer).Path
+    $env:PF_UPDATE_HASH = (Get-FileHash -LiteralPath $env:PF_UPDATE_ZIP -Algorithm SHA256).Hash.ToLowerInvariant()
+    $env:PF_UPDATE_STAGED = Join-Path $testRoot 'verified-setup.exe'
+    $env:PF_UPDATE_SETUP = '1'
+    if ((Invoke-TestHelper 'Stage-Update.ps1' 'setup') -ne 0) {throw 'Setup package verification failed.'}
+    if ((Get-FileHash $env:PF_UPDATE_STAGED).Hash -ne (Get-FileHash $env:PF_UPDATE_ZIP).Hash) {throw 'Staged installer differs.'}
+    $env:PF_UPDATE_SETUP = '0'
+}
 # A tiny disposable GUI executable stands in for the restarted app.
 $mockExe = Join-Path $testRoot 'mock.exe'
 Add-Type -TypeDefinition 'public class UpdateSmoke { public static void Main() { System.IO.File.WriteAllText(System.Environment.GetEnvironmentVariable("PF_UPDATE_TEST_MARKER"), "restarted"); } }' -OutputAssembly $mockExe -OutputType WindowsApplication

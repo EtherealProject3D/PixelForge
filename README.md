@@ -74,8 +74,8 @@ Models and third-party engines are downloaded separately and remain subject to t
 
 ## Getting started on Windows
 
-1. Download **PixelForge-v0.6.1-windows-x64.zip** from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.1).
-2. Extract the entire archive into a writable folder and open **PixelForge.exe**. The downloaded build does not require Rust.
+1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.1): **PixelForge-v0.6.1-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.1-windows-x64.zip** for portable use.
+2. The installer defaults to **Program Files\Pixel Forge**, adds a Start menu entry, and offers an optional desktop shortcut. Alternatively, extract the portable ZIP into a writable folder and open **PixelForge.exe**. Neither download requires Rust.
 3. Open **Dependencies** to check and install the components needed by your tools. Missing required components highlight that menu item.
 4. For generation/editing, connect a compatible local ComfyUI Desktop installation or install PixelForge's managed portable backend.
 5. In **Generate → Model Library**, choose the models folder if prompted, install a model, and refresh installed models.
@@ -95,7 +95,11 @@ The **Dependencies** window reports status and offers supported install, update,
 
 ### App updates (v0.6.1 onward)
 
-Open **Updates → Check for Updates** to see newer published stable versions and their release notes. Download the verified package, save all open projects, finish running operations, then choose **Install & Restart**. The installer retains the previous executable and requires a writable application folder. Users on v0.6.0 need to download v0.6.1 manually first. Source checkouts should continue using Git pull and rebuild; the development launcher rebuilds the checked-out code.
+Open **Updates → Check for Updates** to see newer published stable versions and their release notes. Download the verified package, save all open projects, finish running operations, then choose **Install & Restart**. Installed copies open the setup wizard and request Windows administrator permission; portable copies update in place in a writable folder. Both retain a previous executable backup. Users on v0.6.0 need to download v0.6.1 manually first. Source checkouts should continue using Git pull and rebuild; the development launcher rebuilds the checked-out code.
+
+Installed copies can be removed using Windows **Installed apps**. Uninstall removes the application and its shortcuts; projects and separately downloaded model/dependency data are retained.
+
+See [Windows installation options](docs/WINDOWS_INSTALLATION.md) for installer, portable, update, and installer-build details.
 
 See [Dependency setup and rollback](docs/DEPENDENCIES.md), [Photo restoration](docs/PHOTO_RESTORATION.md), and [Local model details](docs/LOCAL_MODEL_ADDITIONS.md).
 

@@ -5,7 +5,19 @@ const API: &str = "https://api.github.com/repos/EtherealProject3D/PixelForge/rel
 const DOWNLOADS: &str = "https://github.com/EtherealProject3D/PixelForge/releases/download/";
 
 #[derive(Clone)]
-struct Release { tag: String, notes: String, zip: String, checksum: String, asset: String }
+struct Release { tag: String, notes: String, zip: String, checksum: String, asset: String, setup: Option<String> }
+impl Release {
+    fn for_installed_copy(mut self, installed:bool)->Result<Self,String> {
+        if installed {
+            self.zip=self.setup.clone().ok_or("This release has no setup package. Please download it from GitHub manually.".to_owned())?;
+            self.asset=format!("PixelForge-{}-windows-x64-setup.exe",self.tag);
+        }
+        Ok(self)
+    }
+}
+fn installed_copy()->bool {
+    std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join("pixelforge-installed.txt").is_file())).unwrap_or(false)
+}
 fn version(value: &str) -> Option<[u32;3]> {
     let parts: Vec<_> = value.trim_start_matches('v').split('.').collect();
     if parts.len()!=3 {return None;}
@@ -23,7 +35,9 @@ fn parse_release(value: &Value) -> Result<Option<Release>,String> {
         if url!=format!("{DOWNLOADS}{tag}/{name}") {return Err("Release asset is outside the official download location".into());}
         Ok(url.into())
     };
-    Ok(Some(Release {tag:tag.into(),notes:value["body"].as_str().unwrap_or("").into(),zip:find(&asset)?,checksum:find("SHA256SUMS.txt")?,asset}))
+    let setup_name=format!("PixelForge-{tag}-windows-x64-setup.exe");
+    let setup=if value["assets"].as_array().is_some_and(|a|a.iter().any(|a|a["name"].as_str()==Some(&setup_name))) {Some(find(&setup_name)?)} else {None};
+    Ok(Some(Release {tag:tag.into(),notes:value["body"].as_str().unwrap_or("").into(),zip:find(&asset)?,checksum:find("SHA256SUMS.txt")?,asset,setup}))
 }
 fn client() -> Result<reqwest::blocking::Client,String> {
     reqwest::blocking::Client::builder().user_agent(concat!("PixelForge/",env!("CARGO_PKG_VERSION")))
@@ -67,13 +81,14 @@ fn stage(release:Release, progress:Arc<AtomicU64>, total:Arc<AtomicU64>) -> Resu
     }
     if downloaded!=length {return Err("Update download was incomplete".into());}
     drop(output);
-    let staged=root.join("PixelForge.exe");
+    let setup=release.asset.ends_with("-setup.exe");
+    let staged=root.join(if setup {"PixelForge-Setup.exe"} else {"PixelForge.exe"});
     let script=root.join("verify.ps1");
     fs::write(&script,include_str!("../scripts/Stage-Update.ps1")).map_err(|e|e.to_string())?;
     let mut command=Command::new("powershell.exe");
     command.args(["-NoProfile","-NonInteractive","-ExecutionPolicy","Bypass","-File"]).arg(script)
         .env("PF_UPDATE_ZIP",&archive).env("PF_UPDATE_HASH",hash).env("PF_UPDATE_STAGED",&staged)
-        .env("PF_UPDATE_VERSION",release.tag.trim_start_matches('v'));
+        .env("PF_UPDATE_VERSION",release.tag.trim_start_matches('v')).env("PF_UPDATE_SETUP",if setup {"1"} else {"0"});
     hidden(&mut command);
     let result=command.output().map_err(|e|e.to_string())?;
     if !result.status.success() {return Err(format!("Update verification failed: {}",String::from_utf8_lossy(&result.stderr)));}
@@ -125,7 +140,8 @@ impl Manager {
                     self.bytes.store(0,Ordering::Relaxed);self.total.store(0,Ordering::Relaxed);
                     let (tx,rx)=mpsc::channel();self.download_rx=Some(rx);self.message="Downloading and verifying update…".into();
                     let (bytes,total)=(self.bytes.clone(),self.total.clone());
-                    std::thread::spawn(move|| {let _=tx.send(stage(release,bytes,total));});
+                    let installed=installed_copy();
+                    std::thread::spawn(move|| {let _=tx.send(release.for_installed_copy(installed).and_then(|release|stage(release,bytes,total)));});
                 }
             }
             if self.download_rx.is_some() {
@@ -133,6 +149,7 @@ impl Manager {
                 ui.add(egui::ProgressBar::new(if total>0{bytes as f32/total as f32}else{0.0}).text(format!("{:.1} / {:.1} MB",bytes as f64/1e6,total as f64/1e6)));
             }
             if self.staged.is_some() {
+                if installed_copy() {ui.label("The setup wizard will ask Windows for administrator permission. Finish setup to reopen PixelForge.");}
                 if !can_restart {ui.label("Save all open projects and finish running operations before installing.");}
                 if ui.add_enabled(can_restart,crate::theme::primary("Install & Restart")).clicked() {
                     match self.install() {Ok(())=>restart=true,Err(e)=>self.message=e}
@@ -145,6 +162,15 @@ impl Manager {
     }
     fn install(&self)->Result<(),String> {
         let staged=self.staged.as_ref().ok_or("No update is ready")?;
+        if staged.file_name().is_some_and(|name|name=="PixelForge-Setup.exe") {
+            let mut command=Command::new("powershell.exe");
+            command.args(["-NoProfile","-NonInteractive","-Command","$ErrorActionPreference='Stop'; try {Start-Process -FilePath $env:PF_SETUP_PATH -Verb RunAs; exit 0} catch {Write-Error $_; exit 1}"])
+                .env("PF_SETUP_PATH",staged);
+            hidden(&mut command);
+            let result=command.output().map_err(|e|e.to_string())?;
+            if !result.status.success() {return Err("Setup did not start or administrator permission was cancelled. PixelForge is still open.".into());}
+            return Ok(());
+        }
         let exe=std::env::current_exe().map_err(|e|e.to_string())?;
         let folder=exe.parent().ok_or("No installation folder")?;
         let probe=folder.join(format!(".pixelforge-update-write-test-{}",std::process::id()));
@@ -172,6 +198,12 @@ mod tests {
             {"name":"PixelForge-v9.2.1-windows-x64.zip","browser_download_url":format!("{DOWNLOADS}v9.2.1/PixelForge-v9.2.1-windows-x64.zip")},
             {"name":"SHA256SUMS.txt","browser_download_url":format!("{DOWNLOADS}v9.2.1/SHA256SUMS.txt")}]});
         assert!(parse_release(&release).unwrap().is_some());
+        assert!(parse_release(&release).unwrap().unwrap().for_installed_copy(true).is_err());
+        release["assets"].as_array_mut().unwrap().push(serde_json::json!({"name":"PixelForge-v9.2.1-windows-x64-setup.exe","browser_download_url":format!("{DOWNLOADS}v9.2.1/PixelForge-v9.2.1-windows-x64-setup.exe")}));
+        let installed=parse_release(&release).unwrap().unwrap().for_installed_copy(true).unwrap();
+        assert!(installed.zip.ends_with("-setup.exe"));
+        assert_eq!(installed.asset,"PixelForge-v9.2.1-windows-x64-setup.exe");
+        assert!(parse_release(&release).unwrap().unwrap().for_installed_copy(false).unwrap().asset.ends_with(".zip"));
         release["prerelease"]=true.into();assert!(parse_release(&release).unwrap().is_none());
         release["prerelease"]=false.into();release["assets"][0]["browser_download_url"]="https://example.com/app.exe".into();assert!(parse_release(&release).is_err());
         release["tag_name"]="v0.6.0".into();assert!(parse_release(&release).unwrap().is_none());
