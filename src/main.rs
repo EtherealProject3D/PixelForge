@@ -1545,6 +1545,27 @@ impl PixelForge {
         self.bind_workspace_editor(ctx);
     }
 
+    fn rotate_workspace_version(&mut self, ctx: &egui::Context, clockwise: bool) {
+        if self.generation_running || self.ai_running || self.exporting || self.ai_saving { return; }
+        self.bind_workspace_editor(ctx);
+        self.capture_workspace_editor();
+        let parent = self.generation_selected;
+        let Some(item) = self.generation_gallery.get(parent) else { return; };
+        let rendered = item.editor.render(&item.pixels);
+        let pixels = if clockwise { image::imageops::rotate90(&rendered) } else { image::imageops::rotate270(&rendered) };
+        let mut settings = item.settings.clone();
+        settings.width = pixels.width();
+        settings.height = pixels.height();
+        settings.refine_parent = Some(parent);
+        settings.refine_prompt = Some(if clockwise { "Rotate right 90°" } else { "Rotate left 90°" }.into());
+        let seed = item.seed;
+        let texture = ctx.load_texture(format!("studio_rotation_{}", self.generation_gallery.len()), ColorImage::from_rgba_unmultiplied([pixels.width() as usize, pixels.height() as usize], pixels.as_raw()), TextureOptions::LINEAR);
+        self.generation_gallery.push(GeneratedItem { editor: studio::EditorState::default(), settings, pixels, texture, seed });
+        self.generation_selected = self.generation_gallery.len()-1;
+        self.project_dirty = true;
+        self.bind_workspace_editor(ctx);
+    }
+
     fn append_ai_workspace_result(&mut self, ctx: &egui::Context, label: &str) -> Result<(),String> {
         let result=self.ai_result.clone().ok_or("No AI result is available")?;
         let ai=load_inspection_png(&result.ai_path,"AI result")?;
@@ -2105,15 +2126,15 @@ impl PixelForge {
             ui.strong(format!("Version {}", self.generation_selected+1));
             ui.small(format!("{} × {}", self.image_size[0],self.image_size[1]));
             egui::ComboBox::from_id_salt("compare_left_version")
-                .selected_text(format!("Left: Version {}", self.generation_selected+1))
+                .selected_text(format!("Left: Version {}", self.generation_compare_index+1))
                 .show_ui(ui, |ui| {
-                    for index in 0..count { ui.selectable_value(&mut self.generation_selected, index, format!("Version {}", index+1)); }
+                    for index in 0..count { ui.selectable_value(&mut self.generation_compare_index, index, format!("Version {}", index+1)); }
                 });
             ui.add_enabled(count > 1, egui::Checkbox::new(&mut self.generation_compare, "Compare"));
             egui::ComboBox::from_id_salt("compare_right_version")
-                .selected_text(format!("Right: Version {}", self.generation_compare_index+1))
+                .selected_text(format!("Right: Version {}", self.generation_selected+1))
                 .show_ui(ui, |ui| {
-                    for index in 0..count { ui.selectable_value(&mut self.generation_compare_index, index, format!("Version {}", index+1)); }
+                    for index in 0..count { ui.selectable_value(&mut self.generation_selected, index, format!("Version {}", index+1)); }
                 });
             if self.has_edit_selection() {
                 ui.colored_label(egui::Color32::from_rgb(255,150,150),"Selection active");
@@ -2133,6 +2154,13 @@ impl PixelForge {
             }
             if ui.button("+").clicked() {
                 self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);
+            }
+            let can_rotate = !self.generation_running && !self.ai_running && !self.ai_saving && !self.exporting;
+            if ui.add_enabled(can_rotate, egui::Button::new("Rotate Left")).on_hover_text("Rotate the working image 90° counterclockwise as a new version. The left comparison reference stays unchanged.").clicked() {
+                self.rotate_workspace_version(ui.ctx(), false);
+            }
+            if ui.add_enabled(can_rotate, egui::Button::new("Rotate Right")).on_hover_text("Rotate the working image 90° clockwise as a new version. The left comparison reference stays unchanged.").clicked() {
+                self.rotate_workspace_version(ui.ctx(), true);
             }
             if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Version")).clicked() {
                 self.remove_workspace_version(self.generation_selected);
@@ -2191,7 +2219,7 @@ impl PixelForge {
         let painter = ui.painter().with_clip_rect(rect);
         painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
         let divider_x = rect.left() + rect.width()*self.generation_compare_position;
-        for (slot,index) in [self.generation_selected,self.generation_compare_index].into_iter().enumerate() {
+        for (slot,index) in [self.generation_compare_index,self.generation_selected].into_iter().enumerate() {
             let item = &self.generation_gallery[index];
             let size = egui::vec2(item.pixels.width() as f32,item.pixels.height() as f32);
             let fit = (rect.width()/size.x).min(rect.height()/size.y);
@@ -2210,7 +2238,7 @@ impl PixelForge {
                 let size=egui::vec2(item.pixels.width() as f32,item.pixels.height() as f32);
                 let fit=(rect.width()/size.x).min(rect.height()/size.y);
                 let image_rect=egui::Rect::from_center_size(rect.center()+self.generation_pan,size*fit*self.generation_zoom);
-                let clip=egui::Rect::from_min_max(rect.min,egui::pos2(divider_x,rect.bottom()));
+                let clip=egui::Rect::from_min_max(egui::pos2(divider_x,rect.top()),rect.max);
                 painter.with_clip_rect(clip).image(selection.id(),image_rect,
                     egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),egui::Color32::WHITE);
             }
@@ -6940,6 +6968,29 @@ mod conversation_tests {
 #[cfg(test)]
 mod workspace_tests {
     use super::*;
+    #[test]
+    fn rotation_keeps_reference_and_source_and_four_turns_restore_pixels() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.generation_workspace = true;
+        let pixels = image::RgbaImage::from_fn(3, 2, |x,y| image::Rgba([(x+y*3) as u8,20,30,127]));
+        let texture = ctx.load_texture("rotate_test",ColorImage::from_rgba_unmultiplied([3,2],pixels.as_raw()),TextureOptions::LINEAR);
+        app.generation_gallery.push(GeneratedItem { editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:pixels.clone(),texture,seed:12 });
+        app.ensure_workspace(&ctx);
+        app.rotate_workspace_version(&ctx, true);
+        assert_eq!(app.generation_gallery[1].pixels.dimensions(), (2,3));
+        assert_eq!(app.generation_gallery[1].pixels.get_pixel(1,0), pixels.get_pixel(0,0));
+        assert_eq!(app.generation_gallery[0].pixels, pixels);
+        app.generation_compare_index = 1; // A user-picked reference, not necessarily the original.
+        for _ in 0..3 { app.rotate_workspace_version(&ctx, true); }
+        assert_eq!(app.generation_gallery[4].pixels, pixels);
+        assert_eq!(app.generation_selected, 4);
+        assert_eq!(app.generation_compare_index, 1);
+        app.keep_workspace_version(&ctx, "Manual edits");
+        assert_eq!(app.generation_compare_index, 1);
+        assert_eq!(app.generation_selected, 5);
+        assert_eq!(app.generation_gallery[4].settings.refine_parent, Some(3));
+    }
     #[test]
     fn tools_share_selection_and_thumbnail_switching_retains_adjustments_and_mask() {
         let ctx=egui::Context::default();
