@@ -64,8 +64,8 @@ pre-continuity commit is b2a0d84 (prior rollback branch also remains available).
 
 Initial prompt, Changes prompt and additional negative terms now use background
 Windows English (United States) spelling checks. Spell check is enabled by default
-and can be toggled beside Initial prompt. Misspelled words receive red underlines;
-right-click a marked word or open Spelling beneath the field to choose a suggestion.
+and can be toggled inside Generation settings. Misspelled words receive red underlines;
+right-click a marked word to choose a suggestion. There is no separate Spelling button.
 Nothing is corrected automatically. Ignore for this session suppresses that word
 across the prompt fields until the app closes, without changing the Windows
 personal dictionary. Common model/workflow terms such as Qwen, ComfyUI, SDXL, LoRA
@@ -85,3 +85,24 @@ Validation: 71 tests passed, including an actual Windows spell-check provider te
 Unicode positions and targeted/stale correction checks. Windows debug build passed.
 The app was launched, a test typo was underlined, its suggestions were opened, and
 one correction was applied while the rest of the prompt and Qwen term stayed intact.
+
+## Prompt order and Qwen steps
+
+Prompt fields are ordered Initial prompt, Negative prompt, Changes prompt. The
+visible negative terms apply to both generation and refinement; edits no longer
+silently restore older negative terms from the source image. SDXL can include style
+exclusions; Qwen uses only the explicitly typed negative terms.
+
+Qwen now has its own Steps slider (1–100, default 20) under the edit-model selector.
+It is independent of SDXL generation steps, persists in Studio projects, and is
+recorded in each edit's metadata/progress. Old projects default to 20. Reuse settings
+restores a Qwen result's edit-step count without overwriting generation steps.
+The graph passes this setting to KSampler instead of hard-coding 20.
+
+The standard FP8 Qwen model and its vision/text encoder are large. On a 12 GB GPU,
+model offloading and image/text encoding can dominate latency as well as sampling.
+Lowering steps reduces sampling work, with a quality tradeoff, but does not remove
+model-loading or encoding costs. The optional Lightning adapter is not installed
+or enabled by this change. No new GPU benchmark was run while the user's GPU was
+already busy; automated tests verify the chosen steps and negative conditioning,
+and project save/reopen verifies the independent Qwen setting.

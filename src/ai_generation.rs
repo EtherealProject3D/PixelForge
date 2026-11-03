@@ -22,7 +22,7 @@ const QWEN_UNET: &str = "qwen_image_edit_2509_fp8_e4m3fn.safetensors";
 const QWEN_CLIP: &str = "qwen_2.5_vl_7b_fp8_scaled.safetensors";
 const QWEN_VAE: &str = "qwen_image_vae.safetensors";
 
-fn qwen_workflow(filename: &str, prompt: &str, seed: u64) -> Value {
+fn qwen_workflow(filename: &str, prompt: &str, negative: &str, seed: u64, steps: u32) -> Value {
     json!({
         "1":{"class_type":"UNETLoader","inputs":{"unet_name":QWEN_UNET,"weight_dtype":"default"}},
         "2":{"class_type":"CLIPLoader","inputs":{"clip_name":QWEN_CLIP,"type":"qwen_image","device":"default"}},
@@ -30,11 +30,11 @@ fn qwen_workflow(filename: &str, prompt: &str, seed: u64) -> Value {
         "4":{"class_type":"LoadImage","inputs":{"image":filename}},
         "9":{"class_type":"FluxKontextImageScale","inputs":{"image":["4",0]}},
         "10":{"class_type":"TextEncodeQwenImageEditPlus","inputs":{"clip":["2",0],"vae":["3",0],"image1":["9",0],"prompt":prompt}},
-        "11":{"class_type":"TextEncodeQwenImageEditPlus","inputs":{"clip":["2",0],"vae":["3",0],"image1":["9",0],"prompt":""}},
+        "11":{"class_type":"TextEncodeQwenImageEditPlus","inputs":{"clip":["2",0],"vae":["3",0],"image1":["9",0],"prompt":negative}},
         "12":{"class_type":"ModelSamplingAuraFlow","inputs":{"model":["1",0],"shift":3.0}},
         "13":{"class_type":"CFGNorm","inputs":{"model":["12",0],"strength":1.0,"pre_cfg":false}},
         "8":{"class_type":"VAEEncode","inputs":{"pixels":["9",0],"vae":["3",0]}},
-        "5":{"class_type":"KSampler","inputs":{"model":["13",0],"positive":["10",0],"negative":["11",0],"latent_image":["8",0],"seed":seed,"steps":20,"cfg":4.0,"sampler_name":"euler","scheduler":"simple","denoise":1.0}},
+        "5":{"class_type":"KSampler","inputs":{"model":["13",0],"positive":["10",0],"negative":["11",0],"latent_image":["8",0],"seed":seed,"steps":steps,"cfg":4.0,"sampler_name":"euler","scheduler":"simple","denoise":1.0}},
         "6":{"class_type":"VAEDecode","inputs":{"samples":["5",0],"vae":["3",0]}},
         "7":{"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge_QwenEdit","images":["6",0]}}
     })
@@ -171,6 +171,7 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         return Err("Dimensions must be multiples of 64, between 256 and 4096".into());
     }
     if cancel.load(Ordering::Relaxed) { return Err("Generation cancelled".into()); }
+    if !(1..=100).contains(&request.steps) {return Err("Steps must be between 1 and 100".into());}
     let qwen = request.checkpoint == QWEN_EDIT;
     if qwen {
         if request.source.is_none() { return Err("Qwen Edit requires an existing image. Use a generation checkpoint to create one first.".into()); }
@@ -224,7 +225,7 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         let subfolder = uploaded["subfolder"].as_str().unwrap_or("");
         if qwen {
             let filename = if subfolder.is_empty() { stored.to_owned() } else { format!("{subfolder}/{stored}") };
-            workflow = qwen_workflow(&filename, &request.prompt, request.seed);
+            workflow = qwen_workflow(&filename, &request.prompt, &request.negative, request.seed, request.steps);
         } else {
         workflow["4"] = json!({"class_type":"LoadImage","inputs":{"image": if subfolder.is_empty(){stored.to_owned()}else{format!("{subfolder}/{stored}")}}});
         workflow["8"] = if request.mask.is_some() {
@@ -341,12 +342,13 @@ mod qwen_tests {
     }
     #[test]
     fn instruction_editor_uses_image_conditioning_and_dedicated_loaders() {
-        let w = qwen_workflow("source.png", "Make the hat blue", 42);
+        let w = qwen_workflow("source.png", "Make the hat blue", "blurry", 42, 7);
         assert_eq!(w["1"]["class_type"], "UNETLoader");
         assert_eq!(w["10"]["inputs"]["prompt"], "Make the hat blue");
         assert_eq!(w["10"]["inputs"]["image1"], json!(["9",0]));
         assert_eq!(w["5"]["inputs"]["seed"], 42);
-        assert_eq!(w["5"]["inputs"]["steps"], 20);
+        assert_eq!(w["5"]["inputs"]["steps"], 7);
+        assert_eq!(w["11"]["inputs"]["prompt"], "blurry");
         assert_eq!(w["7"]["class_type"], "SaveImage");
         assert!(!w.as_object().unwrap().values().any(|n| n["class_type"] == "CheckpointLoaderSimple"));
     }

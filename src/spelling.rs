@@ -87,14 +87,6 @@ impl PromptSpelling {
         if let Some(issue)=field.menu_issue.clone().filter(|_|field.checked==*text && self.enabled) {
             output.response.context_menu(|ui|suggestions(ui,&issue,&mut correction,&mut ignore));
         }
-        if !issues.is_empty() {
-            ui.menu_button(format!("Spelling · {}",issues.len()),|ui| {
-                ui.small("Choose a correction, or ignore a name for this session.");
-                for issue in &issues {
-                    ui.menu_button(&issue.word,|ui|suggestions(ui,issue,&mut correction,&mut ignore));
-                }
-            }).response.on_hover_text("Misspelled words are underlined. You can also right-click them for suggestions.");
-        }
         if let Some((issue,replacement))=correction {apply_correction(text,&field.checked,&issue,&replacement);}
         if let Some(word)=ignore {self.ignored.insert(word.to_lowercase());}
         if field.observed!=*text {

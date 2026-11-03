@@ -2,7 +2,7 @@
 
 PixelForge now has a dedicated local Qwen instruction-edit workflow, selectable
 under Changes prompt. SDXL generation and SDXL whole-image/masked refinement remain
-available. This Qwen integration uses native ComfyUI nodes, 20 Euler/simple steps,
+available. This Qwen integration uses native ComfyUI nodes, configurable Euler/simple steps (default 20),
 CFG 4, shift 3, CFG normalization and the image-conditioned Qwen Edit Plus encoder.
 It does not require the optional Lightning LoRA.
 
@@ -61,3 +61,5 @@ git pull --ff-only
 This launcher builds and starts the executable from its own checkout, instead of a
 pinned shortcut or copied executable elsewhere. Both Initial prompt and Changes
 prompt should appear in the right sidebar, and thumbnails below the canvas.
+
+Qwen Steps now has its own slider under Changes prompt, separate from generation settings. Negative prompt is between Initial prompt and Changes prompt, and its typed terms are passed to Qwen negative conditioning. Lower steps may reduce quality and do not remove model-loading/encoding time.
