@@ -1559,11 +1559,21 @@ impl PixelForge {
         if !self.generation_workspace {
             if ui.button("Open Image Studio").clicked() { self.generation_workspace = true; }
         }
+        if self.generation_models_rx.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("Loading available models…");
+            });
+            ui.label("Connecting to ComfyUI; the first connection may take a moment.");
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+            ui.separator();
+        }
+        ui.collapsing("Generation settings", |ui| self.show_generation_settings(ui));
+        ui.separator();
         self.show_conversation(ui);
         ui.separator();
         self.show_model_library(ui);
         ui.separator();
-        ui.collapsing("Generation settings", |ui| self.show_generation_settings(ui));
         if self.generation_checkpoint.is_empty() {
             ui.label("Connect a local model to begin.");
             if ui.button("Connect Models").clicked() { self.refresh_generation_models(ui.ctx()); }
@@ -1964,7 +1974,9 @@ impl PixelForge {
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
         theme::section(ui, "Initial prompt");
         let checkpoint_before_selection = self.generation_checkpoint.clone();
-        egui::ComboBox::from_id_salt("initial_generation_model").width(ui.available_width()).truncate()
+        let model_row_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button)) + ui.spacing().item_spacing.y;
+        let generation_menu_height = model_row_height * (self.generation_checkpoints.len() + 1) as f32 + 16.0;
+        egui::ComboBox::from_id_salt("initial_generation_model").width(ui.available_width()).height(generation_menu_height).truncate()
             .selected_text(if self.generation_checkpoint.is_empty() {
                 "Select a checkpoint"
             } else {
@@ -2011,10 +2023,11 @@ impl PixelForge {
             let automatic=automatic_negative_prompt(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0);
             ui.label(format!("Automatic (SDXL): {automatic}"));
         }
-        self.prompt_spelling.edit(ui,&mut self.generation_negative,2,"Additional negative prompts…",2);
+        self.prompt_spelling.edit(ui,&mut self.generation_negative,2,"Additional negative prompts…",4);
         ui.separator();
         theme::section(ui, "Changes prompt");
-        egui::ComboBox::from_id_salt("edit_model").width(ui.available_width()).truncate().selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
+        let edit_menu_height = model_row_height * (self.generation_checkpoints.len() + 4) as f32 + 16.0;
+        egui::ComboBox::from_id_salt("edit_model").width(ui.available_width()).height(edit_menu_height).truncate().selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
             ui.selectable_value(&mut self.edit_checkpoint, String::new(), "Use generation model");
             for name in [ai_generation::QWEN_EDIT,ai_generation::QWEN_EDIT_2511,ai_generation::FLUX_KLEIN] {
                 ui.selectable_value(&mut self.edit_checkpoint,name.into(),name);
