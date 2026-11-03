@@ -50,6 +50,23 @@ fn restore_edit_dimensions(output: image::RgbaImage, source_size: Option<(u32, u
     }
 }
 
+// Preserve exact source pixels outside the selection for every edit model.
+fn finish_edit(output:image::RgbaImage, source:Option<&image::RgbaImage>, mask:Option<&[u8]>) -> Result<image::RgbaImage,String> {
+    let mut output=restore_edit_dimensions(output,source.map(|image|image.dimensions()));
+    if let Some(mask)=mask {
+        let source=source.ok_or("A selection edit requires a source image")?;
+        if mask.len()!=source.width() as usize*source.height() as usize || !mask.iter().any(|&v|v>0) {
+            return Err("Select an area to edit before applying an edit to selection".into());
+        }
+        for ((result,original),&amount) in output.pixels_mut().zip(source.pixels()).zip(mask) {
+            for channel in 0..4 {
+                result[channel]=((result[channel] as u32*amount as u32+original[channel] as u32*(255-amount as u32)+127)/255) as u8;
+            }
+        }
+    }
+    Ok(output)
+}
+
 fn validate_qwen_nodes(info: &Value) -> Result<(), String> {
     for node in ["UNETLoader", "CLIPLoader", "VAELoader", "FluxKontextImageScale", "TextEncodeQwenImageEditPlus", "ModelSamplingAuraFlow", "CFGNorm"] {
         if info.get(node).is_none() { return Err(format!("Qwen Edit needs ComfyUI node {node}. Update ComfyUI; see docs/QWEN_EDIT_SETUP.md.")); }
@@ -175,7 +192,6 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
     let qwen = request.checkpoint == QWEN_EDIT;
     if qwen {
         if request.source.is_none() { return Err("Qwen Edit requires an existing image. Use a generation checkpoint to create one first.".into()); }
-        if request.mask.is_some() { return Err("Qwen Edit currently edits the whole image. Cancel Area Edit or choose an SDXL checkpoint for masked inpainting.".into()); }
         let info: Value = client()?.get(format!("{BASE}/object_info")).send().map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
         validate_qwen_nodes(&info)?;
     }
@@ -205,8 +221,11 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
             let original_mask = image::GrayImage::from_raw(source.width(),source.height(),mask.clone())
                 .ok_or("Invalid inpainting mask dimensions")?;
             let resized_mask = image::imageops::resize(&original_mask,request.width,request.height,image::imageops::FilterType::Nearest);
-            for (x,y,pixel) in resized.enumerate_pixels_mut() {
-                pixel[3] = 255u8.saturating_sub(resized_mask.get_pixel(x,y)[0]);
+            // Qwen needs the intact reference image; its selection is composited locally.
+            if !qwen {
+                for (x,y,pixel) in resized.enumerate_pixels_mut() {
+                    pixel[3] = 255u8.saturating_sub(resized_mask.get_pixel(x,y)[0]);
+                }
             }
         }
         let mut png = std::io::Cursor::new(Vec::new());
@@ -315,7 +334,7 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
                         .bytes().map_err(|e| e.to_string())?;
                     let output = image::load_from_memory(&bytes).map(|img| img.to_rgba8())
                         .map_err(|e| format!("Cannot decode generated image: {e}"))?;
-                    return Ok(restore_edit_dimensions(output, if qwen { request.source.as_ref().map(|image| image.dimensions()) } else { None }));
+                    return finish_edit(output, request.source.as_ref(), request.mask.as_deref());
                 }
             }
             if job.get("outputs").is_some() { return Err("ComfyUI finished without a saved image".into()); }
@@ -360,5 +379,28 @@ mod qwen_tests {
         assert!(validate_qwen_nodes(&info).unwrap_err().contains(QWEN_UNET));
         for (node,input,file) in [("UNETLoader","unet_name",QWEN_UNET),("CLIPLoader","clip_name",QWEN_CLIP),("VAELoader","vae_name",QWEN_VAE)] { info[node] = json!({"input":{"required":{input:[[file]]}}}); }
         assert!(validate_qwen_nodes(&info).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod selection_edit_tests {
+    use super::*;
+    #[test]
+    fn selection_composites_exact_originals_and_feathered_edges_at_source_size() {
+        let source=image::RgbaImage::from_pixel(3,1,image::Rgba([20,40,60,80]));
+        let generated=image::RgbaImage::from_pixel(6,2,image::Rgba([220,240,160,180]));
+        let result=finish_edit(generated,Some(&source),Some(&[0,128,255])).unwrap();
+        assert_eq!(result.dimensions(),source.dimensions());
+        assert_eq!(result.get_pixel(0,0),source.get_pixel(0,0));
+        assert_eq!(*result.get_pixel(1,0),image::Rgba([120,140,110,130]));
+        assert_eq!(*result.get_pixel(2,0),image::Rgba([220,240,160,180]));
+    }
+    #[test]
+    fn selection_requires_nonempty_matching_mask_and_source() {
+        let source=image::RgbaImage::new(2,1);
+        assert!(finish_edit(source.clone(),Some(&source),Some(&[0,0])).is_err());
+        assert!(finish_edit(source.clone(),Some(&source),Some(&[255])).is_err());
+        assert!(finish_edit(source.clone(),None,Some(&[255,255])).is_err());
+        assert_eq!(finish_edit(source.clone(),Some(&source),None).unwrap(),source);
     }
 }

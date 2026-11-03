@@ -111,3 +111,19 @@ The old Before / After section has been removed from the Edit sidebar.
 Validation: 72 automated tests pass, including simulated divider dragging and
 camera retention across version/tool changes. Windows release build passes.
 Native mouse behavior and appearance still need a manual check at normal display scaling.
+
+## Toolbar, readability, and selection-edit update
+
+- More and Reuse Generation Settings removed. Remove Version is a direct toolbar
+  button; Image Details opens an on-demand top-toolbar popup.
+- Right-click any version thumbnail for Remove Image Version. Removal preserves
+  remaining selection/comparison references and marks the project unsaved.
+- Body, button, small, and monospace text share a 16-point default.
+- The negative prompt retains an always-visible automatic SDXL exclusions checkbox.
+- Apply Edit changes the whole image; Apply Edit to Selection is beside it and
+  requires a nonempty selection. SDXL uses masked inpainting. Qwen receives the
+  intact source and its output is composited through the selection locally.
+  Both paths preserve source dimensions and exact original pixels outside the mask.
+- Validation: 75 tests pass and Windows debug build passes. Release executable
+  replacement was blocked by the user's running app. Native file-picker automation
+  did not complete the populated UI check; live GPU selection editing is unverified.

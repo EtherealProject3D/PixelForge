@@ -1872,15 +1872,7 @@ impl PixelForge {
             ui.label("Connect a local model to begin.");
             if ui.button("Connect Models").clicked() { self.refresh_generation_models(&ctx); }
         }
-        if let Some(item) = self.generation_gallery.get(self.generation_selected) {
-            ui.collapsing("Image details", |ui| {
-                ui.label(format!("{} × {} pixels", item.pixels.width(), item.pixels.height()));
-                ui.label(format!("Model: {}", item.settings.checkpoint));
-                ui.label(format!("Seed: {} · Steps: {} · CFG: {}", item.seed, item.settings.steps, item.settings.cfg));
-                ui.label(format!("Original prompt: {}", item.settings.prompt));
-                ui.label(format!("Negative: {}", item.settings.negative));
-            });
-        }
+
     }
 
     fn save_generation_project(&mut self, save_as:bool) {
@@ -1943,7 +1935,11 @@ impl PixelForge {
         let initial_prompt = self.generation_prompt.clone();
         if edit {
             let Some(source) = self.generation_gallery.get(self.generation_selected) else { return; };
-            let painted = self.refinement_masked && self.edit_checkpoint != ai_generation::QWEN_EDIT;
+            let painted = self.refinement_masked;
+            if painted && !self.has_edit_selection() {
+                self.generation_status = "Select an area before applying an edit to selection".into();
+                return;
+            }
             if painted {self.refinement_mask=self.selection_mask.as_ref().map(|m|m.pixels().to_vec()).unwrap_or_default();}
             self.refinement_source = Some(self.generation_selected);
             self.generation_prompt = conversation_context(&source.settings);
@@ -1989,7 +1985,7 @@ impl PixelForge {
         ui.separator();
         ui.heading("Negative prompt");
         self.prompt_spelling.edit(ui,&mut self.generation_negative,2,"What should be excluded?",2);
-        ui.checkbox(&mut self.generation_auto_negative,"Include style negatives for SDXL")
+        ui.checkbox(&mut self.generation_auto_negative,"Add automatic negative prompts (SDXL)")
             .on_hover_text("SDXL also receives the automatic exclusions for the selected style. Qwen receives your typed negative prompt only.");
         ui.separator();
         ui.heading("Changes prompt");
@@ -2000,7 +1996,7 @@ impl PixelForge {
         });
         ui.label(format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
         if self.edit_checkpoint == ai_generation::QWEN_EDIT {
-            ui.small("Instruction-based editing · CFG 4 · whole image");
+            ui.small("Instruction-based editing · CFG 4");
             ui.add(egui::Slider::new(&mut self.qwen_steps,1..=100).text("Qwen steps"))
                 .on_hover_text("20 is the default for the standard model. Fewer steps reduce sampling time but may reduce quality; model loading and encoding still take time.");
         } else {
@@ -2013,11 +2009,19 @@ impl PixelForge {
         if self.edit_checkpoint != ai_generation::QWEN_EDIT {
             ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0).text("Change strength"));
         }
-        if self.edit_checkpoint != ai_generation::QWEN_EDIT {
-            ui.checkbox(&mut self.refinement_masked,"Use painted selection for inpainting");
-        }
         let ready = has_image && !self.generation_running && !self.ai_running && !self.conversation_draft.trim().is_empty() && !editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true).is_empty();
-        if ui.add_enabled(ready, egui::Button::new("Apply Edit").fill(ui.visuals().selection.bg_fill)).clicked() { self.submit_conversation(ui.ctx(), true); }
+        let has_selection = self.has_edit_selection();
+        ui.horizontal_wrapped(|ui| {
+            if ui.add_enabled(ready, egui::Button::new("Apply Edit").fill(ui.visuals().selection.bg_fill)).on_hover_text("Edit the whole image").clicked() {
+                self.refinement_masked=false;
+                self.submit_conversation(ui.ctx(), true);
+            }
+            if ui.add_enabled(ready && has_selection, egui::Button::new("Apply Edit to Selection"))
+                .on_hover_text("Change the selected area and preserve everything outside it. Qwen edits the whole image internally, then only the selected pixels are kept.").clicked() {
+                self.refinement_masked=true;
+                self.submit_conversation(ui.ctx(), true);
+            }
+        });
         if self.generation_checkpoints.is_empty() && ui.button("Connect / Refresh Models").clicked() { self.refresh_generation_models(ui.ctx()); }
     }
 
@@ -2062,46 +2066,19 @@ impl PixelForge {
             if ui.button("+").clicked() {
                 self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);
             }
-            ui.menu_button("More", |ui| {
-                if ui.button("Reuse generation settings").clicked() {
-                let s = self.generation_gallery[self.generation_selected].settings.clone();
-                let reused_qwen=s.checkpoint==ai_generation::QWEN_EDIT;
-                self.generation_prompt = s.prompt;
-                self.generation_negative = s.negative;
-                self.generation_auto_negative = s.auto_negative;
-                if reused_qwen { self.qwen_steps=s.steps.clamp(1,100); self.edit_checkpoint = s.checkpoint; } else { self.generation_checkpoint = s.checkpoint; }
-                self.generation_style = s.style;
-                self.generation_size = s.ratio;
-                self.generation_custom_size = s.custom_size;
-                self.generation_unlock_dimensions = s.unlock_dimensions;
-                self.generation_resolution = s.resolution;
-                self.generation_width = s.width;
-                self.generation_height = s.height;
-                if !reused_qwen {self.generation_steps = s.steps;self.generation_cfg = s.cfg;}
-                self.generation_seed = s.seed;
-                self.generation_random_seeds = false;
-                self.generation_status = "Restored settings from gallery image".into();
-                    ui.close();
-                }
-                if ui.add_enabled(!self.generation_running && !self.ai_running, egui::Button::new("Remove this version")).clicked() {
-                self.capture_workspace_editor();
-                self.workspace_editor=None;
-                self.original_pixels=None;
-                let removed=self.generation_selected;
-                self.generation_gallery.remove(removed);
-                for (_,tab) in &mut self.inactive_tabs {
-                    tab.workspace_editor=match tab.workspace_editor {Some(i) if i==removed=>None,Some(i) if i>removed=>Some(i-1),other=>other};
-                }
-                if self.refinement_source==Some(removed) {self.refinement_mask.clear();self.refinement_mask_texture=None;}
-                self.refinement_source=match self.refinement_source {Some(index) if index==removed=>None,Some(index) if index>removed=>Some(index-1),other=>other};
-                for item in &mut self.generation_gallery {item.settings.refine_parent=match item.settings.refine_parent {Some(index) if index==removed=>None,Some(index) if index>removed=>Some(index-1),other=>other};}
-                self.generation_selected = self.generation_selected.min(self.generation_gallery.len().saturating_sub(1));
-                self.generation_compare_index = self.generation_compare_index.min(self.generation_gallery.len().saturating_sub(1));
-                self.generation_compare = self.generation_compare && self.generation_gallery.len() > 1;
-                self.generation_status = "Removed image from gallery (original files were not deleted)".into();
-                    ui.close();
-                }
+            ui.menu_button("Image Details", |ui| {
+                let item=&self.generation_gallery[self.generation_selected];
+                ui.set_max_width(420.0);
+                ui.label(format!("{} × {} pixels",item.pixels.width(),item.pixels.height()));
+                ui.label(format!("Model: {}",item.settings.checkpoint));
+                ui.label(format!("Seed: {} · Steps: {} · CFG: {}",item.seed,item.settings.steps,item.settings.cfg));
+                ui.label(format!("Original prompt: {}",item.settings.prompt));
+                ui.label(format!("Negative: {}",item.settings.negative));
             });
+            if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Version")).clicked() {
+                self.remove_workspace_version(self.generation_selected);
+            }
+
         });
         if self.generation_gallery.is_empty() { return; }
         self.bind_workspace_editor(ui.ctx());
@@ -2175,10 +2152,41 @@ impl PixelForge {
         self.show_workspace_filmstrip(ui);
     }
 
+    fn has_edit_selection(&self) -> bool {
+        self.selection_mask.as_ref().is_some_and(|mask| {
+            mask.pixels().len()==self.image_size[0]*self.image_size[1] && mask.pixels().iter().any(|&v|v>0)
+        })
+    }
+
+    fn remove_workspace_version(&mut self, removed:usize) {
+        if self.generation_running || self.ai_running || removed>=self.generation_gallery.len() {return;}
+        self.capture_workspace_editor();
+        self.workspace_editor=None;
+        self.original_pixels=None;
+        self.generation_gallery.remove(removed);
+        let remap=|index:Option<usize>|match index {Some(i) if i==removed=>None,Some(i) if i>removed=>Some(i-1),other=>other};
+        for (_,tab) in &mut self.inactive_tabs {tab.workspace_editor=remap(tab.workspace_editor);}
+        if self.refinement_source==Some(removed) {self.refinement_mask.clear();self.refinement_mask_texture=None;}
+        self.refinement_source=remap(self.refinement_source);
+        self.workspace_ai_parent=remap(self.workspace_ai_parent);
+        for item in &mut self.generation_gallery {item.settings.refine_parent=remap(item.settings.refine_parent);}
+        let last=self.generation_gallery.len().saturating_sub(1);
+        self.generation_selected=remap(Some(self.generation_selected)).unwrap_or(removed).min(last);
+        self.generation_compare_index=remap(Some(self.generation_compare_index)).unwrap_or(removed).min(last);
+        self.generation_compare &= self.generation_gallery.len()>1;
+        if self.generation_gallery.is_empty() {
+            self.texture=None;self.processed_texture=None;self.preview_source=None;self.image_size=[0,0];
+            self.selection_mask=None;
+        }
+        self.project_dirty=true;
+        self.generation_status="Removed image version (original files were not deleted)".into();
+    }
+
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
         self.capture_workspace_editor();
         ui.separator();
         let mut save_version=false;
+        let mut remove_version=None;
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
                 ui.strong("Versions");
@@ -2194,12 +2202,19 @@ impl PixelForge {
                     ui.vertical(|ui| {
                         let size = item.texture.size_vec2();
                         let thumb = size * (68.0 / size.x.max(size.y));
-                        if ui.add(egui::Button::image(egui::Image::new((item.texture.id(), thumb))).selected(index == self.generation_selected)).on_hover_text(item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt)).clicked() {
-                            self.generation_selected = index;
-                            self.refinement_source = None;
-                            self.refinement_mask_texture = None;
-
+                        let response=ui.add(egui::Button::image(egui::Image::new((item.texture.id(), thumb))).selected(index == self.generation_selected))
+                            .on_hover_text(item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt));
+                        if response.clicked() {
+                            self.generation_selected=index;
+                            self.refinement_source=None;
+                            self.refinement_mask_texture=None;
                         }
+                        response.context_menu(|ui| {
+                            if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Image Version")).clicked() {
+                                remove_version=Some(index);
+                                ui.close();
+                            }
+                        });
                         ui.small(format!("Version {}", index+1));
                     });
                 }
@@ -2207,6 +2222,7 @@ impl PixelForge {
         });
 
         });
+        if let Some(index)=remove_version {self.remove_workspace_version(index);}
         if save_version {self.keep_workspace_version(ui.ctx(),"Manual edits");}
     }
 
@@ -4584,7 +4600,7 @@ impl PixelForge {
                         } else {
                             "Lanczos"
                         },
-                        egui::FontId::proportional(14.0),
+                        egui::TextStyle::Body.resolve(ui.style()),
                         Color32::WHITE,
                     );
 
@@ -4601,7 +4617,7 @@ impl PixelForge {
                         } else {
                             "AI Result"
                         },
-                        egui::FontId::proportional(14.0),
+                        egui::TextStyle::Body.resolve(ui.style()),
                         Color32::WHITE,
                     );
                 }
@@ -6735,6 +6751,12 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
+            // A single readable default for all non-heading text, including small labels.
+            cc.egui_ctx.style_mut(|style| {
+                for text in [egui::TextStyle::Body,egui::TextStyle::Button,egui::TextStyle::Small,egui::TextStyle::Monospace] {
+                    if let Some(font)=style.text_styles.get_mut(&text) {font.size=16.0;}
+                }
+            });
 
             let controls = Controls::load();
             let native_scale = cc.egui_ctx.native_pixels_per_point().unwrap_or(1.0);
@@ -6861,6 +6883,34 @@ mod workspace_tests {
             assert_eq!(app.generation_pan,egui::vec2(17.0,-23.0));
             assert_eq!(app.workspace_editor,Some(tab%2));
         }
+    }
+
+    #[test]
+    fn removing_arbitrary_version_remaps_working_comparison_and_parents() {
+        let ctx=egui::Context::default();
+        let mut app=PixelForge::default();
+        for n in 0..3 {
+            let pixels=image::RgbaImage::from_pixel(2,1,image::Rgba([n,40,40,255]));
+            let texture=ctx.load_texture(format!("remove_{n}"),ColorImage::from_rgba_unmultiplied([2,1],pixels.as_raw()),TextureOptions::LINEAR);
+            let mut settings=settings_from_json(&serde_json::json!({}));
+            settings.refine_parent=if n>0 {Some(n as usize-1)} else {None};
+            app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed:n as u64});
+        }
+        app.generation_selected=2;app.generation_compare_index=1;app.generation_compare=true;
+        app.bind_workspace_editor(&ctx);
+        app.generation_zoom=2.0;app.generation_pan=egui::vec2(19.0,25.0);
+        app.remove_workspace_version(0);app.bind_workspace_editor(&ctx);
+        assert_eq!(app.generation_selected,1);
+        assert_eq!(app.generation_compare_index,0);
+        assert_eq!(app.generation_gallery[0].settings.refine_parent,None);
+        assert_eq!(app.generation_gallery[1].settings.refine_parent,Some(0));
+        assert_eq!(app.generation_zoom,2.0);
+        assert_eq!(app.generation_pan,egui::vec2(19.0,25.0));
+        app.remove_workspace_version(1);app.bind_workspace_editor(&ctx);
+        assert_eq!(app.generation_selected,0);assert!(!app.generation_compare);
+        app.remove_workspace_version(0);
+        assert!(app.generation_gallery.is_empty());assert!(app.original_pixels.is_none());
+        assert!(app.project_dirty);
     }
 
     #[test]
