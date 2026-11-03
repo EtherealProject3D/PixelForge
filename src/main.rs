@@ -2,6 +2,7 @@
 
 mod adjustments;
 mod theme;
+mod updater;
 mod ai_denoise;
 mod ai_generation;
 mod ai_restoration;
@@ -680,6 +681,7 @@ struct PixelForge {
     install_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     install_status: String,
     dependency_manager: dependencies::Manager,
+    updater: updater::Manager,
     remove_model: Option<(usize,PathBuf,Option<String>,bool)>,
     model_library_reveal: bool,
     install_folder: Option<PathBuf>,
@@ -888,6 +890,7 @@ impl Default for PixelForge {
             install_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             install_status: String::new(),
             dependency_manager: dependencies::Manager::default(),
+            updater: updater::Manager::default(),
             remove_model: None,
             model_library_reveal: false,
             install_folder: None,
@@ -6572,6 +6575,7 @@ impl eframe::App for PixelForge {
                 let missing=self.dependency_manager.missing();
                 let label=if missing>0 {egui::RichText::new(format!("Dependencies ({missing})")).color(egui::Color32::YELLOW).strong()} else {egui::RichText::new("Dependencies")};
                 if ui.button(label).clicked() {self.dependency_manager.open=true;}
+                if ui.button("Updates").clicked() {self.updater.open=true;}
                 ui.separator();
                 ui.strong("PixelForge");
 
@@ -6980,6 +6984,14 @@ impl eframe::App for PixelForge {
         self.show_controls_settings(ctx);
         self.show_unsaved_prompt(ctx);
         self.show_exit_confirmation(ctx);
+        let can_restart = !self.project_dirty && !self.generation_running && !self.ai_running
+            && !self.exporting && !self.ai_saving && self.install_rx.is_none() && !self.dependency_manager.busy()
+            && !self.inactive_tabs.iter().any(|(_,tab)|tab.project_dirty || tab.generation_running || tab.ai_running
+                || tab.exporting || tab.ai_saving || tab.install_rx.is_some());
+        if self.updater.show(ctx, can_restart) {
+            self.exit_allowed=true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
 }
 

@@ -1,0 +1,1 @@
+Installed by the PixelForge Windows installer. In-app updates use the setup package.

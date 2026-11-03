@@ -229,7 +229,7 @@ pub fn ensure_server() -> Result<(), String> {
         }
             command
         };
-        command.arg("--listen").arg("127.0.0.1").arg("--port").arg("8188")
+        command.arg("--disable-auto-launch").arg("--listen").arg("127.0.0.1").arg("--port").arg("8188")
             .stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
         #[cfg(windows)] {use std::os::windows::process::CommandExt;command.creation_flags(0x08000000);}
         *owned = Some(command.spawn().map_err(|e| format!("Cannot start ComfyUI backend: {e}"))?);
