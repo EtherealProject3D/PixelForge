@@ -12,9 +12,11 @@ and run one operation at a time:
 The left comparison dropdown is a persistent reference (the original by default).
 The right dropdown follows the selected thumbnail and new operation results.
 Changing the left reference keeps that choice for later operations and project saves.
-**Rotate Left / Rotate Right** in the workspace toolbar create a new version in
-90-degree steps, baking current adjustments into the rotated image. Earlier versions
-and their selections remain intact; the rotated version starts with a clear selection.
+**Rotate Left / Rotate Right** update the selected version in 90-degree steps without
+adding a thumbnail. Adjustments, selections, and saved selections rotate with the
+image. Subsequent operations use the rotated source. Other versions stay unchanged.
+Double-click the image workspace to fit and center it, including in Compare mode
+and across Edit, AI Tools, Generate, and Selection.
 
 Presets set noise reduction and blend strength; they do not run a chain automatically.
 Gentle starts at Light / 65%, Grainy Photo at Medium / 80%, Soft Photo at Very Light / 75%.

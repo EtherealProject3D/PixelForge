@@ -1551,17 +1551,31 @@ impl PixelForge {
         self.capture_workspace_editor();
         let parent = self.generation_selected;
         let Some(item) = self.generation_gallery.get(parent) else { return; };
-        let rendered = item.editor.render(&item.pixels);
-        let pixels = if clockwise { image::imageops::rotate90(&rendered) } else { image::imageops::rotate270(&rendered) };
-        let mut settings = item.settings.clone();
-        settings.width = pixels.width();
-        settings.height = pixels.height();
-        settings.refine_parent = Some(parent);
-        settings.refine_prompt = Some(if clockwise { "Rotate right 90°" } else { "Rotate left 90°" }.into());
-        let seed = item.seed;
-        let texture = ctx.load_texture(format!("studio_rotation_{}", self.generation_gallery.len()), ColorImage::from_rgba_unmultiplied([pixels.width() as usize, pixels.height() as usize], pixels.as_raw()), TextureOptions::LINEAR);
-        self.generation_gallery.push(GeneratedItem { editor: studio::EditorState::default(), settings, pixels, texture, seed });
-        self.generation_selected = self.generation_gallery.len()-1;
+        let mut editor = item.editor.clone();
+        let pixels = if clockwise { image::imageops::rotate90(&item.pixels) } else { image::imageops::rotate270(&item.pixels) };
+        let rotate_mask = |mask: &masking::SelectionMask| {
+            let (w,h) = mask.dimensions();
+            let source = image::GrayImage::from_raw(w,h,mask.pixels().to_vec()).expect("valid selection mask");
+            let rotated = if clockwise { image::imageops::rotate90(&source) } else { image::imageops::rotate270(&source) };
+            masking::SelectionMask::from_pixels(rotated.width(),rotated.height(),rotated.into_raw()).expect("rotated mask has matching dimensions")
+        };
+        editor.mask = editor.mask.as_ref().map(&rotate_mask);
+        for (_,mask) in &mut editor.saved_selections { *mask = rotate_mask(mask); }
+        let display = editor.render(&pixels);
+        let texture = ctx.load_texture(format!("studio_rotation_{parent}"), ColorImage::from_rgba_unmultiplied([pixels.width() as usize, pixels.height() as usize], display.as_raw()), TextureOptions::LINEAR);
+        let item = &mut self.generation_gallery[parent];
+        item.settings.width = pixels.width();
+        item.settings.height = pixels.height();
+        item.pixels = pixels;
+        item.editor = editor;
+        item.texture = texture;
+        // Reload this version without capturing the old, unrotated editor state.
+        self.workspace_editor = None;
+        self.refinement_source = None;
+        self.refinement_mask.clear();
+        self.refinement_mask_texture = None;
+        self.ai_result = None;
+        self.ai_result_texture = None;
         self.project_dirty = true;
         self.bind_workspace_editor(ctx);
     }
@@ -2156,10 +2170,10 @@ impl PixelForge {
                 self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);
             }
             let can_rotate = !self.generation_running && !self.ai_running && !self.ai_saving && !self.exporting;
-            if ui.add_enabled(can_rotate, egui::Button::new("Rotate Left")).on_hover_text("Rotate the working image 90° counterclockwise as a new version. The left comparison reference stays unchanged.").clicked() {
+            if ui.add_enabled(can_rotate, egui::Button::new("Rotate Left")).on_hover_text("Rotate this version 90° counterclockwise. Later edits use this orientation.").clicked() {
                 self.rotate_workspace_version(ui.ctx(), false);
             }
-            if ui.add_enabled(can_rotate, egui::Button::new("Rotate Right")).on_hover_text("Rotate the working image 90° clockwise as a new version. The left comparison reference stays unchanged.").clicked() {
+            if ui.add_enabled(can_rotate, egui::Button::new("Rotate Right")).on_hover_text("Rotate this version 90° clockwise. Later edits use this orientation.").clicked() {
                 self.rotate_workspace_version(ui.ctx(), true);
             }
             if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Version")).clicked() {
@@ -2187,7 +2201,7 @@ impl PixelForge {
         let viewer_height = (available.y - Self::workspace_filmstrip_height(ui)).max(1.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
-            egui::Sense::drag(),
+            egui::Sense::click_and_drag(),
         );
         // Both versions share the canvas and camera; clipping reveals each side.
         let divider_x = rect.left() + rect.width() * self.generation_compare_position;
@@ -2195,9 +2209,12 @@ impl PixelForge {
             egui::pos2(divider_x - 9.0, rect.top()),
             egui::pos2(divider_x + 9.0, rect.bottom()),
         );
-        let divider_response = ui.interact(divider, ui.id().with("studio_compare_divider"), egui::Sense::drag())
+        let divider_response = ui.interact(divider, ui.id().with("studio_compare_divider"), egui::Sense::click_and_drag())
             .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
-        if divider_response.dragged() {
+        if response.double_clicked() || divider_response.double_clicked() {
+            self.generation_zoom = 1.0;
+            self.generation_pan = Vec2::ZERO;
+        } else if divider_response.dragged() {
             if let Some(pointer) = divider_response.interact_pointer_pos() {
                 self.generation_compare_position = ((pointer.x-rect.left())/rect.width()).clamp(0.0,1.0);
             }
@@ -5953,7 +5970,7 @@ impl PixelForge {
             (
                 i.pointer.button_down(pan_button),
                 i.pointer.button_pressed(pan_button),
-                i.pointer.button_double_clicked(fit_button),
+                i.pointer.button_double_clicked(fit_button) || i.pointer.button_double_clicked(egui::PointerButton::Primary),
                 i.pointer.delta(),
                 i.pointer.interact_pos(),
                 i.key_down(egui::Key::Space),
@@ -6969,7 +6986,7 @@ mod conversation_tests {
 mod workspace_tests {
     use super::*;
     #[test]
-    fn rotation_keeps_reference_and_source_and_four_turns_restore_pixels() {
+    fn rotation_updates_in_place_and_subsequent_versions_keep_orientation() {
         let ctx = egui::Context::default();
         let mut app = PixelForge::default();
         app.generation_workspace = true;
@@ -6977,19 +6994,20 @@ mod workspace_tests {
         let texture = ctx.load_texture("rotate_test",ColorImage::from_rgba_unmultiplied([3,2],pixels.as_raw()),TextureOptions::LINEAR);
         app.generation_gallery.push(GeneratedItem { editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:pixels.clone(),texture,seed:12 });
         app.ensure_workspace(&ctx);
+        app.selection_mask = Some(masking::SelectionMask::from_pixels(3,2,vec![255,0,0,0,0,0]).unwrap());
         app.rotate_workspace_version(&ctx, true);
-        assert_eq!(app.generation_gallery[1].pixels.dimensions(), (2,3));
-        assert_eq!(app.generation_gallery[1].pixels.get_pixel(1,0), pixels.get_pixel(0,0));
-        assert_eq!(app.generation_gallery[0].pixels, pixels);
-        app.generation_compare_index = 1; // A user-picked reference, not necessarily the original.
-        for _ in 0..3 { app.rotate_workspace_version(&ctx, true); }
-        assert_eq!(app.generation_gallery[4].pixels, pixels);
-        assert_eq!(app.generation_selected, 4);
-        assert_eq!(app.generation_compare_index, 1);
+        assert_eq!(app.generation_gallery.len(), 1);
+        assert_eq!(app.generation_gallery[0].pixels.dimensions(), (2,3));
+        assert_eq!(app.generation_gallery[0].pixels.get_pixel(1,0), pixels.get_pixel(0,0));
+        assert_eq!(app.selection_mask.as_ref().unwrap().get(1,0), Some(255));
         app.keep_workspace_version(&ctx, "Manual edits");
-        assert_eq!(app.generation_compare_index, 1);
-        assert_eq!(app.generation_selected, 5);
-        assert_eq!(app.generation_gallery[4].settings.refine_parent, Some(3));
+        assert_eq!(app.generation_gallery[1].pixels.dimensions(), (2,3));
+        app.generation_selected = 0;
+        for _ in 0..3 { app.rotate_workspace_version(&ctx, true); }
+        assert_eq!(app.generation_gallery[0].pixels, pixels);
+        assert_eq!(app.generation_selected, 0);
+        assert_eq!(app.generation_gallery.len(), 2);
+        assert_eq!(app.generation_compare_index, 0);
     }
     #[test]
     fn tools_share_selection_and_thumbnail_switching_retains_adjustments_and_mask() {
