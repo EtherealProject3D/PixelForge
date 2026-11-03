@@ -98,3 +98,16 @@ To inspect the saved baseline without discarding current work:
 git fetch origin
 git switch -c recovery/pre-stage-1 origin/rollback/pre-stage-1-2026-11-02
 ```
+
+## Shared comparison toolbar update
+
+All four tool tabs share `Left: Version` / `Compare` / `Right: Version`
+controls above the canvas. Enable Compare and drag the vertical divider to
+reveal the chosen versions. The left dropdown also chooses the working version.
+Use `+ Save New Version` to keep manual edits as a separate comparison target.
+Thumbnail and dropdown selection retain the current zoom and pan; Fit resets them.
+The old Before / After section has been removed from the Edit sidebar.
+
+Validation: 72 automated tests pass, including simulated divider dragging and
+camera retention across version/tool changes. Windows release build passes.
+Native mouse behavior and appearance still need a manual check at normal display scaling.

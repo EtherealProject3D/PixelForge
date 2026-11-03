@@ -631,6 +631,7 @@ struct PixelForge {
     generation_batch_settings: Option<GenerationSettings>,
     generation_selected: usize,
     generation_compare: bool,
+    generation_compare_position: f32,
     generation_compare_index: usize,
     generation_workspace: bool,
     generation_prompt: String,
@@ -829,6 +830,7 @@ impl Default for PixelForge {
             generation_batch_settings: None,
             generation_selected: 0,
             generation_compare: false,
+            generation_compare_position: 0.5,
             generation_compare_index: 0,
             generation_workspace: true,
             generation_prompt: String::new(),
@@ -2034,12 +2036,17 @@ impl PixelForge {
             ui.separator();
             ui.strong(format!("Version {}", self.generation_selected+1));
             ui.small(format!("{} × {}", self.image_size[0],self.image_size[1]));
+            egui::ComboBox::from_id_salt("compare_left_version")
+                .selected_text(format!("Left: Version {}", self.generation_selected+1))
+                .show_ui(ui, |ui| {
+                    for index in 0..count { ui.selectable_value(&mut self.generation_selected, index, format!("Version {}", index+1)); }
+                });
             ui.add_enabled(count > 1, egui::Checkbox::new(&mut self.generation_compare, "Compare"));
-            if self.generation_compare {
-                egui::ComboBox::from_id_salt("compare_version").selected_text(format!("Version {}", self.generation_compare_index+1)).show_ui(ui, |ui| {
+            egui::ComboBox::from_id_salt("compare_right_version")
+                .selected_text(format!("Right: Version {}", self.generation_compare_index+1))
+                .show_ui(ui, |ui| {
                     for index in 0..count { ui.selectable_value(&mut self.generation_compare_index, index, format!("Version {}", index+1)); }
                 });
-            }
             if ui.button("Select Area").clicked() {
                 self.generation_compare=false;
                 self.selection_tools_tab=true;self.ai_tools_tab=false;self.generation_tools_tab=false;
@@ -2118,101 +2125,52 @@ impl PixelForge {
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::drag(),
         );
-        let painting = self.refinement_masked
-            && self.refinement_source == Some(self.generation_selected)
-            && !self.generation_compare && !self.generation_running;
-        if painting && (response.dragged() || response.clicked()) {
-            if let Some(pointer) = response.interact_pointer_pos() {
-                let item=&self.generation_gallery[self.generation_selected];
-                let fit=(rect.width()/item.pixels.width() as f32).min(rect.height()/item.pixels.height() as f32);
-                let size=egui::vec2(item.pixels.width() as f32,item.pixels.height() as f32)*fit*self.generation_zoom;
-                let image_rect=egui::Rect::from_center_size(rect.center()+self.generation_pan,size);
-                if image_rect.contains(pointer) {
-                    let x=((pointer.x-image_rect.left())/image_rect.width()*item.pixels.width() as f32) as i32;
-                    let y=((pointer.y-image_rect.top())/image_rect.height()*item.pixels.height() as f32) as i32;
-                    let radius=self.refinement_brush as i32;
-                    let width=item.pixels.width() as i32;
-                    let height=item.pixels.height() as i32;
-                    if self.refinement_mask.len()==(width as usize)*(height as usize) {
-                        for py in (y-radius).max(0)..=(y+radius).min(height-1) {
-                            for px in (x-radius).max(0)..=(x+radius).min(width-1) {
-                                if (px-x)*(px-x)+(py-y)*(py-y)<=radius*radius {
-                                    self.refinement_mask[py as usize*width as usize+px as usize]=255;
-                                }
-                            }
-                        }
-                        self.refinement_mask_texture=None;
-                    }
-                }
+        // Both versions share the canvas and camera; clipping reveals each side.
+        let divider_x = rect.left() + rect.width() * self.generation_compare_position;
+        let divider = egui::Rect::from_min_max(
+            egui::pos2(divider_x - 9.0, rect.top()),
+            egui::pos2(divider_x + 9.0, rect.bottom()),
+        );
+        let divider_response = ui.interact(divider, ui.id().with("studio_compare_divider"), egui::Sense::drag())
+            .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+        if divider_response.dragged() {
+            if let Some(pointer) = divider_response.interact_pointer_pos() {
+                self.generation_compare_position = ((pointer.x-rect.left())/rect.width()).clamp(0.0,1.0);
             }
         } else if response.dragged() {
             self.generation_pan += response.drag_delta();
         }
-        if response.hovered() {
+        if response.hovered() || divider_response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.0 {
-                self.generation_zoom =
-                    (self.generation_zoom * (scroll * 0.002).exp()).clamp(0.1, 16.0);
-            }
-        }
-        if painting && self.refinement_mask_texture.is_none() {
-            let item=&self.generation_gallery[self.generation_selected];
-            let width=item.pixels.width() as usize;
-            let height=item.pixels.height() as usize;
-            if self.refinement_mask.len()==width*height {
-                let preview=egui::ColorImage::from_rgba_unmultiplied(
-                    [width,height],
-                    &self.refinement_mask.iter().flat_map(|&v| [255u8,35u8,35u8,v/2]).collect::<Vec<u8>>(),
-                );
-                self.refinement_mask_texture=Some(ui.ctx().load_texture("refinement_mask_preview",preview,TextureOptions::NEAREST));
-            }
-        }
-        let painter = ui.painter().with_clip_rect(rect);
-        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
-        let indices = if self.generation_compare {
-            vec![self.generation_selected, self.generation_compare_index]
-        } else {
-            vec![self.generation_selected]
-        };
-        let count = indices.len();
-        for (slot, index) in indices.into_iter().enumerate() {
-            let cell = egui::Rect::from_min_size(
-                egui::pos2(
-                    rect.min.x + rect.width() * slot as f32 / count as f32,
-                    rect.min.y,
-                ),
-                egui::vec2(rect.width() / count as f32, rect.height()),
-            );
-            let item = &self.generation_gallery[index];
-            let fit = (cell.width() / item.pixels.width() as f32)
-                .min(cell.height() / item.pixels.height() as f32);
-            let size = egui::vec2(item.pixels.width() as f32, item.pixels.height() as f32)
-                * fit
-                * self.generation_zoom;
-            let center = cell.center() + self.generation_pan;
-            let image_rect = egui::Rect::from_center_size(center, size);
-            let clipped = painter.with_clip_rect(cell);
-            clipped.image(
-                item.texture.id(),
-                image_rect,
-                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-                egui::Color32::WHITE,
-            );
-            if painting && index==self.generation_selected {
-                if let Some(mask_texture)=&self.refinement_mask_texture {
-                    clipped.image(mask_texture.id(),image_rect,
-                        egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),
-                        egui::Color32::WHITE);
+                let previous = self.generation_zoom;
+                self.generation_zoom = (previous * (scroll * 0.002).exp()).clamp(0.1,16.0);
+                if let Some(pointer) = ui.input(|i| i.pointer.hover_pos()) {
+                    let relative = pointer-rect.center();
+                    self.generation_pan = relative-(relative-self.generation_pan)*(self.generation_zoom/previous);
                 }
             }
-            clipped.text(
-                cell.left_top() + egui::vec2(8.0, 8.0),
-                egui::Align2::LEFT_TOP,
-                format!("Version {}", index + 1),
-                egui::FontId::proportional(13.0),
-                egui::Color32::WHITE,
-            );
         }
+        self.capture_workspace_editor();
+        let painter = ui.painter().with_clip_rect(rect);
+        painter.rect_filled(rect, 0.0, egui::Color32::from_gray(20));
+        let divider_x = rect.left() + rect.width()*self.generation_compare_position;
+        for (slot,index) in [self.generation_selected,self.generation_compare_index].into_iter().enumerate() {
+            let item = &self.generation_gallery[index];
+            let size = egui::vec2(item.pixels.width() as f32,item.pixels.height() as f32);
+            let fit = (rect.width()/size.x).min(rect.height()/size.y);
+            let image_rect = egui::Rect::from_center_size(rect.center()+self.generation_pan,size*fit*self.generation_zoom);
+            let clip = if slot==0 {
+                egui::Rect::from_min_max(rect.min,egui::pos2(divider_x,rect.bottom()))
+            } else {
+                egui::Rect::from_min_max(egui::pos2(divider_x,rect.top()),rect.max)
+            };
+            painter.with_clip_rect(clip).image(item.texture.id(),image_rect,
+                egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),egui::Color32::WHITE);
+        }
+        painter.line_segment([egui::pos2(divider_x,rect.top()),egui::pos2(divider_x,rect.bottom())],egui::Stroke::new(2.0,egui::Color32::WHITE));
+        painter.circle_filled(egui::pos2(divider_x,rect.center().y),12.0,egui::Color32::from_gray(45));
+        painter.text(egui::pos2(divider_x,rect.center().y),egui::Align2::CENTER_CENTER,"↔",egui::FontId::proportional(16.0),egui::Color32::WHITE);
 
         self.show_workspace_filmstrip(ui);
     }
@@ -2240,8 +2198,7 @@ impl PixelForge {
                             self.generation_selected = index;
                             self.refinement_source = None;
                             self.refinement_mask_texture = None;
-                            self.generation_zoom = 1.0;
-                            self.generation_pan = Vec2::ZERO;
+
                         }
                         ui.small(format!("Version {}", index+1));
                     });
@@ -2302,6 +2259,7 @@ impl PixelForge {
             &mut other.generation_selected,
         );
         std::mem::swap(&mut self.generation_compare, &mut other.generation_compare);
+        std::mem::swap(&mut self.generation_compare_position, &mut other.generation_compare_position);
         std::mem::swap(
             &mut self.generation_compare_index,
             &mut other.generation_compare_index,
@@ -5246,27 +5204,6 @@ impl PixelForge {
             preview_needs_refresh = true;
         }
 
-        ui.separator();
-        egui::CollapsingHeader::new("Before / After")
-            .id_salt("pixelforge_comparison")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.checkbox(&mut self.comparison_enabled, "Enable Before / After");
-
-                if self.comparison_enabled {
-                    ui.label("Divider Position");
-
-                    ui.add(
-                        egui::Slider::new(&mut self.comparison_position, 0.0..=1.0)
-                            .show_value(false),
-                    );
-
-                    ui.label("Drag the divider on the image.");
-                    ui.label("Left: Original");
-                    ui.label("Right: Adjusted");
-                }
-            });
-
         let after_adjustments = [
             self.brightness,
             self.contrast,
@@ -6886,6 +6823,46 @@ mod workspace_tests {
         assert_eq!(app.generation_gallery[0].pixels.get_pixel(0,0)[0],40);
         assert!(app.generation_gallery[0].editor.render(&app.generation_gallery[0].pixels).get_pixel(0,0)[0]>40);
     }
+    #[test]
+    fn shared_compare_divider_drags_and_camera_survives_version_and_tool_changes() {
+        let ctx=egui::Context::default();
+        let mut app=PixelForge::default();
+        for n in 0..2 {
+            let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([n*100,40,40,255]));
+            let texture=ctx.load_texture(format!("compare_test_{n}"),ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
+            app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+        }
+        app.generation_workspace=true;
+        app.generation_compare=true;
+        app.generation_compare_index=1;
+        app.generation_zoom=2.0;
+        app.generation_pan=egui::vec2(17.0,-23.0);
+        let frame=|app:&mut PixelForge,events| {
+            let input=egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1400.0,900.0))),events,..Default::default()};
+            let _=ctx.run(input,|ctx| {egui::CentralPanel::default().show(ctx,|ui|app.show_generation_workspace(ui));});
+        };
+        frame(&mut app,vec![]);
+        let pointer=|pos,pressed| egui::Event::PointerButton {pos,button:egui::PointerButton::Primary,pressed,modifiers:egui::Modifiers::NONE};
+        let start=egui::pos2(700.0,350.0);
+        frame(&mut app,vec![egui::Event::PointerMoved(start),pointer(start,true)]);
+        let end=egui::pos2(900.0,350.0);
+        frame(&mut app,vec![egui::Event::PointerMoved(end)]);
+        assert!(app.generation_compare_position>0.6,"Divider did not move: {}",app.generation_compare_position);
+        frame(&mut app,vec![pointer(end,false)]);
+        assert_eq!(app.generation_pan,egui::vec2(17.0,-23.0));
+        for tab in 0..4 {
+            app.generation_selected=tab%2;
+            app.generation_tools_tab=tab==0;
+            app.ai_tools_tab=tab==1;
+            app.selection_tools_tab=tab==2;
+            app.generation_compare=tab%2==0;
+            frame(&mut app,vec![]);
+            assert!((app.generation_zoom-2.0).abs()<0.001);
+            assert_eq!(app.generation_pan,egui::vec2(17.0,-23.0));
+            assert_eq!(app.workspace_editor,Some(tab%2));
+        }
+    }
+
     #[test]
     fn studio_project_save_reopen_keeps_adjustments_masks_and_original_pixels() {
         let ctx=egui::Context::default();
