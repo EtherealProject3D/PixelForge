@@ -1299,7 +1299,7 @@ impl PixelForge {
                 self.install_rx = None;
                 match result {
                     Ok(path) => {
-                        self.install_status = format!("Installed: {}", path.display());
+                        self.install_status = format!("Installed in {}. Refresh models; restart ComfyUI if Qwen is not yet available.", path.display());
                         let (tx, rx) = std::sync::mpsc::channel();
                         self.generation_models_rx = Some(rx);
                         let repaint = ctx.clone();
@@ -1327,7 +1327,7 @@ impl PixelForge {
                             format!("Found {} local checkpoints", models.len());
                         self.generation_checkpoints = models;
                         if !self.install_folder_manual {
-                            self.install_folder = model_installer::detect_checkpoint_folder(
+                            self.install_folder = model_installer::detect_models_folder(
                                 &self.generation_checkpoints,
                             );
                         }
@@ -1542,6 +1542,8 @@ impl PixelForge {
         }
         self.show_conversation(ui);
         ui.separator();
+        self.show_model_library(ui);
+        ui.separator();
         ui.collapsing("Generation settings", |ui| self.show_generation_settings(ui));
         if self.generation_checkpoint.is_empty() {
             ui.label("Connect a local model to begin.");
@@ -1550,11 +1552,80 @@ impl PixelForge {
 
     }
 
+    fn show_model_library(&mut self,ui:&mut egui::Ui) {
+        egui::CollapsingHeader::new("Model Library").show(ui,|ui| {
+            ui.label("Generation and editing models");
+            if self.install_folder.is_none() && !self.install_folder_manual {
+                self.install_folder=model_installer::detect_models_folder(&self.generation_checkpoints);
+            }
+            if let Some(folder)=&self.install_folder {
+                ui.label(format!("Models folder: {}",folder.display()));
+            } else {
+                ui.label("Choose the models folder used by ComfyUI.");
+            }
+            if ui.add_enabled(self.install_rx.is_none(),egui::Button::new("Choose Models Folder…")).clicked() {
+                if let Some(folder)=rfd::FileDialog::new().set_title("Select the ComfyUI models folder (contains checkpoints, diffusion_models, text_encoders, vae)").pick_folder() {
+                    // Also accept the old checkpoints-folder choice.
+                    self.install_folder=Some(if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder});
+                    self.install_folder_manual=true;
+                }
+            }
+            for (index,model) in model_installer::MODELS.iter().enumerate() {
+                let present=self.install_folder.as_ref().map(|root|model_installer::installed_files(model,root)).unwrap_or(0);
+                let backend_model=(!model.editing).then(||self.generation_checkpoints.iter().find(|name|name.to_lowercase().contains(model.keyword)).cloned()).flatten();
+                let installed=present==model.files.len() || backend_model.is_some();
+                ui.group(|ui| {
+                    ui.set_max_width(ui.available_width());
+                    ui.strong(model.name);
+                    ui.label(if installed {"Installed".to_owned()} else if present>0 {format!("{} / {} files installed",present,model.files.len())} else {"Not installed".to_owned()});
+                    ui.label(model.description);
+                    ui.hyperlink_to("Model page and license",model.page);
+                    if installed {
+                        if ui.button(if model.editing {"Use for Edits"} else {"Use for Generation"}).clicked() {
+                            if model.editing {self.edit_checkpoint=ai_generation::QWEN_EDIT.into();}
+                            else {
+                                self.generation_checkpoint=backend_model.clone().unwrap_or_else(||model.files[0].file.to_owned());
+                                let (steps,cfg,_)=Self::recommended_generation_settings(&self.generation_checkpoint);
+                                self.generation_steps=steps;self.generation_cfg=cfg;
+                            }
+                        }
+                    } else if ui.add_enabled(self.install_rx.is_none(),egui::Button::new("Download & Install")).clicked() {
+                        let folder=self.install_folder.clone().or_else(||rfd::FileDialog::new().set_title("Select the ComfyUI models folder").pick_folder());
+                        if let Some(folder)=folder {
+                            let folder=if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder};
+                            self.install_folder=Some(folder.clone());self.install_folder_manual=true;
+                            self.install_cancel.store(false,std::sync::atomic::Ordering::Relaxed);
+                            self.install_progress.store(0,std::sync::atomic::Ordering::Relaxed);
+                            self.install_total.store(0,std::sync::atomic::Ordering::Relaxed);
+                            let progress=self.install_progress.clone();let total=self.install_total.clone();let cancel=self.install_cancel.clone();
+                            let (tx,rx)=std::sync::mpsc::channel();self.install_rx=Some(rx);
+                            self.install_status=format!("Downloading {}…",model.name);
+                            let repaint=ui.ctx().clone();
+                            std::thread::spawn(move || {
+                                let _=tx.send(model_installer::install(index,folder,progress,total,cancel));
+                                repaint.request_repaint();
+                            });
+                        }
+                    }
+                });
+            }
+            if self.install_rx.is_some() {
+                let bytes=self.install_progress.load(std::sync::atomic::Ordering::Relaxed);
+                let total=self.install_total.load(std::sync::atomic::Ordering::Relaxed);
+                ui.add(egui::ProgressBar::new(if total>0 {bytes as f32/total as f32} else {0.0})
+                    .text(format!("{:.2} / {:.2} GB",bytes as f64/1e9,total as f64/1e9)));
+                if ui.button("Cancel Download").clicked() {self.install_cancel.store(true,std::sync::atomic::Ordering::Relaxed);}
+            }
+            if !self.install_status.is_empty() {ui.label(&self.install_status);}
+            ui.label("Existing complete files are kept. Refresh models after installation; Qwen may need a ComfyUI restart.");
+            if ui.add_enabled(self.generation_models_rx.is_none(),egui::Button::new("Refresh Installed Models")).clicked() {self.refresh_generation_models(ui.ctx());}
+        });
+    }
+
     fn show_generation_settings(&mut self,ui:&mut egui::Ui) {
         let ctx=ui.ctx().clone();
         ui.spacing_mut().slider_width=(ui.available_width()-80.0).max(60.0);
         ui.checkbox(&mut self.prompt_spelling.enabled,"Check English spelling");
-        ui.hyperlink_to("Qwen installation help (only needed for setup)", "https://comfyanonymous.github.io/ComfyUI_examples/qwen_image/");
         ui.label("Local GPU generation via ComfyUI (127.0.0.1:8188)");
         if ui.button("Connect / Refresh Models").clicked() {
             self.refresh_generation_models(&ctx);
@@ -1579,109 +1650,6 @@ impl PixelForge {
             "Custom model: Results depend on the checkpoint's training and recommended settings."
         };
         ui.small(best_for);
-        ui.separator();
-        egui::CollapsingHeader::new("Model Library")
-            .default_open(false)
-            .show(ui, |ui| {
-                ui.label("Local SDXL checkpoints for image generation.");
-                ui.label(format!("{} checkpoint(s) detected by ComfyUI", self.generation_checkpoints.len()));
-                if self.install_folder.is_none() && !self.install_folder_manual {
-                    self.install_folder = model_installer::detect_checkpoint_folder(&self.generation_checkpoints);
-                }
-                if let Some(folder) = &self.install_folder {
-                    ui.small(format!("Install destination: {}", folder.display()));
-                } else {
-                    ui.small("Install destination: not automatically detected; choose a folder on first install.");
-                }
-                if ui.small_button("Change install location...").clicked() {
-                    if let Some(folder) = rfd::FileDialog::new()
-                        .set_title("Select ComfyUI models/checkpoints")
-                        .pick_folder() {
-                        self.install_folder = Some(folder);
-                        self.install_folder_manual = true;
-                    }
-                }
-                let installed = |term: &str| self.generation_checkpoints.iter()
-                    .any(|name| name.to_lowercase().contains(term));
-                for (title, keyword, description, url, install_index) in [
-                    ("SDXL Base 1.0", "sd_xl_base", "General-purpose baseline; useful for comparisons.",
-                     "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0", None),
-                    ("RealVisXL", "realvis", "Photography-focused SDXL checkpoint; recommended for natural-looking photos.",
-                     "https://huggingface.co/SG161222/RealVisXL_V5.0", Some(1)),
-                    ("Juggernaut XL", "juggernaut", "Detailed SDXL photography and cinematic imagery.",
-                     "https://huggingface.co/RunDiffusion/Juggernaut-XL-v9", Some(2)),
-                    ("CyberRealistic Pony v18", "cyberrealisticpony", "Pony XL checkpoint for realistic characters, poses, and anatomy. Recommended starting point: CFG 5, 30+ steps.",
-                     "https://huggingface.co/cyberdelia/CyberRealisticPony", Some(0)),
-                ] {
-                    ui.group(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.strong(title);
-                            ui.label(if installed(keyword) { "Installed" } else { "Not detected" });
-                        });
-                        ui.small(description);
-                        ui.hyperlink_to("Model page and license", url);
-                        if installed(keyword) {
-                            if ui.small_button("Select checkpoint").clicked() {
-                                if let Some(found) = self.generation_checkpoints.iter()
-                                    .find(|name| name.to_lowercase().contains(keyword)) {
-                                    self.generation_checkpoint = found.clone();
-                                }
-                            }
-                        } else if let Some(index) = install_index {
-                            if ui.add_enabled(self.install_rx.is_none(), egui::Button::new("Install checkpoint...")).clicked() {
-                                let folder = self.install_folder.clone().or_else(|| {
-                                    rfd::FileDialog::new()
-                                        .set_title("Select the ComfyUI models/checkpoints folder")
-                                        .pick_folder()
-                                });
-                                if let Some(folder) = folder {
-                                    self.install_folder = Some(folder.clone());
-                                    self.install_folder_manual = true;
-                                    self.install_cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-                                    self.install_progress.store(0, std::sync::atomic::Ordering::Relaxed);
-                                    self.install_total.store(0, std::sync::atomic::Ordering::Relaxed);
-                                    let progress = self.install_progress.clone();
-                                    let total = self.install_total.clone();
-                                    let cancel = self.install_cancel.clone();
-                                    let (tx, rx) = std::sync::mpsc::channel();
-                                    self.install_rx = Some(rx);
-                                    self.install_status = format!("Downloading {title}...");
-                                    let repaint = ctx.clone();
-                                    std::thread::spawn(move || {
-                                        let result = model_installer::install(index, folder, progress, total, cancel);
-                                        let _ = tx.send(result);
-                                        repaint.request_repaint();
-                                    });
-                                }
-                            }
-                        }
-                    });
-                }
-                if self.install_rx.is_some() {
-                    let bytes = self.install_progress.load(std::sync::atomic::Ordering::Relaxed);
-                    let total = self.install_total.load(std::sync::atomic::Ordering::Relaxed);
-                    ui.add(egui::ProgressBar::new(if total > 0 { bytes as f32 / total as f32 } else { 0.0 })
-                        .text(format!("{:.2} / {:.2} GB", bytes as f64 / 1e9, total as f64 / 1e9)));
-                    if ui.button("Cancel download").clicked() {
-                        self.install_cancel.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-                if !self.install_status.is_empty() { ui.label(&self.install_status); }
-                ui.separator();
-                ui.label("To install: download the SDXL .safetensors checkpoint from the model page, place it in a ComfyUI models/checkpoints folder, then select Refresh Models.");
-                ui.small("Models are third-party files. Check each model's license and download source. PixelForge does not upload prompts or images.");
-                if ui.button("Refresh Installed Checkpoints").clicked() && self.generation_models_rx.is_none() {
-                    let (tx, rx) = std::sync::mpsc::channel();
-                    self.generation_models_rx = Some(rx);
-                    self.generation_status = "Refreshing installed ComfyUI checkpoints...".into();
-                    let repaint = ctx.clone();
-                    std::thread::spawn(move || {
-                        let result = ai_generation::checkpoints();
-                        let _ = tx.send(result);
-                        repaint.request_repaint();
-                    });
-                }
-            });
         ui.separator();
         let previous_ratio = self.generation_size;
         ui.label("Style preset");

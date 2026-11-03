@@ -96,7 +96,7 @@ fn validate_qwen_nodes(info: &Value) -> Result<(), String> {
     for (node, input, file, folder) in [("UNETLoader","unet_name",QWEN_UNET,"diffusion_models"),("CLIPLoader","clip_name",QWEN_CLIP,"text_encoders"),("VAELoader","vae_name",QWEN_VAE,"vae")] {
         let names = info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array);
         if !names.is_some_and(|names| names.iter().any(|v| v.as_str() == Some(file))) {
-            return Err(format!("Qwen Edit file missing: models/{folder}/{file}. See docs/QWEN_EDIT_SETUP.md, install the files and restart ComfyUI. No SDXL fallback was used."));
+            return Err(format!("Qwen Edit file missing: models/{folder}/{file}. Open Generate > Model Library to install Qwen, then restart ComfyUI. No SDXL fallback was used."));
         }
     }
     Ok(())

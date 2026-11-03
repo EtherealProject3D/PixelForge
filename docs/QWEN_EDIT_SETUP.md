@@ -1,65 +1,36 @@
-# Qwen-Image-Edit 2509 setup
+# Qwen Edit setup
 
-PixelForge now has a dedicated local Qwen instruction-edit workflow, selectable
-under Changes prompt. SDXL generation and SDXL whole-image/masked refinement remain
-available. This Qwen integration uses native ComfyUI nodes, configurable Euler/simple steps (default 20),
-CFG 4, shift 3, CFG normalization and the image-conditioned Qwen Edit Plus encoder.
-It does not require the optional Lightning LoRA.
+Open **Generate → Model Library** in PixelForge. The library contains all curated
+generation and editing models, with the same Download & Install action, progress,
+cancel control, and installed status.
 
-1. Update ComfyUI to a version supporting TextEncodeQwenImageEditPlus and Qwen Edit
-   2509. Keep the backend on 127.0.0.1:8188.
-2. Locate the models folder actually used by your active ComfyUI instance.
-3. Install the three official model files (about 28 GB total; allow extra room):
+Choose the **models** folder belonging to the active ComfyUI installation if it
+cannot be detected automatically. Select **Qwen-Image-Edit 2509 (FP8)** and click
+**Download & Install**. It installs the editor, text encoder, and VAE (about 30 GB)
+in their respective subfolders. Existing complete files are reused, including
+shared encoder/VAE files. Incomplete or unexpectedly sized existing files are
+reported for inspection rather than overwritten. File sizes are validated;
+cryptographic hashes are not currently checked.
 
-```powershell
-.\scripts\Install-QwenEdit.ps1 -ModelsDirectory 'C:\your\ComfyUI\models'
-```
+After installation, refresh installed models; restart ComfyUI if it has not yet
+registered the new files. Click **Use for Edits** to choose Qwen under Changes
+prompt. Generation model selection stays independent. ComfyUI must support the
+Qwen nodes; update ComfyUI if the app reports missing nodes.
 
-Replace the example path with your actual folder. Downloads resume using .part
-files and existing completed files are not overwritten. The script checks minimum
-file sizes, not cryptographic hashes. Run with -WhatIf to preview destinations.
+Required files:
 
-Files and destinations:
+- diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors
+- text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors
+- vae/qwen_image_vae.safetensors
 
-- models/diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors
-- models/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors
-- models/vae/qwen_image_vae.safetensors
+The app handles downloads in the background. Cancellation/failure removes the
+active partial download; already completed bundle files are kept for retrying.
+The optional scripts/Install-QwenEdit.ps1 remains available for command-line setup.
 
-Restart ComfyUI after installation. Create or import an image in PixelForge, select
-Qwen-Image-Edit 2509 (FP8), enter a change instruction and Apply Edit. It sends the
-selected image and that instruction, without concatenating previous SDXL prompts.
-Qwen currently edits the whole image; cancel any painted area before using it.
-Missing nodes/files produce actionable errors before the image upload or job
-submission, with no silent SDXL fallback. Model filenames must match the paths above
-at the root of each model category (not a nested subfolder).
+Apply Edit changes the whole image. Apply Edit to Selection retains only the
+selected region of Qwen's result, with inward feathering at the boundary. Qwen
+works on the intact image internally. Output returns to the source pixel size.
+GPU memory use, speed, and quality depend on the hardware and chosen steps.
 
-The pipeline scales the image to the Qwen working size internally, then resamples the result back to the exact source dimensions with Lanczos filtering. This preserves pixel dimensions; it does not add native model detail. Metadata records the final dimensions and model/sampling settings. Only the bottom status panel shows generation progress; the installation-help link is tucked inside Generation settings. Generation model selection is
-independent. Large FP8 models can still exceed laptop memory; GPU performance,
-offloading and output quality must be tested on your hardware. Model weights are
-not bundled, automatically downloaded at application startup, or installed by the
-Rust build. A 15-minute per-job timeout remains in place.
-
-References:
-- https://comfyanonymous.github.io/ComfyUI_examples/qwen_image/
-- https://github.com/Comfy-Org/workflow_templates/blob/main/templates/image_qwen_image_edit_2509.json
-- https://huggingface.co/Comfy-Org/Qwen-Image-Edit_ComfyUI
-
-## Ensure you are running the updated application
-
-The older title PixelForge v0.5.0-dev and the Refine Selected Image button identify
-the old executable. The new title is PixelForge v0.5.1-stage1.
-
-Close old copies. Inside the intended repository:
-
-```powershell
-git fetch origin
-git switch feature/stage-1-conversational-editing
-git pull --ff-only
-.\scripts\Run-PixelForge.ps1
-```
-
-This launcher builds and starts the executable from its own checkout, instead of a
-pinned shortcut or copied executable elsewhere. Both Initial prompt and Changes
-prompt should appear in the right sidebar, and thumbnails below the canvas.
-
-Qwen Steps now has its own slider under Changes prompt, separate from generation settings. Negative prompt is between Initial prompt and Changes prompt, and its typed terms are passed to Qwen negative conditioning. Lower steps may reduce quality and do not remove model-loading/encoding time.
+Model files and licenses: [Qwen editor](https://huggingface.co/Comfy-Org/Qwen-Image-Edit)
+and [text encoder/VAE](https://huggingface.co/Comfy-Org/Qwen-Image).

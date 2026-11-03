@@ -174,3 +174,24 @@ into one reusable function so its expanded content can be tested directly.
 Validation: 79 tests pass and Windows debug build passes. A layout regression
 renders Qwen plus expanded settings at 270, 300, and 330 logical pixels, verifies
 settings were drawn, and rejects content extending beyond the right boundary.
+
+## Unified generation/edit Model Library
+
+Model Library now sits directly below the prompts, outside Generation settings.
+It lists all five curated models (SDXL Base, RealVisXL, Juggernaut, CyberRealistic
+Pony, and Qwen Edit), using one Download & Install flow, installed/partial status,
+combined byte progress, cancellation, and generation/edit selection actions.
+The separate Qwen setup hyperlink is removed.
+
+The shared installer targets the active ComfyUI models root and routes each file
+to checkpoints, diffusion_models, text_encoders, or vae. Qwen installs all three
+required files, reuses valid existing files, rejects suspicious existing sizes,
+checks disk space and response sizes, and never replaces existing destinations.
+Failed/cancelled downloads clean the active .part; completed files remain.
+Large bundle downloads no longer have the old two-minute whole-request limit.
+
+Validation: 84 tests pass and Windows debug build passes. Local HTTP fixtures
+exercise bundle installs, shared-file reuse, aggregate progress, cancellation,
+partial transfer failure, and no-overwrite publication. Official Qwen/SDXL Base
+URLs respond successfully; existing Qwen files match expected size ranges.
+No duplicate 30 GB download or live GPU edit was run for this installer change.
