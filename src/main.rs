@@ -1983,10 +1983,12 @@ impl PixelForge {
                 &self.generation_checkpoint
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.generation_checkpoint,ai_generation::FLUX_KLEIN.into(),ai_generation::FLUX_KLEIN);
+                ui.selectable_value(&mut self.generation_checkpoint,ai_generation::FLUX_KLEIN.into(),format!("{} — Fast generation, prompt-driven images, instruction-based editing",ai_generation::FLUX_KLEIN));
                 for checkpoint in &self.generation_checkpoints {
                     let lower = checkpoint.to_ascii_lowercase();
-                    let best_for = if lower.contains("realvis") {
+                    let best_for = if lower.contains("cyberrealistic") || lower.contains("pony") {
+                        "Realistic portraits, character images, detailed photography"
+                    } else if lower.contains("realvis") {
                         "Natural photography, portraits, landscapes"
                     } else if lower.contains("juggernaut") {
                         "Detailed images, cinematic scenes, dramatic lighting"
