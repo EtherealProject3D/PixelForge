@@ -74,6 +74,7 @@ impl Drop for UpscaleResult {
 }
 
 pub fn engine_path() -> PathBuf {
+    if let Some(folder)=crate::dependencies::active_path(crate::dependencies::Component::Upscale) {return folder.join("realesrgan-ncnn-vulkan.exe");}
     let bundled = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("tools").join("realesrgan").join("realesrgan-ncnn-vulkan.exe")));
     if let Some(path) = bundled {
         if path.is_file() { return path; }

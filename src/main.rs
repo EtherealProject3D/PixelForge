@@ -9,6 +9,7 @@ mod histogram;
 #[allow(dead_code)]
 mod masking;
 mod model_installer;
+mod dependencies;
 mod project;
 mod generation_project;
 mod studio;
@@ -658,6 +659,9 @@ struct PixelForge {
     install_total: std::sync::Arc<std::sync::atomic::AtomicU64>,
     install_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     install_status: String,
+    dependency_manager: dependencies::Manager,
+    remove_model: Option<(usize,PathBuf,Option<String>,bool)>,
+    model_library_reveal: bool,
     install_folder: Option<PathBuf>,
     install_folder_manual: bool,
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
@@ -856,6 +860,9 @@ impl Default for PixelForge {
             install_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             install_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             install_status: String::new(),
+            dependency_manager: dependencies::Manager::default(),
+            remove_model: None,
+            model_library_reveal: false,
             install_folder: None,
             install_folder_manual: false,
             ai_rx: None,
@@ -1187,6 +1194,7 @@ impl PixelForge {
     }
 
     fn start_generation(&mut self, ctx: &egui::Context) {
+        if self.dependency_manager.busy() {self.generation_status="Wait for dependency setup to finish".into();return;}
         if self.generation_running || self.ai_running {
             return;
         }
@@ -1297,6 +1305,7 @@ impl PixelForge {
         if let Some(rx) = &self.install_rx {
             if let Ok(result) = rx.try_recv() {
                 self.install_rx = None;
+                self.dependency_manager.invalidate();
                 match result {
                     Ok(path) => {
                         self.install_status = format!("Installed in {}. Refresh models; restart ComfyUI if Qwen is not yet available.", path.display());
@@ -1407,6 +1416,7 @@ impl PixelForge {
     }
 
     fn refresh_generation_models(&mut self, ctx: &egui::Context) {
+        if self.dependency_manager.busy() {self.generation_status="Wait for the dependency check or setup to finish, then refresh models".into();return;}
         if self.generation_models_rx.is_some() {
             return;
         }
@@ -1553,7 +1563,7 @@ impl PixelForge {
     }
 
     fn show_model_library(&mut self,ui:&mut egui::Ui) {
-        egui::CollapsingHeader::new("Model Library").show(ui,|ui| {
+        egui::CollapsingHeader::new("Model Library").open(self.model_library_reveal.then_some(true)).show(ui,|ui| {
             ui.label("Generation and editing models");
             if self.install_folder.is_none() && !self.install_folder_manual {
                 self.install_folder=model_installer::detect_models_folder(&self.generation_checkpoints);
@@ -1589,7 +1599,7 @@ impl PixelForge {
                                 self.generation_steps=steps;self.generation_cfg=cfg;
                             }
                         }
-                    } else if ui.add_enabled(self.install_rx.is_none(),egui::Button::new("Download & Install")).clicked() {
+                    } else if ui.add_enabled(self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Download & Install")).clicked() {
                         let folder=self.install_folder.clone().or_else(||rfd::FileDialog::new().set_title("Select the ComfyUI models folder").pick_folder());
                         if let Some(folder)=folder {
                             let folder=if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder};
@@ -1607,6 +1617,12 @@ impl PixelForge {
                             });
                         }
                     }
+                    if present>0 || backend_model.is_some() {
+                        if ui.add_enabled(!self.generation_running&&!self.ai_running&&self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Remove Model…")).clicked() {
+                            if let Some(root)=&self.install_folder {self.remove_model=Some((index,root.clone(),backend_model.clone(),false));}
+                            else {self.install_status="Choose the model folder before removing files".into();}
+                        }
+                    }
                 });
             }
             if self.install_rx.is_some() {
@@ -1620,6 +1636,37 @@ impl PixelForge {
             ui.label("Existing complete files are kept. Refresh models after installation; Qwen may need a ComfyUI restart.");
             if ui.add_enabled(self.generation_models_rx.is_none(),egui::Button::new("Refresh Installed Models")).clicked() {self.refresh_generation_models(ui.ctx());}
         });
+        self.model_library_reveal=false;
+    }
+
+    fn show_model_removal(&mut self,ctx:&egui::Context) {
+        let Some((index,root,backend,mut shared))=self.remove_model.clone() else {return};
+        let model=&model_installer::MODELS[index];let mut open=true;let mut confirm=false;let mut cancel=false;
+        egui::Window::new("Remove Model").open(&mut open).collapsible(false).show(ctx,|ui| {
+            ui.heading(model.name);
+            if model.editing {ui.checkbox(&mut shared,"Also remove the shared text encoder and VAE");ui.label("Shared files may be used by other models. Leave this unchecked to keep them.");}
+            match model_installer::removal_plan(index,&root,backend.as_deref(),shared) {
+                Ok(files)=>{
+                    let bytes:u64=files.iter().map(|f|f.bytes).sum();ui.label(format!("Free {:.2} GB by permanently deleting:",bytes as f64/1e9));
+                    for file in &files {ui.label(file.path.display().to_string());}
+                    confirm=ui.add_enabled(!files.is_empty()&&!self.generation_running&&!self.ai_running&&self.install_rx.is_none(),egui::Button::new("Remove These Files")).clicked();
+                }
+                Err(error)=>{ui.label(error);}
+            }
+            if ui.button("Cancel").clicked() {cancel=true;}
+        });
+        if confirm {
+            ai_generation::stop_managed_backend();
+            self.install_status=match model_installer::remove_model_files(index,&root,backend.as_deref(),shared) {
+                Ok(bytes)=>{
+                    if model.editing {self.edit_checkpoint=String::new();}
+                    else if let Some(name)=&backend {self.generation_checkpoints.retain(|s|s!=name);if self.generation_checkpoint==*name {self.generation_checkpoint=self.generation_checkpoints.first().cloned().unwrap_or_default();}}
+                    self.dependency_manager.refresh(self.install_folder.clone(),self.generation_checkpoints.clone());
+                    format!("Removed model files; freed {:.2} GB. Restart ComfyUI to release any loaded model memory.",bytes as f64/1e9)
+                }
+                Err(error)=>format!("Model removal: {error}"),
+            };self.remove_model=None;
+        } else if !open||cancel {self.remove_model=None;} else {self.remove_model=Some((index,root,backend,shared));}
     }
 
     fn show_generation_settings(&mut self,ui:&mut egui::Ui) {
@@ -2308,6 +2355,9 @@ impl PixelForge {
         std::mem::swap(&mut self.install_total, &mut other.install_total);
         std::mem::swap(&mut self.install_cancel, &mut other.install_cancel);
         std::mem::swap(&mut self.install_status, &mut other.install_status);
+        std::mem::swap(&mut self.dependency_manager, &mut other.dependency_manager);
+        std::mem::swap(&mut self.remove_model, &mut other.remove_model);
+        std::mem::swap(&mut self.model_library_reveal, &mut other.model_library_reveal);
         std::mem::swap(&mut self.install_folder, &mut other.install_folder);
         std::mem::swap(
             &mut self.install_folder_manual,
@@ -3553,7 +3603,7 @@ impl PixelForge {
         denoise: bool,
         restoration: Option<ai_restoration::Operation>,
     ) {
-        if self.ai_running || self.ai_saving || self.exporting || self.generation_running {
+        if self.ai_running || self.ai_saving || self.exporting || self.generation_running || self.dependency_manager.busy() {
             self.ai_status = "Another operation is running".into();
             return;
         }
@@ -6056,6 +6106,11 @@ impl PixelForge {
 
 impl eframe::App for PixelForge {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|i|i.viewport().close_requested()) && self.dependency_manager.busy() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.dependency_manager.open=true;
+            self.dependency_manager.message="Finish or cancel dependency setup before closing PixelForge".into();
+        }
         // Intercept the native window X button before the
         // operating system closes the application.
         if ctx.input(|i| i.viewport().close_requested()) {
@@ -6105,6 +6160,7 @@ impl eframe::App for PixelForge {
         self.poll_preview(ctx);
         self.poll_ai_upscale(ctx);
         self.poll_generation(ctx);
+        self.dependency_manager.poll(ctx,self.install_folder.clone(),self.generation_checkpoints.clone());
         self.ensure_workspace(ctx);
         self.poll_ai_save(ctx);
 
@@ -6261,6 +6317,9 @@ impl eframe::App for PixelForge {
                     }
                 });
 
+                let missing=self.dependency_manager.missing();
+                let label=if missing>0 {egui::RichText::new(format!("Dependencies ({missing})")).color(egui::Color32::YELLOW).strong()} else {egui::RichText::new("Dependencies")};
+                if ui.button(label).clicked() {self.dependency_manager.open=true;}
                 ui.separator();
                 ui.strong("PixelForge");
 
@@ -6676,6 +6735,12 @@ impl eframe::App for PixelForge {
             }
         });
 
+        let workspace_busy=self.generation_running||self.ai_running||self.install_rx.is_some();
+        if self.dependency_manager.show(ctx,self.install_folder.clone(),self.generation_checkpoints.clone(),workspace_busy) {
+            self.generation_tools_tab=true;self.ai_tools_tab=false;self.selection_tools_tab=false;
+            self.generation_workspace=true;self.model_library_reveal=true;
+        }
+        self.show_model_removal(ctx);
         self.show_controls_settings(ctx);
         self.show_unsaved_prompt(ctx);
         self.show_exit_confirmation(ctx);

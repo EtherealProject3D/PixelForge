@@ -195,3 +195,24 @@ exercise bundle installs, shared-file reuse, aggregate progress, cancellation,
 partial transfer failure, and no-overwrite publication. Official Qwen/SDXL Base
 URLs respond successfully; existing Qwen files match expected size ranges.
 No duplicate 30 GB download or live GPU edit was run for this installer change.
+
+
+## Dependency setup and model removal
+
+The top Dependencies action highlights missing required components and opens a
+setup/maintenance inventory. It installs managed side-by-side versions of ComfyUI
+portable, Waifu2x, Real-ESRGAN, NAFNet, and an isolated Python deblur runtime, with
+progress, cancellation, basic validation, and reversible activation. Existing
+ComfyUI Desktop and system Python are left untouched. New managed installs live
+under LOCALAPPDATA/PixelForge/deps to avoid Windows path-length problems.
+
+Model Library now has Remove Model confirmations listing exact paths and bytes.
+Qwen shared encoder/VAE files are kept by default; partial bundles can be cleaned
+explicitly. Processing/downloads block removal and dependency switching.
+
+Validation: 90 regular tests pass; an additional opt-in integration test passed
+real official package installs and a tiny CPU deblur inside isolated fixtures.
+Native Windows inventory detected all current dependencies, and Qwen's 20.43 GB
+editor-only removal preview was inspected and cancelled without deleting files.
+ComfyUI portable full installation / GPU generation remains unverified. GPU driver
+updates and rollback remain vendor-managed. See docs/DEPENDENCIES.md for details.

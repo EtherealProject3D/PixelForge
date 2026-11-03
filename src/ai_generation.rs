@@ -131,23 +131,41 @@ pub fn ensure_server() -> Result<(), String> {
         if child.try_wait().map_err(|e| e.to_string())?.is_some() { *owned = None; }
     }
     if owned.is_none() {
+        let managed=crate::dependencies::active_path(crate::dependencies::Component::Comfy);
+        let mut command=if let Some(folder)=managed {
+            let mut command=Command::new(folder.join("python_embeded/python.exe"));
+            command.current_dir(&folder).arg("-s").arg("ComfyUI/main.py").arg("--windows-standalone-build");
+            let models=crate::dependencies::root().join("models");
+            std::fs::create_dir_all(&models).map_err(|e|e.to_string())?;
+            let config=crate::dependencies::root().join("extra-model-paths.yaml");
+            let yaml=serde_yaml::to_string(&serde_json::json!({"pixelforge":{"base_path":models,"checkpoints":"checkpoints","diffusion_models":"diffusion_models","text_encoders":"text_encoders","vae":"vae"}})).map_err(|e|e.to_string())?;
+            std::fs::write(&config,yaml).map_err(|e|e.to_string())?;
+            command.arg("--extra-model-paths-config").arg(config);
+            // Reuse the Desktop model paths as well when present.
+            if let Some(roaming)=std::env::var_os("APPDATA") {
+                if let Ok(entries)=std::fs::read_dir(PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths")) {
+                    let mut files:Vec<_>=entries.flatten().map(|e|e.path()).filter(|p|p.extension().is_some_and(|e|e=="yaml")).collect();files.sort();
+                    if let Some(config)=files.first() {command.arg(config);}
+                }
+            }
+            command
+        } else {
         let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable")?;
         let root = PathBuf::from(local).join("Comfy-Desktop/ComfyUI-Installs");
         let roaming = std::env::var_os("APPDATA").ok_or("APPDATA is unavailable")?;
         let configs = PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths");
         let mut installs: Vec<_> = std::fs::read_dir(&root)
-            .map_err(|e| format!("ComfyUI Desktop installation not found: {e}"))?
+            .map_err(|e| format!("ComfyUI installation not found: {e}. Open Dependencies to install ComfyUI"))?
             .filter_map(Result::ok).map(|e| e.path())
             .filter(|p| p.join("ComfyUI/main.py").is_file()
                 && p.join("ComfyUI/.venv/Scripts/python.exe").is_file()).collect();
         installs.sort();
         let install = installs.into_iter().next().ok_or(
-            "No ComfyUI Desktop Python backend found. Install ComfyUI Desktop first."
+            "No ComfyUI Python backend found. Open Dependencies to install ComfyUI, or install ComfyUI Desktop."
         )?;
         let mut command = Command::new(install.join("ComfyUI/.venv/Scripts/python.exe"));
         command.current_dir(&install)
             .arg("-s").arg("ComfyUI/main.py")
-            .arg("--listen").arg("127.0.0.1").arg("--port").arg("8188")
             .stdout(Stdio::null()).stderr(Stdio::null())
             .stdin(Stdio::null());
         if let Ok(entries) = std::fs::read_dir(&configs) {
@@ -158,6 +176,11 @@ pub fn ensure_server() -> Result<(), String> {
                 command.arg("--extra-model-paths-config").arg(config);
             }
         }
+            command
+        };
+        command.arg("--listen").arg("127.0.0.1").arg("--port").arg("8188")
+            .stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
+        #[cfg(windows)] {use std::os::windows::process::CommandExt;command.creation_flags(0x08000000);}
         *owned = Some(command.spawn().map_err(|e| format!("Cannot start ComfyUI backend: {e}"))?);
     }
     drop(owned);

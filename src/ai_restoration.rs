@@ -109,8 +109,14 @@ pub fn run(
         .and_then(|exe| exe.parent().map(|dir| dir.join(&relative)));
     let folder = bundled.filter(|dir| dir.join("nafnet_deblur.py").is_file())
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&relative));
-    let script = folder.join("nafnet_deblur.py");
-    let model = folder.join("deblurring_nafnet_2025may.onnx");
+    let mut script = folder.join("nafnet_deblur.py");
+    if !script.is_file() {
+        let runner=crate::dependencies::root().join("runner");
+        std::fs::create_dir_all(&runner).map_err(|e|format!("Cannot prepare deblur runner: {e}"))?;
+        script=runner.join("nafnet_deblur.py");
+        std::fs::write(&script,include_str!("../tools/restoration/nafnet_deblur.py")).map_err(|e|format!("Cannot prepare deblur runner: {e}"))?;
+    }
+    let model = crate::dependencies::deblur_model_path().unwrap_or_else(||folder.join("deblurring_nafnet_2025may.onnx"));
     if !script.is_file() { return Err(format!("NAFNet runner missing: {}", script.display())); }
     if !model.is_file() { return Err(format!("Download the OpenCV NAFNet ONNX model to {}", model.display())); }
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| e.to_string())?.as_nanos();
@@ -122,8 +128,8 @@ pub fn run(
         let input = work.join("input.png");
         let output = work.join("output.png");
         original.save(&input).map_err(|e| format!("Cannot prepare AI restoration input: {e}"))?;
-        let mut process = Command::new("py")
-            .arg("-3").arg(&script)
+        let mut command=if let Some(python)=crate::dependencies::deblur_python() {Command::new(python)} else {let mut command=Command::new("py");command.arg("-3");command};
+        let mut process = command.arg(&script)
             .arg("--input").arg(&input).arg("--output").arg(&output)
             .arg("--model").arg(&model)
             .stdout(Stdio::null()).stderr(Stdio::piped())

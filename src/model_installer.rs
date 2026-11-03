@@ -122,8 +122,51 @@ fn publish_download(partial:&Path,destination:&Path) -> Result<(),String> {
     Ok(())
 }
 
+#[derive(Clone,Debug)]
+pub struct RemovalFile {pub path:PathBuf,pub bytes:u64}
+pub fn removal_plan(index:usize,root:&Path,backend_name:Option<&str>,include_shared:bool) -> Result<Vec<RemovalFile>,String> {
+    let model=MODELS.get(index).ok_or("Unknown model")?;
+    let root=root.canonicalize().map_err(|e|e.to_string())?;
+    let mut candidates:Vec<PathBuf>=model.files.iter().filter(|f|!model.editing || include_shared || f.directory=="diffusion_models")
+        .map(|f|root.join(f.directory).join(f.file)).collect();
+    if !model.editing {
+        if let Some(name)=backend_name {
+            let relative=Path::new(name);
+            if relative.components().any(|c|!matches!(c,std::path::Component::Normal(_))) || relative.extension().is_none_or(|ext|ext!="safetensors") {
+                return Err("Invalid checkpoint path".into());
+            }
+            candidates.push(root.join("checkpoints").join(relative));
+        }
+    }
+    let mut result=Vec::new();
+    for path in candidates {
+        if !path.exists() {continue;}
+        let path=path.canonicalize().map_err(|e|e.to_string())?;
+        if !path.starts_with(&root) || !path.is_file() {return Err("Model removal target is outside the selected models folder".into());}
+        if !result.iter().any(|f:&RemovalFile|f.path==path) {
+            result.push(RemovalFile {bytes:fs::metadata(&path).map_err(|e|e.to_string())?.len(),path});
+        }
+    }
+    Ok(result)
+}
+pub fn remove_model_files(index:usize,root:&Path,backend_name:Option<&str>,include_shared:bool) -> Result<u64,String> {
+    let plan=removal_plan(index,root,backend_name,include_shared)?;
+    if plan.is_empty() {return Err("No matching files found in this models folder".into());}
+    let mut removed=0;
+    for file in plan {
+        fs::remove_file(&file.path).map_err(|e|format!("Removed {removed} bytes, but could not remove {}: {e}",file.path.display()))?;
+        removed+=file.bytes;
+    }
+    Ok(removed)
+}
+
 pub fn detect_models_folder(known:&[String]) -> Option<PathBuf> {
-    detect_checkpoint_folder(known)?.parent().map(Path::to_path_buf)
+    detect_checkpoint_folder(known).and_then(|p|p.parent().map(Path::to_path_buf)).or_else(|| {
+        crate::dependencies::active_path(crate::dependencies::Component::Comfy)?;
+        let root=crate::dependencies::root().join("models");
+        fs::create_dir_all(root.join("checkpoints")).ok()?;
+        Some(root)
+    })
 }
 
 /// Resolve ComfyUI Desktop's extra-model-paths YAML, then verify the folder
@@ -171,7 +214,7 @@ pub fn detect_checkpoint_folder(known: &[String]) -> Option<PathBuf> {
         if !root.is_dir() { continue; }
         let found = fs::read_dir(&root).ok().is_some_and(|files| files.flatten().any(|entry| {
             let filename = entry.file_name().to_string_lossy().to_lowercase();
-            known.iter().any(|model| {
+            (known.is_empty() && filename.ends_with(".safetensors")) || known.iter().any(|model| {
                 let name = Path::new(model).file_name()
                     .map(|name| name.to_string_lossy().to_lowercase()).unwrap_or_default();
                 !name.is_empty() && filename == name
@@ -264,6 +307,27 @@ mod tests {
         assert_eq!(fs::read(&destination).unwrap(),b"old");assert_eq!(fs::read(&partial).unwrap(),b"new");
         fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn removal_preserves_shared_qwen_files_by_default_and_rejects_traversal() {
+        let root=fixture();let index=MODELS.iter().position(|m|m.editing).unwrap();let model=&MODELS[index];
+        for file in model.files {fs::create_dir_all(root.join(file.directory)).unwrap();fs::write(root.join(file.directory).join(file.file),b"test").unwrap();}
+        let plan=removal_plan(index,&root,None,false).unwrap();assert_eq!(plan.len(),1);
+        assert!(plan[0].path.ends_with(model.files[0].file));
+        assert_eq!(remove_model_files(index,&root,None,false).unwrap(),4);
+        assert!(root.join(model.files[1].directory).join(model.files[1].file).is_file());
+        assert!(root.join(model.files[2].directory).join(model.files[2].file).is_file());
+        assert_eq!(removal_plan(index,&root,None,true).unwrap().len(),2);
+        assert!(removal_plan(0,&root,Some("../../outside.safetensors"),false).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn removal_uses_exact_detected_checkpoint_and_reports_disk_bytes() {
+        let root=fixture();fs::create_dir(root.join("checkpoints")).unwrap();
+        fs::write(root.join("checkpoints/alternate.safetensors"),b"abcdef").unwrap();
+        assert_eq!(remove_model_files(0,&root,Some("alternate.safetensors"),false).unwrap(),6);
+        assert!(!root.join("checkpoints/alternate.safetensors").exists());fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn library_contains_generation_models_and_complete_qwen_bundle() {
         let qwen=MODELS.iter().find(|m|m.editing).unwrap();

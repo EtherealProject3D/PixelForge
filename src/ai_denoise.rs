@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use image::RgbaImage;
 
 pub fn engine_path() -> PathBuf {
+    if let Some(folder)=crate::dependencies::active_path(crate::dependencies::Component::Denoise) {return folder.join("waifu2x-ncnn-vulkan.exe");}
     let relative = PathBuf::from("tools").join("waifu2x").join("waifu2x-ncnn-vulkan.exe");
     if let Some(path) = std::env::current_exe().ok()
         .and_then(|exe| exe.parent().map(|dir| dir.join(&relative))) {
