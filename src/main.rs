@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod adjustments;
 mod ai_denoise;
 mod ai_generation;
