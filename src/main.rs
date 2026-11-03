@@ -128,7 +128,7 @@ mod native_window {
     }
 
     fn handle() -> *mut c_void {
-        let title: Vec<u16> = "PixelForge v0.5.2-shared".encode_utf16().chain(Some(0)).collect();
+        let title: Vec<u16> = concat!("PixelForge v", env!("CARGO_PKG_VERSION")).encode_utf16().chain(Some(0)).collect();
         unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
     }
 
@@ -6994,7 +6994,7 @@ fn main() -> eframe::Result {
         height: icon_image.height(),
     };
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title("PixelForge v0.5.2-shared")
+        .with_title(concat!("PixelForge v", env!("CARGO_PKG_VERSION")))
         .with_icon(icon_data)
         .with_min_inner_size([800.0, 500.0]);
     if let Some(saved) = WindowPlacement::load() {
