@@ -12,6 +12,7 @@ mod model_installer;
 mod project;
 mod generation_project;
 mod studio;
+mod spelling;
 
 use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
@@ -612,6 +613,7 @@ struct PixelForge {
     generation_batch_count: usize,
     generation_batch_done: usize,
     generation_random_seeds: bool,
+    prompt_spelling: spelling::PromptSpelling,
     edit_checkpoint: String,
     conversation_draft: String,
     workspace_ai_parent: Option<usize>,
@@ -808,6 +810,7 @@ impl Default for PixelForge {
             generation_batch_count: 1,
             generation_batch_done: 0,
             generation_random_seeds: true,
+            prompt_spelling: spelling::PromptSpelling::default(),
             edit_checkpoint: String::new(),
             conversation_draft: String::new(),
             workspace_ai_parent: None,
@@ -1860,7 +1863,7 @@ impl PixelForge {
             ui.label(automatic_negative_prompt(style));
             ui.label("Additional negative terms (editable):");
         } else {ui.label("Negative prompt:");}
-        ui.add(egui::TextEdit::multiline(&mut self.generation_negative).desired_rows(2));
+        self.prompt_spelling.edit(ui,&mut self.generation_negative,2,"Additional negative terms…",2);
         ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100).text("Steps"));
         ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0).text("CFG"));
         ui.horizontal(|ui| {
@@ -1980,9 +1983,12 @@ impl PixelForge {
     }
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Initial prompt");
+        ui.horizontal(|ui| {
+            ui.heading("Initial prompt");
+            ui.checkbox(&mut self.prompt_spelling.enabled,"Spell check").on_hover_text("English spelling checks using Windows. Suggestions are applied only when you choose them.");
+        });
         ui.label(format!("Generation model: {}", if self.generation_checkpoint.is_empty() { "Not selected" } else { &self.generation_checkpoint }));
-        ui.add(egui::TextEdit::multiline(&mut self.generation_prompt).hint_text("Describe a new image…").desired_width(f32::INFINITY).desired_rows(4));
+        self.prompt_spelling.edit(ui,&mut self.generation_prompt,0,"Describe a new image…",4);
         if ui.add_enabled(!self.generation_running && !self.ai_running && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty(), egui::Button::new("Create New Image")).clicked() {
             self.submit_conversation(ui.ctx(), false);
         }
@@ -1999,7 +2005,7 @@ impl PixelForge {
         } else {
             ui.small("SDXL image-to-image refinement. Choose Qwen Edit for instruction-based editing.");
         }
-        ui.add(egui::TextEdit::multiline(&mut self.conversation_draft).hint_text("Describe changes to the viewed image…").desired_width(f32::INFINITY).desired_rows(4));
+        self.prompt_spelling.edit(ui,&mut self.conversation_draft,1,"Describe changes to the viewed image…",4);
         let has_image = self.generation_gallery.get(self.generation_selected).is_some();
         if has_image { ui.label(format!("Editing version {} · earlier versions are kept", self.generation_selected+1)); }
         else { ui.label("Create or import an image before applying changes."); }
@@ -2278,6 +2284,7 @@ impl PixelForge {
             &mut self.generation_random_seeds,
             &mut other.generation_random_seeds,
         );
+        std::mem::swap(&mut self.prompt_spelling, &mut other.prompt_spelling);
         std::mem::swap(&mut self.edit_checkpoint, &mut other.edit_checkpoint);
         std::mem::swap(&mut self.conversation_draft, &mut other.conversation_draft);
         std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);

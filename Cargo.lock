@@ -2915,6 +2915,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tungstenite",
+ "windows 0.61.3",
  "winresource",
 ]
 

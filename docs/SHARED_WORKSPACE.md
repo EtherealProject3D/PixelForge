@@ -60,3 +60,28 @@ cargo run --locked --release
 The title should read PixelForge v0.5.2-shared. Changes remain on the existing
 feature branch / draft PR until acceptance testing is complete. The working
 pre-continuity commit is b2a0d84 (prior rollback branch also remains available).
+## Prompt spelling
+
+Initial prompt, Changes prompt and additional negative terms now use background
+Windows English (United States) spelling checks. Spell check is enabled by default
+and can be toggled beside Initial prompt. Misspelled words receive red underlines;
+right-click a marked word or open Spelling beneath the field to choose a suggestion.
+Nothing is corrected automatically. Ignore for this session suppresses that word
+across the prompt fields until the app closes, without changing the Windows
+personal dictionary. Common model/workflow terms such as Qwen, ComfyUI, SDXL, LoRA
+and CFG are excluded from flags.
+
+Checks wait for a short typing pause and run off the UI thread. Corrections apply
+only to the selected occurrence and reject results from older text. Native UTF-16
+positions are converted to valid UTF-8 boundaries, including emoji/accented text.
+This is spelling assistance, not grammar checking or prompt rewriting. English
+Windows language support is required; an unavailable-provider message is shown
+rather than silently claiming that a prompt is correct. Extremely long prompts
+(over 32,000 characters) are not checked, and up to 64 issues are returned per check.
+Non-Windows builds show an unsupported-platform message. Toggle state and ignored
+words are session-only.
+
+Validation: 71 tests passed, including an actual Windows spell-check provider test,
+Unicode positions and targeted/stale correction checks. Windows debug build passed.
+The app was launched, a test typo was underlined, its suggestions were opened, and
+one correction was applied while the rest of the prompt and Qwen term stayed intact.
