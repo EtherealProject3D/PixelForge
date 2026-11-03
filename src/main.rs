@@ -2770,17 +2770,19 @@ impl PixelForge {
             return;
         }
 
-        egui::Window::new("Unsaved Changes - Exit PixelForge")
+        egui::Window::new("Save changes before exiting?")
             .collapsible(false)
             .resizable(false)
+            .fixed_size([480.0, 150.0])
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label("Your current image or project has unsaved changes.");
-                ui.label("What would you like to do before exiting?");
-
-                ui.add_space(10.0);
-
-                if ui.button("Save Project & Exit").clicked() {
+                ui.label("Your project has unsaved changes.");
+                ui.label("Save your work to keep the image versions and edits.");
+                ui.add_space(18.0);
+                ui.separator();
+                ui.add_space(6.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(theme::primary("Save & Exit")).clicked() {
                     self.save_project(false);
 
                     // Only exit after a successful save.
@@ -2792,15 +2794,13 @@ impl PixelForge {
                     }
                 }
 
-                ui.horizontal(|ui| {
-                    if ui.button("Cancel").clicked() {
-                        self.exit_confirmation = false;
-                    }
-
-                    if ui.button("Discard Changes & Exit").clicked() {
+                    if ui.button("Exit Without Saving").clicked() {
                         self.exit_confirmation = false;
                         self.exit_allowed = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
+                    if ui.button("Cancel").clicked() || ui.input(|i|i.key_pressed(egui::Key::Escape)) {
+                        self.exit_confirmation = false;
                     }
                 });
             });
@@ -6576,10 +6576,8 @@ impl eframe::App for PixelForge {
             });
         });
         egui::SidePanel::right("tools")
-            .default_width(320.0)
-            .min_width(290.0)
-            .max_width(360.0)
-            .resizable(true)
+            .exact_width(360.0)
+            .resizable(false)
             .show(ctx, |ui| {
                 // Sidebar sections and model controls are larger than canvas/status text.
                 for text in [egui::TextStyle::Body,egui::TextStyle::Button,egui::TextStyle::Small,egui::TextStyle::Monospace] {
