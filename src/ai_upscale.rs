@@ -1,8 +1,62 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::RgbaImage;
+
+#[derive(Clone, Debug)]
+pub struct UpscaleOptions {
+    pub model: String,
+    pub gpu_id: i32,
+    pub tile_size: u32,
+}
+
+impl Default for UpscaleOptions {
+    fn default() -> Self {
+        Self { model: "realesrgan-x4plus".into(), gpu_id: -1, tile_size: 0 }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct VulkanGpu {
+    pub id: i32,
+    pub name: String,
+    pub discrete: bool,
+}
+
+/// Enumerate Vulkan physical devices in Vulkan's native order.
+/// This matches the GPU indices used by Real-ESRGAN ncnn-vulkan.
+pub fn available_vulkan_gpus() -> Result<Vec<VulkanGpu>, String> {
+    use ash::vk;
+    use std::ffi::CStr;
+
+    let entry = unsafe { ash::Entry::load() }
+        .map_err(|e| format!("Vulkan loader unavailable: {e}"))?;
+    let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_0);
+    let create_info = vk::InstanceCreateInfo::default().application_info(&app);
+    let instance = unsafe { entry.create_instance(&create_info, None) }
+        .map_err(|e| format!("Cannot initialize Vulkan: {e}"))?;
+    let devices = unsafe { instance.enumerate_physical_devices() };
+    let result = devices.map(|devices| {
+        devices.iter().enumerate().map(|(id, device)| {
+            let properties = unsafe { instance.get_physical_device_properties(*device) };
+            let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) }
+                .to_string_lossy().into_owned();
+            VulkanGpu { id: id as i32, name, discrete: properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU }
+        }).collect()
+    });
+    unsafe { instance.destroy_instance(None); }
+    result.map_err(|e| format!("Cannot enumerate Vulkan GPUs: {e}"))
+}
+
+/// Prefer a discrete Vulkan GPU; preserve native enumeration order as tie-breaker.
+pub fn preferred_gpu_id(gpus: &[VulkanGpu]) -> Option<i32> {
+    gpus.iter().find(|gpu| gpu.discrete).or_else(|| gpus.first()).map(|gpu| gpu.id)
+}
 
 pub struct UpscaleResult {
     pub work_dir: PathBuf,
@@ -20,6 +74,11 @@ impl Drop for UpscaleResult {
 }
 
 pub fn engine_path() -> PathBuf {
+    if let Some(folder)=crate::dependencies::active_path(crate::dependencies::Component::Upscale) {return folder.join("realesrgan-ncnn-vulkan.exe");}
+    let bundled = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|dir| dir.join("tools").join("realesrgan").join("realesrgan-ncnn-vulkan.exe")));
+    if let Some(path) = bundled {
+        if path.is_file() { return path; }
+    }
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tools")
         .join("realesrgan")
@@ -54,12 +113,26 @@ fn validate_dimensions(image: &RgbaImage, expected: [u32; 2], label: &str) -> Re
     Ok(())
 }
 
+/// Check that requested and native inference dimensions are representable.
+/// Memory pressure is managed by the inference engine and its tile-size setting.
+pub fn validate_upscale_size(width: u32, height: u32, scale: u32) -> Result<(), String> {
+    expected_dimensions(width, height, scale)?;
+    expected_dimensions(width, height, 4)?;
+    Ok(())
+}
+
 pub fn upscale(
     mut original: RgbaImage,
     settings: crate::adjustments::Adjustments,
     scale: u32,
+    options: UpscaleOptions,
+    cancel: Arc<AtomicBool>,
 ) -> Result<UpscaleResult, String> {
+    validate_upscale_size(original.width(), original.height(), scale)?;
     let expected = expected_dimensions(original.width(), original.height(), scale)?;
+    if !matches!(options.model.as_str(), "realesrgan-x4plus" | "realesrgan-x4plus-anime") { return Err("Unsupported upscale model".into()); }
+    if options.gpu_id < -1 || options.gpu_id > 32 { return Err("Invalid GPU ID".into()); }
+    if options.tile_size != 0 && !(32..=1024).contains(&options.tile_size) { return Err("Invalid tile size".into()); }
 
     // Validate the native 4x intermediate dimensions too.
     let _native_dimensions = expected_dimensions(original.width(), original.height(), 4)?;
@@ -73,6 +146,12 @@ pub fn upscale(
         ));
     }
 
+    let model_dir = engine.parent().ok_or("Invalid engine path")?.join("models");
+    let model_files = [model_dir.join(format!("{}.param", options.model)), model_dir.join(format!("{}.bin", options.model))];
+    for model_file in model_files {
+        if !model_file.is_file() { return Err(format!("Model file missing: {}", model_file.display())); }
+    }
+
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
@@ -82,7 +161,7 @@ pub fn upscale(
 
     std::fs::create_dir_all(&work).map_err(|e| format!("Cannot create AI work folder: {e}"))?;
 
-    let result = upscale_inner(&mut original, &settings, scale, expected, &engine, &work);
+    let result = upscale_inner(&mut original, &settings, scale, expected, &engine, &work, &options, &cancel);
 
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&work);
@@ -98,7 +177,10 @@ fn upscale_inner(
     expected: [u32; 2],
     engine: &Path,
     work: &Path,
+    options: &UpscaleOptions,
+    cancel: &AtomicBool,
 ) -> Result<UpscaleResult, String> {
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     // Apply the existing PixelForge adjustments to the
     // full-resolution image before neural-network inference.
     for pixel in original.pixels_mut() {
@@ -108,43 +190,83 @@ fn upscale_inner(
     let input = work.join("input.png");
     let output = work.join("native_4x.png");
 
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     original
         .save(&input)
         .map_err(|e| format!("Cannot prepare AI input: {e}"))?;
 
     let engine_dir = engine.parent().ok_or("Invalid AI engine directory")?;
 
-    let process = Command::new(engine)
-        .current_dir(engine_dir)
-        .arg("-i")
-        .arg(&input)
-        .arg("-o")
-        .arg(&output)
-        .arg("-n")
-        .arg("realesrgan-x4plus")
-        .arg("-m")
-        .arg(engine_dir.join("models"))
-        .arg("-s")
-        // Always run the model at its native scale.
-        .arg("4")
-        .arg("-t")
-        .arg("0")
-        .arg("-f")
-        .arg("png")
-        .output()
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
+    // Drain stderr concurrently so Real-ESRGAN cannot block on a full pipe.
+    // Keep a bounded diagnostic tail for reporting engine failures.
+    let mut command = Command::new(engine);
+    #[cfg(windows)] { use std::os::windows::process::CommandExt; command.creation_flags(0x08000000); }
+    command.current_dir(engine_dir)
+        .arg("-i").arg(&input)
+        .arg("-o").arg(&output)
+        .arg("-n").arg(&options.model)
+        .arg("-m").arg(engine_dir.join("models"))
+        .arg("-s").arg("4")
+        .arg("-t").arg(options.tile_size.to_string());
+    // ncnn's default GPU selection is used when no -g argument is supplied.
+    // Passing -g -1 is not supported by all Real-ESRGAN builds.
+    if options.gpu_id >= 0 {
+        command.arg("-g").arg(options.gpu_id.to_string());
+    }
+    let mut process = command
+        .arg("-f").arg("png")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("Cannot launch Real-ESRGAN: {e}"))?;
 
-    if !process.status.success() {
-        let stderr = String::from_utf8_lossy(&process.stderr);
-        let stdout = String::from_utf8_lossy(&process.stdout);
+    let stderr = process.stderr.take().ok_or("Cannot capture Real-ESRGAN diagnostics")?;
+    let diagnostics = std::thread::spawn(move || {
+        let mut reader = stderr;
+        let mut buffer = [0u8; 4096];
+        let mut tail = Vec::new();
+        while let Ok(count) = reader.read(&mut buffer) {
+            if count == 0 { break; }
+            tail.extend_from_slice(&buffer[..count]);
+            if tail.len() > 16_384 {
+                tail.drain(..tail.len() - 16_384);
+            }
+        }
+        String::from_utf8_lossy(&tail).into_owned()
+    });
 
-        return Err(format!(
-            "Real-ESRGAN failed ({}): {} {}",
-            process.status,
-            stderr.trim(),
-            stdout.trim()
-        ));
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            let _ = process.kill();
+            let _ = process.wait();
+            let _ = diagnostics.join();
+            return Err("AI upscale cancelled".into());
+        }
+        match process.try_wait() {
+            Ok(Some(status)) if status.success() => {
+                let _ = diagnostics.join();
+                break;
+            }
+            Ok(Some(status)) => {
+                let details = diagnostics.join().unwrap_or_default();
+                let details = details.trim();
+                return Err(if details.is_empty() {
+                    format!("Real-ESRGAN failed ({status}); no diagnostics returned")
+                } else {
+                    format!("Real-ESRGAN failed ({status}): {details}")
+                });
+            },
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(e) => {
+                let _ = process.kill();
+                let _ = process.wait();
+                let _ = diagnostics.join();
+                return Err(format!("Cannot monitor Real-ESRGAN: {e}"));
+            }
+        }
     }
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
 
     if !output.is_file() {
         return Err("Real-ESRGAN did not produce an output image".into());
@@ -167,6 +289,7 @@ fn upscale_inner(
     image::ImageDecoder::set_limits(&mut decoder, limits)
         .map_err(|e| format!("AI PNG exceeds memory limit: {e}"))?;
 
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     let native = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| format!("Cannot decode AI output: {e}"))?
         .to_rgba8();
@@ -191,6 +314,7 @@ fn upscale_inner(
 
     validate_dimensions(&result, expected, "Final AI result")?;
 
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     // Compare against a conventional high-quality resize.
     // Both paths use the same adjusted source pixels.
     let baseline = image::imageops::resize(
@@ -239,6 +363,7 @@ fn upscale_inner(
         image::imageops::FilterType::Triangle,
     );
 
+    if cancel.load(Ordering::Relaxed) { return Err("AI upscale cancelled".into()); }
     Ok(UpscaleResult {
         work_dir: work.to_path_buf(),
         ai_path,
@@ -409,6 +534,13 @@ pub fn save_blended(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn large_image_preflight() {
+        assert!(validate_upscale_size(1000, 1000, 4).is_ok());
+        assert!(validate_upscale_size(10000, 10000, 2).is_ok());
+        assert!(validate_upscale_size(u32::MAX, 10, 4).is_err());
+    }
 
     #[test]
     fn owned_blending_matches_existing_blending() {

@@ -1,10 +1,9 @@
 name: Release PixelForge Windows
 
 on:
-  workflow_dispatch:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 permissions:
   contents: write
@@ -13,42 +12,35 @@ jobs:
   windows-release:
     runs-on: windows-latest
     steps:
-      - name: Checkout source
-        uses: actions/checkout@v4
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-      - name: Run tests
-        run: cargo test
-      - name: Build release
-        run: cargo build --release
-      - name: Package Windows executable
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify release version
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item target/release/pixelforge.exe dist/PixelForge.exe
-          Compress-Archive -Path dist/PixelForge.exe -DestinationPath dist/PixelForge-v0.5.0-windows-x64.zip -Force
-      - name: Publish GitHub pre-release
+          $version = (cargo metadata --no-deps --format-version 1 --locked | ConvertFrom-Json).packages[0].version
+          if ("v$version" -ne '${{ github.ref_name }}') { throw 'Tag and package version differ' }
+      - name: Run tests
+        run: cargo test --locked
+      - name: Build release
+        run: cargo build --locked --release
+      - name: Package Windows release
+        shell: pwsh
+        run: |
+          $tag = '${{ github.ref_name }}'
+          $folder = "dist/PixelForge-$tag-windows-x64"
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          Copy-Item target/release/pixelforge.exe "$folder/PixelForge.exe"
+          Copy-Item README.md $folder
+          Copy-Item docs "$folder/docs" -Recurse
+          $archive = "dist/PixelForge-$tag-windows-x64.zip"
+          Compress-Archive -Path "$folder/*" -DestinationPath $archive
+          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
+          "$hash  PixelForge-$tag-windows-x64.zip" | Set-Content "dist/SHA256SUMS.txt" -Encoding ascii
+      - name: Publish GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "v0.5.0"
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag dist/PixelForge-v0.5.0-windows-x64.zip --clobber
-          } else {
-            gh release create $tag dist/PixelForge-v0.5.0-windows-x64.zip --target "${{ github.sha }}" --title "PixelForge v0.5.0 - Public Test" --prerelease --notes @"
-          PixelForge v0.5.0 is a Windows x64 public testing build.
-
-          Highlights:
-          - Photo adjustment controls and before/after comparison viewer
-          - Selection brush, saved selection library, and undo/redo
-          - Independent global and selection-based adjustments
-          - PXF8 project saving with active selection masks and adjustments
-          - Local AI tools (availability depends on installed models and configuration)
-
-          Download the ZIP, extract it, and run PixelForge.exe. Windows SmartScreen may prompt because this early build is not code-signed.
-
-          Please report bugs and feedback in GitHub Issues.
-          "@
-          }
+          $tag = '${{ github.ref_name }}'
+          gh release create $tag "dist/PixelForge-$tag-windows-x64.zip" dist/SHA256SUMS.txt --verify-tag --title "PixelForge $tag" --notes-file "docs/RELEASE_NOTES_$tag.md" --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

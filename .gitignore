@@ -24,3 +24,12 @@ rustc-ice-*.txt
 #.idea/
 /target
 /backups
+
+# Locally installed Waifu2x engine and models
+/tools/waifu2x/
+
+# Locally installed restoration model weights
+/tools/restoration/*.onnx
+
+# Versioned dependency installs and rollback snapshots
+/tools/PixelForge/deps/
