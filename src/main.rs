@@ -6638,8 +6638,15 @@ impl eframe::App for PixelForge {
                 ui.separator();
 
                 }
-                egui::ScrollArea::vertical()
+                // A solid, permanently allocated gutter never overlays controls on hover.
+                ui.spacing_mut().scroll.floating = false;
+                ui.spacing_mut().scroll.bar_width = 10.0;
+                ui.spacing_mut().scroll.bar_inner_margin = 6.0;
+                ui.spacing_mut().scroll.bar_outer_margin = 0.0;
+                let sidebar_right = ui.max_rect().right();
+                let sidebar_scroll = egui::ScrollArea::vertical()
                     .id_salt("pixelforge_tools_scroll")
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         if self.generation_tools_tab {
@@ -6837,6 +6844,13 @@ impl eframe::App for PixelForge {
 
                         }
                     });
+                if sidebar_scroll.content_size.y <= sidebar_scroll.inner_rect.height() {
+                    // Keep the empty track, but hide the full-length handle when it cannot scroll.
+                    let track = egui::Rect::from_min_max(
+                        egui::pos2(sidebar_right-10.0, sidebar_scroll.inner_rect.top()),
+                        egui::pos2(sidebar_right, sidebar_scroll.inner_rect.bottom()));
+                    ui.painter().rect_filled(track, 5, ui.visuals().extreme_bg_color);
+                }
             });
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             if self.generation_workspace {
