@@ -216,3 +216,21 @@ Native Windows inventory detected all current dependencies, and Qwen's 20.43 GB
 editor-only removal preview was inspected and cancelled without deleting files.
 ComfyUI portable full installation / GPU generation remains unverified. GPU driver
 updates and rollback remain vendor-managed. See docs/DEPENDENCIES.md for details.
+
+
+## Qwen 2511 and FLUX Klein local library additions
+
+Added Qwen-Image-Edit 2511 FP8 (reusing the 2509 encoder/VAE) and FLUX.2 Klein
+4B FP8 with its encoder and VAE. Both use the existing library installer and
+removal protections. Qwen versions route to distinct diffusion weights and shifts.
+FLUX supports both generation and reference-image editing using dedicated FLUX.2
+latents, scheduler, and reference conditioning. Its distilled default is 4 steps
+and CFG 1; negative prompts are explicitly unused. Per-edit FLUX steps persist
+in projects. Existing Qwen 2509 and SDXL generation are retained.
+
+Validation: 92 local tests pass, with two unchanged local-HTTP installer tests
+filtered out while automatic escalation review is unavailable. The opt-in package
+smoke test remains separate. Windows release build passes. Official workflows
+and installed ComfyUI source schemas were inspected. No new model weights were
+downloaded, per the user's plan to install through Model Library. GPU inference
+and direct HTTP header checks remain unverified. See docs/LOCAL_MODEL_ADDITIONS.md.

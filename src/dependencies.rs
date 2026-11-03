@@ -349,8 +349,8 @@ pub fn scan(models: Option<PathBuf>, known: Vec<String>) -> Vec<Status> {
         || models.as_ref().is_some_and(|root| {
             crate::model_installer::MODELS
                 .iter()
-                .filter(|m| !m.editing)
-                .any(|m| crate::model_installer::installed_files(m, root) > 0)
+                .filter(|m| m.generation)
+                .any(|m| crate::model_installer::installed_files(m, root) == m.files.len())
         });
     rows.push(Status {
         component: None,
@@ -363,8 +363,8 @@ pub fn scan(models: Option<PathBuf>, known: Vec<String>) -> Vec<Status> {
     let qwen = models.as_ref().is_some_and(|root| {
         crate::model_installer::MODELS
             .iter()
-            .find(|m| m.editing)
-            .is_some_and(|m| crate::model_installer::installed_files(m, root) == m.files.len())
+            .filter(|m| crate::ai_generation::is_qwen(m.name))
+            .any(|m| crate::model_installer::installed_files(m, root) == m.files.len())
     });
     rows.push(Status {
         component: None,

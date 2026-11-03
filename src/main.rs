@@ -616,6 +616,7 @@ struct PixelForge {
     generation_random_seeds: bool,
     prompt_spelling: spelling::PromptSpelling,
     qwen_steps: u32,
+    flux_steps: u32,
     edit_checkpoint: String,
     conversation_draft: String,
     workspace_ai_parent: Option<usize>,
@@ -817,6 +818,7 @@ impl Default for PixelForge {
             generation_random_seeds: true,
             prompt_spelling: spelling::PromptSpelling::default(),
             qwen_steps: 20,
+            flux_steps: 4,
             edit_checkpoint: String::new(),
             conversation_draft: String::new(),
             workspace_ai_parent: None,
@@ -1206,7 +1208,9 @@ impl PixelForge {
         let checkpoint = editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, self.refinement_source.is_some()).to_owned();
         self.capture_workspace_editor();
         let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].1;
-        let prompt = if checkpoint == ai_generation::QWEN_EDIT {
+        let steps=if ai_generation::is_qwen(&checkpoint) {self.qwen_steps} else if checkpoint==ai_generation::FLUX_KLEIN && self.refinement_source.is_some() {self.flux_steps} else {self.generation_steps};
+        let cfg=if ai_generation::is_qwen(&checkpoint) {4.0} else if checkpoint==ai_generation::FLUX_KLEIN {1.0} else {self.generation_cfg};
+        let prompt = if ai_generation::is_instruction_model(&checkpoint) && self.refinement_source.is_some() {
             self.refinement_prompt.clone()
         } else if self.refinement_source.is_some() {
             // CLIP is not an instruction-following editor: retain scene context,
@@ -1221,8 +1225,8 @@ impl PixelForge {
         };
         self.generation_batch_settings = Some(GenerationSettings {
             prompt: self.generation_prompt.clone(),
-            negative: self.generation_negative.clone(),
-            auto_negative: checkpoint != ai_generation::QWEN_EDIT && self.generation_auto_negative,
+            negative: if checkpoint==ai_generation::FLUX_KLEIN {String::new()} else {self.generation_negative.clone()},
+            auto_negative: !ai_generation::is_instruction_model(&checkpoint) && self.generation_auto_negative,
             checkpoint: checkpoint.clone(),
             style: self.generation_style,
             ratio: self.generation_size,
@@ -1231,8 +1235,8 @@ impl PixelForge {
             resolution: self.generation_resolution,
             width: self.generation_width,
             height: self.generation_height,
-            steps: if checkpoint == ai_generation::QWEN_EDIT { self.qwen_steps } else { self.generation_steps },
-            cfg: if checkpoint == ai_generation::QWEN_EDIT { 4.0 } else { self.generation_cfg },
+            steps,
+            cfg,
             seed: self.generation_seed,
             refine_parent: self.refinement_source,
             refine_strength: self.refinement_source.map(|_| self.refinement_strength),
@@ -1242,15 +1246,15 @@ impl PixelForge {
         let request = ai_generation::Request {
             checkpoint: checkpoint.clone(),
             prompt,
-            negative: if checkpoint != ai_generation::QWEN_EDIT && self.generation_auto_negative {
+            negative: if checkpoint==ai_generation::FLUX_KLEIN {String::new()} else if !ai_generation::is_instruction_model(&checkpoint) && self.generation_auto_negative {
                 let base=automatic_negative_prompt(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0);
                 if self.generation_negative.trim().is_empty() {base.to_owned()}
                 else {format!("{base}, {}",self.generation_negative.trim())}
             } else {self.generation_negative.clone()},
             width: self.generation_width,
             height: self.generation_height,
-            steps: if checkpoint == ai_generation::QWEN_EDIT { self.qwen_steps } else { self.generation_steps },
-            cfg: if checkpoint == ai_generation::QWEN_EDIT { 4.0 } else { self.generation_cfg },
+            steps,
+            cfg,
             seed: self.generation_seed,
             source: self.refinement_source.and_then(|index|self.generation_gallery.get(index)).map(|item|item.editor.render(&item.pixels)),
             denoise: self.refinement_strength,
@@ -1328,7 +1332,7 @@ impl PixelForge {
                 self.generation_models_rx = None;
                 match result {
                     Ok(models) => {
-                        if !models.contains(&self.generation_checkpoint) {
+                        if !models.contains(&self.generation_checkpoint) && self.generation_checkpoint!=ai_generation::FLUX_KLEIN {
                             self.generation_checkpoint =
                                 models.first().cloned().unwrap_or_default();
                         }
@@ -1433,7 +1437,9 @@ impl PixelForge {
 
     fn recommended_generation_settings(checkpoint: &str) -> (u32, f32, &'static str) {
         let name = checkpoint.to_ascii_lowercase();
-        if name.contains("cyberrealisticpony") || name.contains("pony") {
+        if checkpoint==ai_generation::FLUX_KLEIN {
+            (4,1.0,"FLUX Klein distilled: 4 steps, CFG fixed at 1. Negative prompts are unused.")
+        } else if name.contains("cyberrealisticpony") || name.contains("pony") {
             (30, 5.0, "Pony-based checkpoint: start at 30 steps, CFG 5.")
         } else if name.contains("realvis") {
             (30, 5.0, "RealVisXL: start at 30 steps, CFG 5; adjust for the checkpoint version.")
@@ -1591,13 +1597,14 @@ impl PixelForge {
                     ui.label(model.description);
                     ui.hyperlink_to("Model page and license",model.page);
                     if installed {
-                        if ui.button(if model.editing {"Use for Edits"} else {"Use for Generation"}).clicked() {
-                            if model.editing {self.edit_checkpoint=ai_generation::QWEN_EDIT.into();}
-                            else {
-                                self.generation_checkpoint=backend_model.clone().unwrap_or_else(||model.files[0].file.to_owned());
-                                let (steps,cfg,_)=Self::recommended_generation_settings(&self.generation_checkpoint);
-                                self.generation_steps=steps;self.generation_cfg=cfg;
-                            }
+                        if model.generation && ui.button("Use for Generation").clicked() {
+                            self.generation_checkpoint=if model.editing {model.name.into()} else {backend_model.clone().unwrap_or_else(||model.files[0].file.to_owned())};
+                            let (steps,cfg,_)=Self::recommended_generation_settings(&self.generation_checkpoint);
+                            self.generation_steps=steps;self.generation_cfg=cfg;
+                        }
+                        if model.editing && ui.button("Use for Edits").clicked() {
+                            self.edit_checkpoint=model.name.into();
+                            if model.name==ai_generation::QWEN_EDIT_2511 {self.qwen_steps=40;}
                         }
                     } else if ui.add_enabled(self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Download & Install")).clicked() {
                         let folder=self.install_folder.clone().or_else(||rfd::FileDialog::new().set_title("Select the ComfyUI models folder").pick_folder());
@@ -1659,7 +1666,10 @@ impl PixelForge {
             ai_generation::stop_managed_backend();
             self.install_status=match model_installer::remove_model_files(index,&root,backend.as_deref(),shared) {
                 Ok(bytes)=>{
-                    if model.editing {self.edit_checkpoint=String::new();}
+                    if model.editing {
+                        if self.edit_checkpoint==model.name {self.edit_checkpoint=String::new();}
+                        if self.generation_checkpoint==model.name {self.generation_checkpoint=self.generation_checkpoints.first().cloned().unwrap_or_default();}
+                    }
                     else if let Some(name)=&backend {self.generation_checkpoints.retain(|s|s!=name);if self.generation_checkpoint==*name {self.generation_checkpoint=self.generation_checkpoints.first().cloned().unwrap_or_default();}}
                     self.dependency_manager.refresh(self.install_folder.clone(),self.generation_checkpoints.clone());
                     format!("Removed model files; freed {:.2} GB. Restart ComfyUI to release any loaded model memory.",bytes as f64/1e9)
@@ -1836,8 +1846,10 @@ impl PixelForge {
         ui.label("When disabled, seeds increment from the starting seed.");
         ui.label("Steps");
         ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100));
-        ui.label("CFG");
-        ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0));
+        if self.generation_checkpoint==ai_generation::FLUX_KLEIN {ui.label("FLUX CFG is fixed at 1");} else {
+            ui.label("CFG");
+            ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0));
+        }
         ui.horizontal(|ui| {
             ui.label("Seed");
             ui.add(egui::DragValue::new(&mut self.generation_seed));
@@ -1852,6 +1864,7 @@ impl PixelForge {
         let mut current_json = settings_json(&current);
         current_json["edit_checkpoint"] = serde_json::json!(self.edit_checkpoint);
         current_json["qwen_steps"] = serde_json::json!(self.qwen_steps);
+        current_json["flux_steps"] = serde_json::json!(self.flux_steps);
         let project=generation_project::GalleryProject {items:self.generation_gallery.iter().map(|i|generation_project::GalleryImage {settings:{let mut value=settings_json(&i.settings);value["editor"]=i.editor.to_json();value},pixels:i.pixels.clone(),seed:i.seed}).collect(),selected:self.generation_selected,compare_index:self.generation_compare_index,compare:self.generation_compare,current:current_json};
         match generation_project::save(&path,&project) {Ok(())=>{self.generation_project_path=Some(path.clone());self.project_dirty=false;self.generation_status=format!("Saved {}",path.display());},Err(e)=>self.generation_status=format!("Save failed: {e}")}
     }
@@ -1870,6 +1883,7 @@ impl PixelForge {
         }).collect();
         self.edit_checkpoint = project.current["edit_checkpoint"].as_str().unwrap_or("").to_owned();
         self.qwen_steps = project.current["qwen_steps"].as_u64().filter(|steps|(1..=100).contains(steps)).unwrap_or(20) as u32;
+        self.flux_steps = project.current["flux_steps"].as_u64().filter(|steps|(1..=100).contains(steps)).unwrap_or(4) as u32;
         let current=settings_from_json(&project.current);
         self.generation_prompt=current.prompt;self.generation_negative=current.negative;self.generation_auto_negative=current.auto_negative;self.generation_checkpoint=current.checkpoint;self.generation_style=current.style;self.generation_size=current.ratio;self.generation_custom_size=current.custom_size;self.generation_unlock_dimensions=current.unlock_dimensions;self.generation_resolution=current.resolution;self.generation_width=current.width;self.generation_height=current.height;self.generation_steps=current.steps;self.generation_cfg=current.cfg;self.generation_seed=current.seed;
         self.refinement_source=None;
@@ -1954,6 +1968,7 @@ impl PixelForge {
                 &self.generation_checkpoint
             })
             .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.generation_checkpoint,ai_generation::FLUX_KLEIN.into(),ai_generation::FLUX_KLEIN);
                 for checkpoint in &self.generation_checkpoints {
                     let lower = checkpoint.to_ascii_lowercase();
                     let best_for = if lower.contains("realvis") {
@@ -1984,6 +1999,9 @@ impl PixelForge {
         }
         ui.separator();
         ui.heading("Negative prompt");
+        if self.generation_checkpoint==ai_generation::FLUX_KLEIN || editing_checkpoint(&self.generation_checkpoint,&self.edit_checkpoint,true)==ai_generation::FLUX_KLEIN {
+            ui.label("FLUX Klein uses CFG 1: negative prompts do not affect its output.");
+        }
         ui.checkbox(&mut self.generation_auto_negative,"Use automatic negative prompts")
             .on_hover_text("Adds the selected style's exclusions to SDXL generation and editing. Qwen uses your typed negative prompt only.");
         if self.generation_auto_negative {
@@ -1995,16 +2013,24 @@ impl PixelForge {
         ui.heading("Changes prompt");
         egui::ComboBox::from_id_salt("edit_model").width(ui.available_width()).truncate().selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
             ui.selectable_value(&mut self.edit_checkpoint, String::new(), "Use generation model");
-            ui.selectable_value(&mut self.edit_checkpoint, ai_generation::QWEN_EDIT.into(), ai_generation::QWEN_EDIT);
+            for name in [ai_generation::QWEN_EDIT,ai_generation::QWEN_EDIT_2511,ai_generation::FLUX_KLEIN] {
+                ui.selectable_value(&mut self.edit_checkpoint,name.into(),name);
+            }
             for model in &self.generation_checkpoints { ui.selectable_value(&mut self.edit_checkpoint, model.clone(), model); }
         });
         ui.label(format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
-        if self.edit_checkpoint == ai_generation::QWEN_EDIT {
+        let edit_model=editing_checkpoint(&self.generation_checkpoint,&self.edit_checkpoint,true).to_owned();
+        if ai_generation::is_qwen(&edit_model) {
             ui.small("Instruction-based editing · CFG 4");
             ui.label("Qwen steps");
             ui.spacing_mut().slider_width=(ui.available_width()-80.0).max(60.0);
             ui.add(egui::Slider::new(&mut self.qwen_steps,1..=100))
-                .on_hover_text("20 is the default for the standard model. Fewer steps reduce sampling time but may reduce quality; model loading and encoding still take time.");
+                .on_hover_text("2509 starts at 20 steps; 2511 recommends 40. Fewer steps reduce sampling time but may reduce quality; model loading and encoding still take time.");
+        } else if edit_model==ai_generation::FLUX_KLEIN {
+            ui.small("FLUX instruction editing · CFG 1 · 4 steps recommended");
+            ui.label("FLUX edit steps");
+            ui.spacing_mut().slider_width=(ui.available_width()-80.0).max(60.0);
+            ui.add(egui::Slider::new(&mut self.flux_steps,1..=100));
         } else {
             ui.small("SDXL image-to-image refinement. Choose Qwen Edit for instruction-based editing.");
         }
@@ -2012,7 +2038,7 @@ impl PixelForge {
         let has_image = self.generation_gallery.get(self.generation_selected).is_some();
         if has_image { ui.label(format!("Editing version {} · earlier versions are kept", self.generation_selected+1)); }
         else { ui.label("Create or import an image before applying changes."); }
-        if self.edit_checkpoint != ai_generation::QWEN_EDIT {
+        if !ai_generation::is_instruction_model(&edit_model) {
             ui.label("Change strength");
             ui.spacing_mut().slider_width=(ui.available_width()-80.0).max(60.0);
             ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0));
@@ -2287,6 +2313,7 @@ impl PixelForge {
         );
         std::mem::swap(&mut self.prompt_spelling, &mut other.prompt_spelling);
         std::mem::swap(&mut self.qwen_steps, &mut other.qwen_steps);
+        std::mem::swap(&mut self.flux_steps, &mut other.flux_steps);
         std::mem::swap(&mut self.edit_checkpoint, &mut other.edit_checkpoint);
         std::mem::swap(&mut self.conversation_draft, &mut other.conversation_draft);
         std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
@@ -7034,14 +7061,14 @@ mod workspace_tests {
         app.exposure=1.0;
         app.selection_mask=Some(masking::SelectionMask::from_pixels(2,1,vec![255,0]).unwrap());
         let path=std::env::temp_dir().join(format!("studio-workspace-roundtrip-{}.pxf",std::process::id()));
-        app.qwen_steps=13;
+        app.qwen_steps=13;app.flux_steps=5;
         app.generation_project_path=Some(path.clone());
         app.save_generation_project(false);
         assert!(app.generation_status.starts_with("Saved"),"{}",app.generation_status);
         let mut loaded=PixelForge::default();
         loaded.open_generation_project(&path,&ctx);loaded.ensure_workspace(&ctx);
         std::fs::remove_file(path).unwrap();
-        assert_eq!(loaded.qwen_steps,13);
+        assert_eq!(loaded.qwen_steps,13);assert_eq!(loaded.flux_steps,5);
         assert_eq!(loaded.exposure,1.0);
         assert_eq!(loaded.selection_mask.as_ref().unwrap().pixels(),&[255,0]);
         assert_eq!(loaded.generation_gallery[0].pixels.get_pixel(0,0)[0],40);

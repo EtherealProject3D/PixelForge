@@ -15,22 +15,35 @@ pub struct Model {
     pub description: &'static str,
     pub page: &'static str,
     pub editing: bool,
+    pub generation: bool,
     pub files: &'static [ModelFile],
 }
 pub const MODELS: &[Model] = &[
-    Model {name:"CyberRealistic Pony v18 CoreShift fp16",keyword:"cyberrealisticpony",description:"Pony XL character realism; 30+ steps, CFG 5",page:"https://huggingface.co/cyberdelia/CyberRealisticPony",editing:false,
+    Model {name:"CyberRealistic Pony v18 CoreShift fp16",keyword:"cyberrealisticpony",description:"Pony XL character realism; 30+ steps, CFG 5",page:"https://huggingface.co/cyberdelia/CyberRealisticPony",editing:false,generation:true,
         files:&[ModelFile {directory:"checkpoints",file:"CyberRealisticPony_V18.0_F16.safetensors",url:"https://huggingface.co/cyberdelia/CyberRealisticPony/resolve/main/CyberRealisticPony_V18.0_F16.safetensors",size:6940000000,min:5_000_000_000,max:12_000_000_000}]},
-    Model {name:"RealVisXL V5 fp16",keyword:"realvis",description:"Natural photography, portraits and landscapes",page:"https://huggingface.co/SG161222/RealVisXL_V5.0",editing:false,
+    Model {name:"RealVisXL V5 fp16",keyword:"realvis",description:"Natural photography, portraits and landscapes",page:"https://huggingface.co/SG161222/RealVisXL_V5.0",editing:false,generation:true,
         files:&[ModelFile {directory:"checkpoints",file:"RealVisXL_V5.0_fp16.safetensors",url:"https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/main/RealVisXL_V5.0_fp16.safetensors",size:6940000000,min:5_000_000_000,max:12_000_000_000}]},
-    Model {name:"Juggernaut XL v9",keyword:"juggernaut",description:"Detailed photography and cinematic imagery",page:"https://huggingface.co/RunDiffusion/Juggernaut-XL-v9",editing:false,
+    Model {name:"Juggernaut XL v9",keyword:"juggernaut",description:"Detailed photography and cinematic imagery",page:"https://huggingface.co/RunDiffusion/Juggernaut-XL-v9",editing:false,generation:true,
         files:&[ModelFile {directory:"checkpoints",file:"Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",url:"https://huggingface.co/RunDiffusion/Juggernaut-XL-v9/resolve/main/Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",size:7110000000,min:5_000_000_000,max:12_000_000_000}]},
-    Model {name:"SDXL Base 1.0",keyword:"sd_xl_base",description:"General-purpose generation and illustration",page:"https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0",editing:false,
+    Model {name:"SDXL Base 1.0",keyword:"sd_xl_base",description:"General-purpose generation and illustration",page:"https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0",editing:false,generation:true,
         files:&[ModelFile {directory:"checkpoints",file:"sd_xl_base_1.0.safetensors",url:"https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",size:6940000000,min:5_000_000_000,max:12_000_000_000}]},
-    Model {name:"Qwen-Image-Edit 2509 (FP8)",keyword:"qwen",description:"Instruction-based image editing. Installs all three required files (about 30 GB).",page:"https://huggingface.co/Comfy-Org/Qwen-Image-Edit",editing:true,
+    Model {name:"Qwen-Image-Edit 2509 (FP8)",keyword:"qwen",description:"Instruction-based image editing. Installs all three required files (about 30 GB).",page:"https://huggingface.co/Comfy-Org/Qwen-Image-Edit",editing:true,generation:false,
         files:&[
             ModelFile {directory:"diffusion_models",file:"qwen_image_edit_2509_fp8_e4m3fn.safetensors",url:"https://huggingface.co/Comfy-Org/Qwen-Image-Edit/resolve/main/split_files/diffusion_models/qwen_image_edit_2509_fp8_e4m3fn.safetensors",size:20_500_000_000,min:18_000_000_000,max:24_000_000_000},
             ModelFile {directory:"text_encoders",file:"qwen_2.5_vl_7b_fp8_scaled.safetensors",url:"https://huggingface.co/Comfy-Org/Qwen-Image/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",size:9_400_000_000,min:8_000_000_000,max:12_000_000_000},
             ModelFile {directory:"vae",file:"qwen_image_vae.safetensors",url:"https://huggingface.co/Comfy-Org/Qwen-Image/resolve/main/split_files/vae/qwen_image_vae.safetensors",size:250_000_000,min:200_000_000,max:500_000_000},
+        ]},
+    Model {name:"Qwen-Image-Edit 2511 (FP8)",keyword:"qwen2511",description:"Newer instruction editor with improved consistency. About 20.5 GB extra when the existing Qwen encoder/VAE are present.",page:"https://huggingface.co/Comfy-Org/Qwen-Image-Edit",editing:true,generation:false,
+        files:&[
+            ModelFile {directory:"diffusion_models",file:"qwen_image_edit_2511_fp8mixed.safetensors",url:"https://huggingface.co/Comfy-Org/Qwen-Image-Edit/resolve/main/split_files/diffusion_models/qwen_image_edit_2511_fp8mixed.safetensors",size:20_600_000_000,min:18_000_000_000,max:24_000_000_000},
+            ModelFile {directory:"text_encoders",file:"qwen_2.5_vl_7b_fp8_scaled.safetensors",url:"https://huggingface.co/Comfy-Org/Qwen-Image/resolve/main/split_files/text_encoders/qwen_2.5_vl_7b_fp8_scaled.safetensors",size:9_400_000_000,min:8_000_000_000,max:12_000_000_000},
+            ModelFile {directory:"vae",file:"qwen_image_vae.safetensors",url:"https://huggingface.co/Comfy-Org/Qwen-Image/resolve/main/split_files/vae/qwen_image_vae.safetensors",size:250_000_000,min:200_000_000,max:500_000_000},
+        ]},
+    Model {name:"FLUX.2 Klein 4B (FP8)",keyword:"fluxklein4b",description:"Local generation and instruction editing. Distilled 4-step model; about 12.5 GB total. Uses memory offloading when needed.",page:"https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8",editing:true,generation:true,
+        files:&[
+            ModelFile {directory:"diffusion_models",file:"flux-2-klein-4b-fp8.safetensors",url:"https://huggingface.co/black-forest-labs/FLUX.2-klein-4b-fp8/resolve/main/flux-2-klein-4b-fp8.safetensors",size:4_100_000_000,min:3_500_000_000,max:5_000_000_000},
+            ModelFile {directory:"text_encoders",file:"qwen_3_4b.safetensors",url:"https://huggingface.co/Comfy-Org/Flux-2-Klein-4B/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",size:8_100_000_000,min:7_500_000_000,max:9_000_000_000},
+            ModelFile {directory:"vae",file:"flux2-vae.safetensors",url:"https://huggingface.co/Comfy-Org/Flux-2-Klein-4B/resolve/main/split_files/vae/flux2-vae.safetensors",size:340_000_000,min:300_000_000,max:450_000_000},
         ]},
 ];
 
@@ -253,7 +266,7 @@ mod tests {
             ModelFile {directory:"diffusion_models",file:"new.safetensors",url,size:4,min:4,max:4},
             ModelFile {directory:"text_encoders",file:"new.safetensors",url,size:4,min:4,max:4},
         ]));
-        let model=Model {name:"fixture",keyword:"fixture",description:"",page:"",editing:true,files};
+        let model=Model {name:"fixture",keyword:"fixture",description:"",page:"",editing:true,generation:false,files};
         let progress=Arc::new(AtomicU64::new(0));let total=Arc::new(AtomicU64::new(0));
         assert_eq!(install_model(&model,root.clone(),progress.clone(),total.clone(),Arc::new(AtomicBool::new(false))).unwrap(),root);
         server.join().unwrap();
@@ -278,7 +291,7 @@ mod tests {
             ModelFile {directory:"vae",file:"complete.safetensors",url,size:4,min:4,max:4},
             ModelFile {directory:"vae",file:"interrupted.safetensors",url,size:4,min:4,max:4},
         ]));
-        let model=Model {name:"fixture",keyword:"fixture",description:"",page:"",editing:true,files};
+        let model=Model {name:"fixture",keyword:"fixture",description:"",page:"",editing:true,generation:false,files};
         assert!(install_model(&model,root.clone(),Arc::new(AtomicU64::new(0)),Arc::new(AtomicU64::new(0)),Arc::new(AtomicBool::new(false))).is_err());
         server.join().unwrap();
         assert_eq!(fs::read(root.join("vae/complete.safetensors")).unwrap(),b"done");
@@ -291,7 +304,7 @@ mod tests {
     fn cancelled_install_never_downloads_and_invalid_existing_file_is_preserved() {
         let root=fixture();
         let files=Box::leak(Box::new([ModelFile {directory:"vae",file:"test.safetensors",url:"http://127.0.0.1:1/no-request",size:4,min:4,max:4}]));
-        let model=Model {name:"fixture",keyword:"fixture",description:"",page:"",editing:true,files};
+        let model=Model {name:"fixture",keyword:"fixture",description:"",page:"",editing:true,generation:false,files};
         let run=|cancel|install_model(&model,root.clone(),Arc::new(AtomicU64::new(0)),Arc::new(AtomicU64::new(0)),Arc::new(AtomicBool::new(cancel)));
         assert!(run(true).unwrap_err().contains("cancelled"));
         fs::create_dir(root.join("vae")).unwrap();fs::write(root.join("vae/test.safetensors"),b"x").unwrap();
@@ -326,6 +339,17 @@ mod tests {
         fs::write(root.join("checkpoints/alternate.safetensors"),b"abcdef").unwrap();
         assert_eq!(remove_model_files(0,&root,Some("alternate.safetensors"),false).unwrap(),6);
         assert!(!root.join("checkpoints/alternate.safetensors").exists());fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn new_models_share_only_the_correct_companion_files() {
+        let qwen=MODELS.iter().find(|m|m.name==crate::ai_generation::QWEN_EDIT).unwrap();
+        let newer=MODELS.iter().find(|m|m.name==crate::ai_generation::QWEN_EDIT_2511).unwrap();
+        assert_ne!(qwen.files[0].file,newer.files[0].file);
+        assert_eq!(qwen.files[1].file,newer.files[1].file);assert_eq!(qwen.files[2].file,newer.files[2].file);
+        let flux=MODELS.iter().find(|m|m.name==crate::ai_generation::FLUX_KLEIN).unwrap();
+        assert!(flux.generation&&flux.editing);
+        assert_ne!(flux.files[1].file,qwen.files[1].file);assert_ne!(flux.files[2].file,qwen.files[2].file);
     }
 
     #[test]
