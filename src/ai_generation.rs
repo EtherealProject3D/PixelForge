@@ -50,6 +50,27 @@ fn restore_edit_dimensions(output: image::RgbaImage, source_size: Option<(u32, u
     }
 }
 
+// Feather inward so protected pixels remain bit-for-bit unchanged.
+fn feather_selection(mask:&[u8],width:usize,height:usize,radius:f32) -> Vec<u8> {
+    let mut distance:Vec<f32>=mask.iter().map(|&value|if value==0 {0.0} else {f32::INFINITY}).collect();
+    for y in 0..height {for x in 0..width {
+        let i=y*width+x;
+        if x>0 {distance[i]=distance[i].min(distance[i-1]+1.0);}
+        if y>0 {distance[i]=distance[i].min(distance[i-width]+1.0);}
+    }}
+    for y in (0..height).rev() {for x in (0..width).rev() {
+        let i=y*width+x;
+        if x+1<width {distance[i]=distance[i].min(distance[i+1]+1.0);}
+        if y+1<height {distance[i]=distance[i].min(distance[i+width]+1.0);}
+    }}
+    let deepest=distance.iter().copied().fold(0.0_f32,f32::max);
+    let radius=radius.min(deepest).max(1.0);
+    mask.iter().zip(distance).map(|(&value,d)| {
+        let t=(d/radius).clamp(0.0,1.0);
+        (value as f32*t*t*(3.0-2.0*t)).round() as u8
+    }).collect()
+}
+
 // Preserve exact source pixels outside the selection for every edit model.
 fn finish_edit(output:image::RgbaImage, source:Option<&image::RgbaImage>, mask:Option<&[u8]>) -> Result<image::RgbaImage,String> {
     let mut output=restore_edit_dimensions(output,source.map(|image|image.dimensions()));
@@ -58,7 +79,8 @@ fn finish_edit(output:image::RgbaImage, source:Option<&image::RgbaImage>, mask:O
         if mask.len()!=source.width() as usize*source.height() as usize || !mask.iter().any(|&v|v>0) {
             return Err("Select an area to edit before applying an edit to selection".into());
         }
-        for ((result,original),&amount) in output.pixels_mut().zip(source.pixels()).zip(mask) {
+        let feathered=feather_selection(mask,source.width() as usize,source.height() as usize,12.0);
+        for ((result,original),&amount) in output.pixels_mut().zip(source.pixels()).zip(&feathered) {
             for channel in 0..4 {
                 result[channel]=((result[channel] as u32*amount as u32+original[channel] as u32*(255-amount as u32)+127)/255) as u8;
             }
@@ -392,9 +414,24 @@ mod selection_edit_tests {
         let result=finish_edit(generated,Some(&source),Some(&[0,128,255])).unwrap();
         assert_eq!(result.dimensions(),source.dimensions());
         assert_eq!(result.get_pixel(0,0),source.get_pixel(0,0));
-        assert_eq!(*result.get_pixel(1,0),image::Rgba([120,140,110,130]));
+        assert_eq!(*result.get_pixel(1,0),image::Rgba([70,90,85,105]));
         assert_eq!(*result.get_pixel(2,0),image::Rgba([220,240,160,180]));
     }
+    #[test]
+    fn hard_selection_fades_inward_and_never_changes_protected_pixels() {
+        let source=image::RgbaImage::from_pixel(40,1,image::Rgba([0,0,0,80]));
+        let generated=image::RgbaImage::from_pixel(40,1,image::Rgba([240,240,240,200]));
+        let mut mask=vec![0;40];mask[4..36].fill(255);
+        let result=finish_edit(generated,Some(&source),Some(&mask)).unwrap();
+        for x in [0,1,2,3,36,37,38,39] {assert_eq!(result.get_pixel(x,0),source.get_pixel(x,0));}
+        let edge=result.get_pixel(4,0)[0];
+        let middle=result.get_pixel(8,0)[0];
+        let center=result.get_pixel(20,0)[0];
+        assert!(edge>0 && edge<middle && middle<center);
+        assert_eq!(center,240);
+        assert_eq!(feather_selection(&[255;4],2,2,12.0),vec![255;4]);
+    }
+
     #[test]
     fn selection_requires_nonempty_matching_mask_and_source() {
         let source=image::RgbaImage::new(2,1);

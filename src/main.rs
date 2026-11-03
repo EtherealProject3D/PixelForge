@@ -1279,28 +1279,8 @@ impl PixelForge {
                     request.seed.wrapping_add(index as u64)
                 };
                 let seed = item.seed;
-                let source_for_composite=item.source.clone();
-                let mask_for_composite=item.mask.clone();
                 let result = ai_generation::generate(item, cancel.clone(), progress.clone())
-                    .map(|mut image| {
-                        if let (Some(source),Some(mask))=(source_for_composite,mask_for_composite) {
-                            if let Some(mask_image)=image::GrayImage::from_raw(source.width(),source.height(),mask) {
-                                let original=image::imageops::resize(&source,image.width(),image.height(),image::imageops::FilterType::Lanczos3);
-                                // Feather the final seam; never paste the raw latent mask boundary.
-                                let scaled_mask=image::imageops::resize(&mask_image,image.width(),image.height(),image::imageops::FilterType::Nearest);
-                                let scaled_mask=image::imageops::blur(&scaled_mask,3.0);
-                                for (x,y,pixel) in image.enumerate_pixels_mut() {
-                                    let alpha=scaled_mask.get_pixel(x,y)[0] as f32/255.0;
-                                    let old=original.get_pixel(x,y);
-                                    for channel in 0..3 {
-                                        pixel[channel]=(old[channel] as f32*(1.0-alpha)+pixel[channel] as f32*alpha).round() as u8;
-                                    }
-                                    pixel[3]=255;
-                                }
-                            }
-                        }
-                        (image, seed)
-                    });
+                    .map(|image| (image, seed));
                 let failed = result.is_err();
                 if tx.send(result).is_err() {
                     break;
@@ -1695,7 +1675,8 @@ impl PixelForge {
             });
         ui.separator();
         let previous_ratio = self.generation_size;
-        egui::ComboBox::from_label("Style preset")
+        ui.label("Style preset");
+        egui::ComboBox::from_id_salt("sidebar_Style_preset").width(ui.available_width()).truncate()
             .selected_text(
                 GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].0,
             )
@@ -1705,7 +1686,8 @@ impl PixelForge {
                 }
             });
 
-        egui::ComboBox::from_label("Aspect ratio")
+        ui.label("Aspect ratio");
+        egui::ComboBox::from_id_salt("sidebar_Aspect_ratio").width(ui.available_width()).truncate()
             .selected_text(GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len() - 1)].0)
             .show_ui(ui, |ui| {
                 for (i, (name, _, _)) in GENERATION_SIZES.iter().enumerate() {
@@ -1723,7 +1705,8 @@ impl PixelForge {
             })
             .collect();
 
-        egui::ComboBox::from_label("Resolution")
+        ui.label("Resolution");
+        egui::ComboBox::from_id_salt("sidebar_Resolution").width(ui.available_width()).truncate()
             .selected_text(&resolution_labels[self.generation_resolution.min(3)])
             .show_ui(ui, |ui| {
                 for (i, label) in resolution_labels.iter().enumerate() {
@@ -2052,6 +2035,10 @@ impl PixelForge {
                 .show_ui(ui, |ui| {
                     for index in 0..count { ui.selectable_value(&mut self.generation_compare_index, index, format!("Version {}", index+1)); }
                 });
+            if self.has_edit_selection() {
+                ui.colored_label(egui::Color32::from_rgb(255,150,150),"Selection active");
+                ui.checkbox(&mut self.selection_show_mask,"Show selection");
+            }
             if ui.button("Select Area").clicked() {
                 self.generation_compare=false;
                 self.selection_tools_tab=true;self.ai_tools_tab=false;self.generation_tools_tab=false;
@@ -2136,6 +2123,17 @@ impl PixelForge {
             };
             painter.with_clip_rect(clip).image(item.texture.id(),image_rect,
                 egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),egui::Color32::WHITE);
+        }
+        if self.selection_show_mask && self.has_edit_selection() {
+            if let Some(selection)=&self.selection_texture {
+                let item=&self.generation_gallery[self.generation_selected];
+                let size=egui::vec2(item.pixels.width() as f32,item.pixels.height() as f32);
+                let fit=(rect.width()/size.x).min(rect.height()/size.y);
+                let image_rect=egui::Rect::from_center_size(rect.center()+self.generation_pan,size*fit*self.generation_zoom);
+                let clip=egui::Rect::from_min_max(rect.min,egui::pos2(divider_x,rect.bottom()));
+                painter.with_clip_rect(clip).image(selection.id(),image_rect,
+                    egui::Rect::from_min_max(egui::Pos2::ZERO,egui::pos2(1.0,1.0)),egui::Color32::WHITE);
+            }
         }
         painter.line_segment([egui::pos2(divider_x,rect.top()),egui::pos2(divider_x,rect.bottom())],egui::Stroke::new(2.0,egui::Color32::WHITE));
         painter.circle_filled(egui::pos2(divider_x,rect.center().y),12.0,egui::Color32::from_gray(45));
@@ -6033,7 +6031,6 @@ impl PixelForge {
             }
         }
 
-        if self.selection_brush_enabled {
             if self.selection_show_mask {
                 if let Some(selection) = &self.selection_texture {
                     painter.image(
@@ -6045,6 +6042,7 @@ impl PixelForge {
                 }
             }
 
+        if self.selection_brush_enabled {
             if let Some(pos) = pointer_position {
                 if canvas.contains(pos) && image_rect.contains(pos) {
                     painter.circle_stroke(
@@ -6295,16 +6293,21 @@ impl eframe::App for PixelForge {
             });
         });
         egui::SidePanel::right("tools")
-            .default_width(360.0)
-            .min_width(340.0)
-            .max_width(480.0)
+            .default_width(320.0)
+            .min_width(290.0)
+            .max_width(360.0)
             .resizable(true)
             .show(ctx, |ui| {
                 // Sidebar sections and model controls are larger than canvas/status text.
                 for text in [egui::TextStyle::Body,egui::TextStyle::Button,egui::TextStyle::Small,egui::TextStyle::Monospace] {
-                    if let Some(font)=ui.style_mut().text_styles.get_mut(&text) {font.size=18.0;}
+                    if let Some(font)=ui.style_mut().text_styles.get_mut(&text) {font.size=16.0;}
                 }
-                if let Some(font)=ui.style_mut().text_styles.get_mut(&egui::TextStyle::Heading) {font.size=23.0;}
+                if let Some(font)=ui.style_mut().text_styles.get_mut(&egui::TextStyle::Heading) {font.size=21.0;}
+                ui.style_mut().wrap_mode=Some(egui::TextWrapMode::Wrap);
+                ui.spacing_mut().icon_width=22.0;
+                ui.spacing_mut().icon_width_inner=16.0;
+                ui.spacing_mut().combo_width=160.0;
+                ui.spacing_mut().slider_width=(ui.available_width()-100.0).max(100.0);
                 ui.horizontal_wrapped(|ui| {
                     let edit_clicked = ui
                         .selectable_label(!self.ai_tools_tab && !self.selection_tools_tab && !self.generation_tools_tab, "Edit")
@@ -6461,7 +6464,8 @@ impl eframe::App for PixelForge {
                             ui.label("Real-ESRGAN");
                             if self.ai_gpus.is_empty() && self.ai_gpu_error.is_none() { self.refresh_vulkan_gpus(); }
                             ui.add_enabled_ui(!self.ai_running, |ui| {
-                                egui::ComboBox::from_label("Upscaling model")
+                                ui.label("Upscaling model");
+                                egui::ComboBox::from_id_salt("sidebar_Upscaling_model").width(ui.available_width()).truncate()
                                     .selected_text(["Photo", "Illustration / Anime"][self.ai_model.min(1)])
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(&mut self.ai_model, 0, "Photo");
@@ -6475,7 +6479,8 @@ impl eframe::App for PixelForge {
                                             .map(|gpu| format!("Automatic — {}", gpu.name))
                                             .unwrap_or_else(|| "Automatic (Recommended)".to_owned())
                                     });
-                                egui::ComboBox::from_label("Vulkan GPU").width(180.0).truncate().selected_text(gpu_name)
+                                ui.label("Vulkan GPU");
+                                egui::ComboBox::from_id_salt("sidebar_Vulkan_GPU").width(ui.available_width()).truncate().selected_text(gpu_name)
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(&mut self.ai_gpu_id, -1, "Automatic (Recommended)");
                                         for gpu in &self.ai_gpus {
@@ -6486,7 +6491,8 @@ impl eframe::App for PixelForge {
                                     ui.label(self.ai_gpu_error.as_deref().unwrap_or("No Vulkan GPUs detected"));
                                 }
                                 if ui.small_button("Refresh GPU list").clicked() { self.refresh_vulkan_gpus(); }
-                                egui::ComboBox::from_label("Tile size")
+                                ui.label("Tile size");
+                                egui::ComboBox::from_id_salt("sidebar_Tile_size").width(ui.available_width()).truncate()
                                     .selected_text(if self.ai_tile_size == 0 { "Auto".to_owned() } else { self.ai_tile_size.to_string() })
                                     .show_ui(ui, |ui| {
                                         for tile in [0, 32, 64, 128, 256, 512] {
@@ -6581,7 +6587,8 @@ impl eframe::App for PixelForge {
                             ui.heading("Restoration");
                             ui.label("Photo denoising (Waifu2x Vulkan)");
                             ui.add_enabled_ui(!self.ai_running && !self.ai_saving, |ui| {
-                                egui::ComboBox::from_label("Noise reduction")
+                                ui.label("Noise reduction");
+                                egui::ComboBox::from_id_salt("sidebar_Noise_reduction").width(ui.available_width()).truncate()
                                     .selected_text(match self.ai_denoise_level { 0 => "Very light", 1 => "Light", 2 => "Medium", _ => "Strong" })
                                     .show_ui(ui, |ui| {
                                         ui.selectable_value(&mut self.ai_denoise_level, 0, "Very light");
@@ -6733,6 +6740,9 @@ fn main() -> eframe::Result {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
             // A single readable default for all non-heading text, including small labels.
             cc.egui_ctx.style_mut(|style| {
+                style.spacing.icon_width=22.0;
+                style.spacing.icon_width_inner=16.0;
+                style.spacing.interact_size.y=26.0;
                 for text in [egui::TextStyle::Body,egui::TextStyle::Button,egui::TextStyle::Small,egui::TextStyle::Monospace] {
                     if let Some(font)=style.text_styles.get_mut(&text) {font.size=16.0;}
                 }
@@ -6922,6 +6932,25 @@ mod workspace_tests {
         let model_y=text.iter().find(|(s,_)|*s=="Fixture generation model").unwrap().1;
         let prompt_y=text.iter().find(|(s,_)|*s=="Fixture initial prompt").unwrap().1;
         assert!(model_y<prompt_y);
+    }
+
+    #[test]
+    fn selected_area_overlay_is_drawn_outside_selection_tab_and_in_compare() {
+        let ctx=egui::Context::default();let mut app=PixelForge::default();
+        let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([40,40,40,255]));
+        let texture=ctx.load_texture("overlay_fixture",ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
+        app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+        app.generation_workspace=true;app.bind_workspace_editor(&ctx);
+        app.selection_mask=Some(masking::SelectionMask::from_pixels(32,32,vec![255;1024]).unwrap());
+        app.refresh_selection_overlay(&ctx);
+        let overlay=app.selection_texture.as_ref().unwrap().id();
+        for tab in 0..4 {
+            app.generation_tools_tab=tab==0;app.ai_tools_tab=tab==1;app.selection_tools_tab=tab==2;
+            app.generation_compare=tab==3;
+            let input=egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1400.0,900.0))),..Default::default()};
+            let output=ctx.run(input,|ctx| {egui::CentralPanel::default().show(ctx,|ui|app.show_generation_workspace(ui));});
+            assert!(output.shapes.iter().any(|s|matches!(&s.shape,egui::Shape::Mesh(mesh) if mesh.texture_id==overlay)),"Selection missing from tab {tab}");
+        }
     }
 
     #[test]

@@ -142,3 +142,23 @@ The filmstrip reserves space for thumbnail captions based on font/padding size.
 Validation: 76 tests pass and Windows debug build passes. A rendered-layout
 regression test verifies caption clipping, automatic-negative visibility,
 and model selector placement above the initial prompt. No live GPU work needed.
+
+## Compact sidebar and selection-edge update
+
+Sidebar width is constrained to 290–360 points (320 default). Body/control text
+is 16 points with 21-point headings; dropdown labels sit above constrained,
+truncated controls. Dropdown arrows and their hit targets are larger throughout.
+Long help text wraps within the sidebar.
+
+An active-selection badge and overlay toggle remain in the shared toolbar.
+The selection overlay renders in every tool tab, and on the left version when
+comparing. The brush cursor remains limited to the Selection tab.
+
+Selection edits now use one inward-feathered composite (12 source pixels,
+reduced for small selections), rather than two separate composites. Fully
+protected pixels remain exact, including alpha. This reduces hard seams but
+cannot correct semantic mismatch between independently generated regions.
+
+Validation: 78 tests pass and Windows debug build passes. Added regression tests
+for overlay rendering across tabs/comparison and gradual blending at hard edges.
+Live GPU image quality and native layout at user scaling still need acceptance.
