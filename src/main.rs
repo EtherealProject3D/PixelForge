@@ -2839,6 +2839,11 @@ impl PixelForge {
     }
 
     fn save_project(&mut self, save_as: bool) {
+        // Exit confirmation must use the same project and existing path as File > Save.
+        if self.generation_workspace {
+            self.save_generation_project(save_as);
+            return;
+        }
         let Some(original) = &self.original_pixels else {
             self.status = "Open an image first".into();
             return;
@@ -7316,13 +7321,21 @@ mod workspace_tests {
         let path=std::env::temp_dir().join(format!("studio-workspace-roundtrip-{}.pxf",std::process::id()));
         app.qwen_steps=13;app.flux_steps=5;
         app.generation_project_path=Some(path.clone());
-        app.save_generation_project(false);
+        app.project_dirty=true;
+        // The exit dialog calls this entry point, with no legacy editor save path.
+        app.save_project(false);
+        assert!(!app.project_dirty);
+        assert_eq!(app.generation_project_path.as_ref(),Some(&path));
+        app.exposure=0.5;
+        app.project_dirty=true;
+        app.save_project(false);
+        assert!(!app.project_dirty);
         assert!(app.generation_status.starts_with("Saved"),"{}",app.generation_status);
         let mut loaded=PixelForge::default();
         loaded.open_generation_project(&path,&ctx);loaded.ensure_workspace(&ctx);
         std::fs::remove_file(path).unwrap();
         assert_eq!(loaded.qwen_steps,13);assert_eq!(loaded.flux_steps,5);
-        assert_eq!(loaded.exposure,1.0);
+        assert_eq!(loaded.exposure,0.5);
         assert_eq!(loaded.selection_mask.as_ref().unwrap().pixels(),&[255,0]);
         assert_eq!(loaded.generation_gallery[0].pixels.get_pixel(0,0)[0],40);
         assert_eq!(loaded.generation_gallery[0].seed,42);
