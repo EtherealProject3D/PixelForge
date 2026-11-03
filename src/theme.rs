@@ -7,6 +7,8 @@ const TEXT: Color32 = Color32::from_rgb(224, 231, 241);
 const ACCENT: Color32 = Color32::from_rgb(49, 113, 185);
 
 pub fn apply(ctx: &egui::Context) {
+    ctx.set_theme(egui::ThemePreference::Dark);
+    ctx.send_viewport_cmd(egui::ViewportCommand::SetTheme(egui::SystemTheme::Dark));
     let mut visuals = egui::Visuals::dark();
     visuals.panel_fill = PANEL;
     visuals.window_fill = Color32::from_rgb(34, 41, 53);
@@ -55,4 +57,20 @@ pub fn primary(label: &str) -> egui::Button<'_> {
     egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong())
         .fill(ACCENT)
         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(87, 149, 218)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn system_light_mode_cannot_replace_pixelforge_colors() {
+        let ctx=egui::Context::default();
+        super::apply(&ctx);
+        for system_theme in [egui::Theme::Light,egui::Theme::Dark,egui::Theme::Light] {
+            let _=ctx.run(egui::RawInput {system_theme:Some(system_theme),..Default::default()},|ctx| {
+                assert!(ctx.style().visuals.dark_mode);
+                assert_eq!(ctx.style().visuals.panel_fill,super::PANEL);
+                assert_eq!(ctx.style().visuals.selection.bg_fill,super::ACCENT);
+            });
+        }
+    }
 }

@@ -820,6 +820,7 @@ pub struct Manager {
     rx: Option<std::sync::mpsc::Receiver<Result<Vec<Status>, String>>>,
     scanned: bool,
     inventory: Option<(Option<PathBuf>, Vec<String>)>,
+    active_component: Option<Component>,
 }
 impl Default for Manager {
     fn default() -> Self {
@@ -832,6 +833,7 @@ impl Default for Manager {
             rx: None,
             scanned: false,
             inventory: None,
+            active_component: None,
         }
     }
 }
@@ -854,6 +856,7 @@ impl Manager {
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.rx = Some(rx);
+        self.active_component = None;
         self.message = "Checking dependencies…".into();
         std::thread::spawn(move || {
             let _ = tx.send(Ok(scan(models, known)));
@@ -936,6 +939,16 @@ impl Manager {
                             if ui.add_enabled(!self.busy()&&!workspace_busy,egui::Button::new(if row.installed {"Check / Install Update"} else {"Install"})).clicked() {action=Some((c,false));}
                             if ui.add_enabled(row.rollback&&!self.busy()&&!workspace_busy,egui::Button::new("Roll Back")).clicked() {action=Some((c,true));}
                         });
+                        if self.active_component==Some(c) {
+                            if self.busy() {
+                                let total=self.transfer.total.load(Ordering::Relaxed);
+                                let bytes=self.transfer.bytes.load(Ordering::Relaxed);
+                                let label=if total>0 {format!("{:.1} / {:.1} MB",bytes as f64/1e6,total as f64/1e6)} else {"Preparing / installing…".into()};
+                                ui.add(egui::ProgressBar::new(if total>0 {(bytes as f32/total as f32).clamp(0.0,1.0)} else {0.0}).animate(true).text(label));
+                                ui.label(self.transfer.message.lock().map(|v|v.clone()).unwrap_or_default());
+                                if ui.button("Cancel Setup").clicked() {self.transfer.cancel.store(true,Ordering::Relaxed);}
+                            } else {ui.label(&self.message);}
+                        }
                     } else if row.title.contains("model") {
                         if ui.button("Manage Models").clicked() {library=true;}
                     } else {
@@ -944,13 +957,10 @@ impl Manager {
                 });
             }
             if workspace_busy {ui.label("Finish generation, image processing, or model downloads before changing dependencies.");}
-            if self.busy() {
-                let total=self.transfer.total.load(Ordering::Relaxed);let bytes=self.transfer.bytes.load(Ordering::Relaxed);
-                ui.add(egui::ProgressBar::new(if total>0 {bytes as f32/total as f32} else {0.0}).animate(true).text(format!("{:.1} / {:.1} MB",bytes as f64/1e6,total as f64/1e6)));
-                ui.label(self.transfer.message.lock().map(|v|v.clone()).unwrap_or_default());
-                if ui.button("Cancel Setup").clicked() {self.transfer.cancel.store(true,Ordering::Relaxed);}
+            if self.active_component.is_none() {
+                if self.busy() {ui.spinner();}
+                ui.label(&self.message);
             }
-            ui.label(&self.message);
             ui.label(format!("Managed installation folder: {}",root().display()));
             ui.label("Retained versions use additional disk space. Keep old versions until you have tested the update. Portable ComfyUI includes Python and CUDA; the separate deblur runtime includes Python, ONNX Runtime, NumPy and OpenCV. GPU drivers are managed by the GPU vendor.");
         });
@@ -959,6 +969,7 @@ impl Manager {
             self.refresh(models.clone(), known.clone());
         }
         if let Some((component, rollback_requested)) = action {
+            self.active_component = Some(component);
             let (tx, rx) = std::sync::mpsc::channel();
             self.rx = Some(rx);
             self.transfer = Transfer::default();
@@ -990,6 +1001,26 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn setup_progress_is_between_active_component_and_next_component() {
+        let ctx=egui::Context::default();
+        let mut manager=Manager::default();
+        manager.open=true;
+        manager.active_component=Some(Component::Denoise);
+        let (_tx,rx)=std::sync::mpsc::channel();manager.rx=Some(rx);
+        manager.transfer.bytes.store(1_000_000,Ordering::Relaxed);
+        manager.transfer.total.store(2_000_000,Ordering::Relaxed);
+        manager.rows=vec![
+            Status{component:Some(Component::Denoise),title:"Active component".into(),required:true,installed:false,detail:"Test".into(),rollback:false},
+            Status{component:Some(Component::Upscale),title:"Next component".into(),required:true,installed:false,detail:"Test".into(),rollback:false}];
+        let input=||egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1000.0,1200.0))),..Default::default()};
+        let _=ctx.run(input(),|ctx|{manager.show(ctx,None,vec![],false);});
+        let output=ctx.run(input(),|ctx|{manager.show(ctx,None,vec![],false);});
+        let position=|label:&str|output.shapes.iter().find_map(|shape|match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text==label=>Some(text.pos.y),_=>None}).unwrap_or_else(||panic!("Missing {label}"));
+        assert!(position("Active component")<position("1.0 / 2.0 MB"));
+        assert!(position("1.0 / 2.0 MB")<position("Next component"));
+    }
     struct Fixture(PathBuf);
     impl Fixture {
         fn new() -> Self {
