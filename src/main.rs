@@ -5,6 +5,7 @@ mod theme;
 mod profile;
 mod display;
 mod compatibility;
+mod resolution;
 mod backend;
 mod updater;
 mod ai_denoise;
@@ -1811,6 +1812,15 @@ impl PixelForge {
             "Output: {} × {} (multiples of 64)",
             self.generation_width, self.generation_height
         ));
+        let vram = self.dependency_manager.diagnostics.as_ref().and_then(compatibility::vram_gib);
+        let guidance = resolution::recommend(&self.generation_checkpoint, vram, self.generation_width, self.generation_height);
+        ui.small(&guidance.explanation);
+        if guidance.caution {ui.colored_label(egui::Color32::YELLOW,"Higher memory risk: try the suggested size or a smaller model if generation fails.");}
+        if ui.small_button("Apply suggested resolution").clicked() {
+            self.generation_custom_size = true;
+            self.generation_width = guidance.width;
+            self.generation_height = guidance.height;
+        }
         ui.horizontal(|ui| {
             ui.label("Batch");
             for count in [1, 2, 4, 8] {
