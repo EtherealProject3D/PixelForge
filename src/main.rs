@@ -1663,7 +1663,8 @@ impl PixelForge {
                 let backend_model=(!model.editing).then(||self.generation_checkpoints.iter().find(|name|name.to_lowercase().contains(model.keyword)).cloned()).flatten();
                 let installed=present==model.files.len() || backend_model.is_some();
                 ui.group(|ui| {
-                    ui.set_max_width(ui.available_width());
+                    // Use the whole column instead of sizing each card to its text.
+                    ui.set_width(ui.available_width());
                     ui.strong(model.name);
                     ui.label(if installed {"Installed".to_owned()} else if present>0 {format!("{} / {} files installed",present,model.files.len())} else {"Not installed".to_owned()});
                     ui.label(model.description);
