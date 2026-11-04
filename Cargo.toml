@@ -1,10 +1,10 @@
-﻿[package]
+[package]
 name = "pixelforge"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 
 [dependencies]
-eframe = "0.32"
+eframe = { version = "0.32", features = ["persistence"] }
 egui = "0.32"
 image = "0.25"
 rfd = "0.15"

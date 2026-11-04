@@ -272,6 +272,17 @@ pub struct Status {
     pub detail: String,
     pub rollback: bool,
 }
+impl Status {
+    fn category(&self) -> usize {
+        match self.component {
+            Some(Component::Comfy) => 0,
+            Some(Component::Denoise | Component::DeblurModel | Component::DeblurRuntime) => 1,
+            Some(Component::Upscale) => 2,
+            None if self.title.to_ascii_lowercase().contains("model") => 0,
+            None => 3,
+        }
+    }
+}
 pub fn scan(models: Option<PathBuf>, known: Vec<String>) -> Vec<Status> {
     let models = models.or_else(|| crate::model_installer::detect_models_folder(&known));
     let mut rows = Vec::new();
@@ -929,8 +940,19 @@ impl Manager {
             let hardware=[("nvidia","NVIDIA RTX (recommended)"),("nvidia_cu126","Older NVIDIA GPUs"),("amd","AMD"),("intel","Intel")];
             let label=hardware.iter().find(|(id,_)|*id==self.gpu).map(|(_,label)|*label).unwrap_or("Choose GPU");
             egui::ComboBox::from_id_salt("dependency_hardware").selected_text(label).show_ui(ui,|ui| {for (id,label) in hardware {ui.selectable_value(&mut self.gpu,id.into(),label);}});
-            for row in &self.rows {
+            for (category, (heading, description)) in [
+                ("Generation & AI Restore", "ComfyUI and models for image generation and instruction-based editing."),
+                ("Photo Cleanup", "Noise reduction and deblurring."),
+                ("Upscaling & Sharpening", "Image enlargement and detail enhancement."),
+                ("GPU Support", "Graphics driver support for local AI tools."),
+            ].into_iter().enumerate() {
+                if !self.rows.iter().any(|row|row.category()==category) {continue;}
+                ui.add_space(8.0);
+                crate::theme::section(ui,heading);
+                ui.label(description);
+            for row in self.rows.iter().filter(|row|row.category()==category) {
                 ui.group(|ui| {
+                    ui.set_width(ui.available_width());
                     ui.strong(&row.title);
                     ui.colored_label(if row.installed {egui::Color32::LIGHT_GREEN} else {egui::Color32::YELLOW},if row.installed {"Installed"} else {"Missing / needs setup"});
                     ui.label(&row.detail);
@@ -955,6 +977,7 @@ impl Manager {
                         ui.hyperlink_to("GPU driver setup","https://docs.comfy.org/installation/system_requirements");
                     }
                 });
+            }
             }
             if workspace_busy {ui.label("Finish generation, image processing, or model downloads before changing dependencies.");}
             if self.active_component.is_none() {

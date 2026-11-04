@@ -110,6 +110,15 @@ impl Default for Manager {
 impl Manager {
     pub fn busy(&self)->bool {self.check_rx.is_some()||self.download_rx.is_some()}
     pub fn show(&mut self,ctx:&egui::Context,can_restart:bool)->bool {
+        if crate::profile::is_dev() {
+            if self.open {
+                egui::Window::new("PixelForge Dev").open(&mut self.open).show(ctx,|ui| {
+                    ui.label("This development copy uses the source checkout. Close it and reopen PixelForge Dev to rebuild the latest local code.");
+                    ui.label("Use the installed PixelForge app for published releases and in-app updates.");
+                });
+            }
+            return false;
+        }
         if let Some(result)=self.check_rx.as_ref().and_then(|r|r.try_recv().ok()) {
             self.check_rx=None;
             match result {Ok(release)=>{self.message=if release.is_some(){"A new version is available."}else{"You have the latest published version."}.into();self.release=release;},Err(e)=>self.message=format!("Could not check for updates: {e}")}
@@ -161,6 +170,7 @@ impl Manager {
         restart
     }
     fn install(&self)->Result<(),String> {
+        if crate::profile::is_dev() {return Err("Development builds update from the source checkout".into());}
         let staged=self.staged.as_ref().ok_or("No update is ready")?;
         if staged.file_name().is_some_and(|name|name=="PixelForge-Setup.exe") {
             let mut command=Command::new("powershell.exe");

@@ -4,9 +4,9 @@
 
 PixelForge is a Windows desktop image studio that brings local AI generation, conversational editing, photo restoration, and traditional adjustments into one workspace. Generate an image or import a photograph, make changes, and compare every result without switching between separate viewers.
 
-**Version 0.6.1 · Windows x64 · Rust + egui · Local ComfyUI**
+**Version 0.6.2 · Windows x64 · Rust + egui · Local ComfyUI**
 
-[Download v0.6.1](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.1) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
+[Download v0.6.2](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.2) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
 
 ## One workspace, from first image to final export
 
@@ -74,7 +74,7 @@ Models and third-party engines are downloaded separately and remain subject to t
 
 ## Getting started on Windows
 
-1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.1): **PixelForge-v0.6.1-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.1-windows-x64.zip** for portable use.
+1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.2): **PixelForge-v0.6.2-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.2-windows-x64.zip** for portable use.
 2. The installer defaults to **Program Files\Pixel Forge**, adds a Start menu entry, and offers an optional desktop shortcut. Alternatively, extract the portable ZIP into a writable folder and open **PixelForge.exe**. Neither download requires Rust.
 3. Open **Dependencies** to check and install the components needed by your tools. Missing required components highlight that menu item.
 4. For generation/editing, connect a compatible local ComfyUI Desktop installation or install PixelForge's managed portable backend.
@@ -95,9 +95,9 @@ The **Dependencies** window reports status and offers supported install, update,
 
 ### App updates (v0.6.1 onward)
 
-Open **Updates → Check for Updates** to see newer published stable versions and their release notes. Download the verified package, save all open projects, finish running operations, then choose **Install & Restart**. Installed copies open the setup wizard and request Windows administrator permission; portable copies update in place in a writable folder. Both retain a previous executable backup. Users on v0.6.0 need to download v0.6.1 manually first. Source checkouts should continue using Git pull and rebuild; the development launcher rebuilds the checked-out code.
+Open **Updates → Check for Updates** to see newer published stable versions and their release notes. Download the verified package, save all open projects, finish running operations, then choose **Install & Restart**. Installed copies open the setup wizard and request Windows administrator permission; portable copies update in place in a writable folder. Both retain a previous executable backup. Users on v0.6.0 need to download a current release manually first. Source checkouts should continue using Git pull and rebuild; the development launcher rebuilds the checked-out code.
 
-Installed copies can be removed using Windows **Installed apps**. Uninstall removes the application and its shortcuts; projects and separately downloaded model/dependency data are retained.
+Installed copies can be removed using Windows **Installed apps**. Uninstall removes the application and its shortcuts and offers to remove PixelForge-managed downloaded models and dependencies to free disk space. Keeping downloads is the default. Projects and settings are retained.
 
 See [Windows installation options](docs/WINDOWS_INSTALLATION.md) for installer, portable, update, and installer-build details.
 
@@ -110,7 +110,7 @@ Install Git, Rust stable, and Visual Studio C++ build tools with the Windows SDK
 ```powershell
 git clone https://github.com/EtherealProject3D/PixelForge.git
 Set-Location PixelForge
-git switch --detach v0.6.1
+git switch --detach v0.6.2
 cargo test --locked
 cargo run --locked --release
 ```
@@ -128,6 +128,6 @@ Close PixelForge before rebuilding its executable. Source checkouts include `scr
 
 ## Release notes and support
 
-Read [What's new in v0.6.1](docs/RELEASE_NOTES_v0.6.1.md) for the release overview and validation limits. Windows automated tests cover processing helpers, AI workflow construction, version/selection state, comparison interactions, and project round trips. GPU speed and restoration quality vary by model and photo.
+Read [What's new in v0.6.2](docs/RELEASE_NOTES_v0.6.2.md) for the release overview and validation limits. Windows automated tests cover processing helpers, AI workflow construction, version/selection state, comparison interactions, and project round trips. GPU speed and restoration quality vary by model and photo.
 
 When [reporting an issue](https://github.com/EtherealProject3D/PixelForge/issues), include the version, GPU, model, operation, image dimensions, and exact error. Only attach photos you are comfortable sharing publicly.

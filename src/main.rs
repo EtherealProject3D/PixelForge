@@ -2,6 +2,7 @@
 
 mod adjustments;
 mod theme;
+mod profile;
 mod updater;
 mod ai_denoise;
 mod ai_generation;
@@ -64,118 +65,6 @@ enum FitButton {
     Middle,
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct WindowPlacement {
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-    maximized: bool,
-}
-
-impl WindowPlacement {
-    fn path() -> Option<PathBuf> {
-        Some(PathBuf::from(std::env::var_os("APPDATA")?).join("PixelForge").join("window.cfg"))
-    }
-
-    fn load() -> Option<Self> {
-        let content = std::fs::read_to_string(Self::path()?).ok()?;
-        let values: Vec<&str> = content.split_whitespace().collect();
-        if values.len() != 5 { return None; }
-        let nums: Vec<f32> = values[..4].iter().map(|v| v.parse::<f32>()).collect::<Result<_,_>>().ok()?;
-        if !nums.iter().all(|v| v.is_finite()) || nums[2] < 800.0 || nums[3] < 500.0 {
-            return None;
-        }
-        Some(Self { x: nums[0], y: nums[1], width: nums[2], height: nums[3], maximized: values[4] == "true" })
-    }
-
-    fn save(self) -> std::io::Result<()> {
-        let path = Self::path().ok_or_else(|| std::io::Error::other("APPDATA is unavailable"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(path, format!("{} {} {} {} {}", self.x, self.y, self.width, self.height, self.maximized))
-    }
-}
-
-// Keep Win32 physical window coordinates separate from egui's logical points.
-// The native APIs use the same coordinate space for capture and restoration.
-#[cfg(target_os = "windows")]
-mod native_window {
-    use super::PathBuf;
-    use std::ffi::c_void;
-
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct Rect { left: i32, top: i32, right: i32, bottom: i32 }
-
-    #[repr(C)]
-    #[derive(Default, Clone, Copy)]
-    struct Placement {
-        length: u32,
-        flags: u32,
-        show_cmd: u32,
-        min_x: i32, min_y: i32,
-        max_x: i32, max_y: i32,
-        normal: Rect,
-    }
-
-    #[link(name = "user32")]
-    unsafe extern "system" {
-        fn FindWindowW(class: *const u16, name: *const u16) -> *mut c_void;
-        fn GetWindowPlacement(hwnd: *mut c_void, placement: *mut Placement) -> i32;
-        fn SetWindowPos(hwnd: *mut c_void, after: *mut c_void,
-            x: i32, y: i32, width: i32, height: i32, flags: u32) -> i32;
-    }
-
-    fn handle() -> *mut c_void {
-        let title: Vec<u16> = concat!("PixelForge v", env!("CARGO_PKG_VERSION")).encode_utf16().chain(Some(0)).collect();
-        unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
-    }
-
-    fn path() -> Option<PathBuf> {
-        Some(PathBuf::from(std::env::var_os("APPDATA")?)
-            .join("PixelForge").join("window_native.cfg"))
-    }
-
-    pub fn restore() {
-        let Some(path) = path() else { return; };
-        let Ok(contents) = std::fs::read_to_string(path) else { return; };
-        let values: Vec<i32> = contents.split_whitespace()
-            .filter_map(|v| v.parse().ok()).collect();
-        if values.len() != 4 || values[2] < 800 || values[3] < 500 { return; }
-        let hwnd = handle();
-        if hwnd.is_null() { return; }
-        // SWP_NOZORDER | SWP_NOACTIVATE. SetWindowPos expects physical pixels.
-        unsafe { SetWindowPos(hwnd, std::ptr::null_mut(),
-            values[0], values[1], values[2], values[3], 0x0004 | 0x0010); }
-    }
-
-    pub fn save() {
-        let hwnd = handle();
-        if hwnd.is_null() { return; }
-        let mut placement = Placement {
-            length: std::mem::size_of::<Placement>() as u32,
-            ..Placement::default()
-        };
-        if unsafe { GetWindowPlacement(hwnd, &mut placement) } == 0 { return; }
-        let r = placement.normal;
-        let w = r.right - r.left;
-        let h = r.bottom - r.top;
-        if w < 800 || h < 500 { return; }
-        let Some(path) = path() else { return; };
-        if let Some(parent) = path.parent() {
-            if let Err(err) = std::fs::create_dir_all(parent) {
-                eprintln!("Window placement directory error: {err}");
-                return;
-            }
-        }
-        if let Err(err) = std::fs::write(path, format!("{} {} {} {}", r.left, r.top, w, h)) {
-            eprintln!("Native window placement save failed: {err}");
-        }
-    }
-}
-
 struct Controls {
     pan: PanButton,
     fit: FitButton,
@@ -196,8 +85,7 @@ impl Default for Controls {
 
 impl Controls {
     fn config_path() -> Option<PathBuf> {
-        let base = std::env::var_os("APPDATA")?;
-        Some(PathBuf::from(base).join("PixelForge").join("controls.cfg"))
+        Some(profile::settings_root()?.join("controls.cfg"))
     }
 
     fn load() -> Self {
@@ -770,10 +658,7 @@ struct PixelForge {
     preview_source: Option<std::sync::Arc<image::RgbaImage>>,
     preview_rx: Option<std::sync::mpsc::Receiver<(u64, ColorImage, histogram::Histogram)>>,
     preview_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
-    window_placement: Option<WindowPlacement>,
-    last_window_save: std::time::Instant,
-    #[cfg(target_os = "windows")]
-    native_window_restored: bool,
+
     brightness: f32,
     selection_adjustment_target: bool,
     selection_adjustments: adjustments::Adjustments,
@@ -963,12 +848,7 @@ impl Default for PixelForge {
             preview_source: None,
             preview_rx: None,
             preview_generation: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            window_placement: Some(WindowPlacement::load().unwrap_or(WindowPlacement {
-                x: 100.0, y: 100.0, width: 1400.0, height: 900.0, maximized: false,
-            })),
-            last_window_save: std::time::Instant::now(),
-            #[cfg(target_os = "windows")]
-            native_window_restored: false,
+
             brightness: 0.0,
             selection_adjustment_target: false,
             selection_adjustments: adjustments::Adjustments::default(),
@@ -1003,12 +883,7 @@ impl Default for PixelForge {
             show_settings: false,
             selection_tools_tab: false,
             generation_tools_tab: false,
-            ai_tools_tab: std::env::var_os("APPDATA")
-                .map(|base| {
-                    std::path::PathBuf::from(base)
-                        .join("PixelForge")
-                        .join("sidebar_tab.txt")
-                })
+            ai_tools_tab: profile::settings_root().map(|base|base.join("sidebar_tab.txt"))
                 .and_then(|path| std::fs::read_to_string(path).ok())
                 .map(|value| value.trim() == "ai")
                 .unwrap_or(false),
@@ -1669,7 +1544,8 @@ impl PixelForge {
                 let backend_model=(!model.editing).then(||self.generation_checkpoints.iter().find(|name|name.to_lowercase().contains(model.keyword)).cloned()).flatten();
                 let installed=present==model.files.len() || backend_model.is_some();
                 ui.group(|ui| {
-                    ui.set_max_width(ui.available_width());
+                    // Use the whole column instead of sizing each card to its text.
+                    ui.set_width(ui.available_width());
                     ui.strong(model.name);
                     ui.label(if installed {"Installed".to_owned()} else if present>0 {format!("{} / {} files installed",present,model.files.len())} else {"Not installed".to_owned()});
                     ui.label(model.description);
@@ -6360,7 +6236,17 @@ impl PixelForge {
 }
 
 impl eframe::App for PixelForge {
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(1)
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Keep native window persistence current even while the canvas is idle.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
         if ctx.input(|i|i.viewport().close_requested()) && self.dependency_manager.busy() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.dependency_manager.open=true;
@@ -6373,41 +6259,6 @@ impl eframe::App for PixelForge {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.exit_confirmation = true;
             }
-        }
-
-        #[cfg(target_os = "windows")]
-        if !self.native_window_restored {
-            native_window::restore();
-            self.native_window_restored = true;
-        }
-
-        // Always keep a fallback placement so saving never depends on the
-        // backend reporting a rectangle during shutdown.
-        let viewport = ctx.input(|i| i.viewport().clone());
-        let maximized = viewport.maximized.unwrap_or(false);
-        if let Some(mut placement) = self.window_placement {
-            if let Some(rect) = viewport.inner_rect.or(viewport.outer_rect) {
-                if !maximized && rect.width() >= 800.0 && rect.height() >= 500.0 {
-                    placement.x = rect.min.x;
-                    placement.y = rect.min.y;
-                    placement.width = rect.width();
-                    placement.height = rect.height();
-                }
-            }
-            placement.maximized = maximized;
-            self.window_placement = Some(placement);
-        }
-        if self.last_window_save.elapsed() >= std::time::Duration::from_secs(1)
-            || viewport.close_requested()
-        {
-            if let Some(placement) = self.window_placement {
-                if let Err(err) = placement.save() {
-                    eprintln!("PixelForge window placement save failed: {err}");
-                }
-            }
-            #[cfg(target_os = "windows")]
-            native_window::save();
-            self.last_window_save = std::time::Instant::now();
         }
 
         self.show_project_tabs(ctx);
@@ -6637,8 +6488,7 @@ impl eframe::App for PixelForge {
                         self.selection_stroke_active = false;
                         self.panning = false;
 
-                        if let Some(base) = std::env::var_os("APPDATA") {
-                            let folder = std::path::PathBuf::from(base).join("PixelForge");
+                        if let Some(folder) = profile::settings_root() {
 
                             if std::fs::create_dir_all(&folder).is_ok() {
                                 let selected = if selection_clicked {
@@ -7006,20 +6856,14 @@ fn main() -> eframe::Result {
         height: icon_image.height(),
     };
     let mut viewport = egui::ViewportBuilder::default()
-        .with_title(concat!("PixelForge v", env!("CARGO_PKG_VERSION")))
+        .with_title(profile::window_title())
         .with_icon(icon_data)
         .with_min_inner_size([800.0, 500.0]);
-    if let Some(saved) = WindowPlacement::load() {
-        viewport = viewport
-            .with_position([saved.x, saved.y])
-            .with_inner_size([saved.width, saved.height])
-            .with_maximized(saved.maximized);
-    } else {
-        // A fresh install starts in a movable window so its placement can be saved.
-        viewport = viewport.with_inner_size([1400.0, 900.0]);
-    }
+    viewport=viewport.with_inner_size([1400.0,900.0]);
     let options = eframe::NativeOptions {
         viewport,
+        persist_window: true,
+        persistence_path: profile::settings_root().map(|path|path.join("window-state.ron")),
         ..Default::default()
     };
 
@@ -7050,13 +6894,6 @@ fn main() -> eframe::Result {
 
 impl Drop for PixelForge {
     fn drop(&mut self) {
-        #[cfg(target_os = "windows")]
-        native_window::save();
-        if let Some(placement) = self.window_placement {
-            if let Err(err) = placement.save() {
-                eprintln!("PixelForge window placement save failed: {err}");
-            }
-        }
         self.generation_cancel
             .store(true, std::sync::atomic::Ordering::Relaxed);
         ai_generation::stop_managed_backend();
