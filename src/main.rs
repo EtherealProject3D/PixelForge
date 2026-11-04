@@ -1349,6 +1349,8 @@ impl PixelForge {
             (4,1.0,"FLUX Klein distilled: 4 steps, CFG fixed at 1. Negative prompts are unused.")
         } else if name.contains("cyberrealisticpony") || name.contains("pony") {
             (30, 5.0, "Pony-based checkpoint: start at 30 steps, CFG 5.")
+        } else if name.contains("cyberrealisticxl") {
+            (30, 4.0, "CyberRealistic XL v10: start at 30 steps, CFG 4 (recommended range 3–5).")
         } else if name.contains("realvis") {
             (30, 5.0, "RealVisXL: start at 30 steps, CFG 5; adjust for the checkpoint version.")
         } else if name.contains("juggernaut") {
@@ -1649,7 +1651,9 @@ impl PixelForge {
             self.generation_cfg = recommended_cfg;
         }
         let selected = self.generation_checkpoint.to_ascii_lowercase();
-        let best_for = if selected.contains("realvis") {
+        let best_for = if selected.contains("cyberrealisticxl") {
+            "Best for: Photographic people, natural skin detail, portraits, and cinematic lighting."
+        } else if selected.contains("realvis") {
             "Best for: Natural-looking photography, portraits, landscapes, and everyday scenes."
         } else if selected.contains("juggernaut") {
             "Best for: Highly detailed images, cinematic photography, dramatic lighting, and polished compositions."
@@ -6903,6 +6907,13 @@ impl Drop for PixelForge {
 #[cfg(test)]
 mod conversation_tests {
     use super::*;
+    #[test]
+    fn cyberrealistic_xl_and_pony_use_their_own_generation_defaults() {
+        let (steps,cfg,_) = PixelForge::recommended_generation_settings("CyberRealisticXLPlay_V10.0_FP16.safetensors");
+        assert_eq!((steps,cfg),(30,4.0));
+        let (steps,cfg,_) = PixelForge::recommended_generation_settings("CyberRealisticPony_V18.0_F16.safetensors");
+        assert_eq!((steps,cfg),(30,5.0));
+    }
     #[test]
     fn photo_presets_favor_texture_and_keep_cleanup_strength_separate() {
         assert_eq!(restoration_preset_settings(0), (1, 0.65));

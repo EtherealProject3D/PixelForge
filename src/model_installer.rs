@@ -19,6 +19,8 @@ pub struct Model {
     pub files: &'static [ModelFile],
 }
 pub const MODELS: &[Model] = &[
+    Model {name:"CyberRealistic XL v10 FP16",keyword:"cyberrealisticxl",description:"Photographic people, natural skin detail and cinematic lighting; 30+ steps, CFG 3–5. About 6.9 GB, with built-in VAE.",page:"https://cyberdelia.nl/models/cyberrealistic-xl",editing:false,generation:true,
+        files:&[ModelFile {directory:"checkpoints",file:"CyberRealisticXLPlay_V10.0_FP16.safetensors",url:"https://huggingface.co/cyberdelia/CyberRealisticXL/resolve/c04ae13b465d19763561a834d625a3d504a4f315/CyberRealisticXLPlay_V10.0_FP16.safetensors",size:6_938_041_288,min:6_938_041_288,max:6_938_041_288}]},
     Model {name:"CyberRealistic Pony v18 CoreShift fp16",keyword:"cyberrealisticpony",description:"Pony XL character realism; 30+ steps, CFG 5",page:"https://huggingface.co/cyberdelia/CyberRealisticPony",editing:false,generation:true,
         files:&[ModelFile {directory:"checkpoints",file:"CyberRealisticPony_V18.0_F16.safetensors",url:"https://huggingface.co/cyberdelia/CyberRealisticPony/resolve/main/CyberRealisticPony_V18.0_F16.safetensors",size:6940000000,min:5_000_000_000,max:12_000_000_000}]},
     Model {name:"RealVisXL V5 fp16",keyword:"realvis",description:"Natural photography, portraits and landscapes",page:"https://huggingface.co/SG161222/RealVisXL_V5.0",editing:false,generation:true,
