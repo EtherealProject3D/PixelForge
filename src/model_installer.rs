@@ -18,7 +18,16 @@ pub struct Model {
     pub generation: bool,
     pub files: &'static [ModelFile],
 }
+impl Model {
+    pub fn bundle(&self) -> bool { self.files.iter().any(|file|file.directory!="checkpoints") }
+}
 pub const MODELS: &[Model] = &[
+    Model {name:"CyberRealistic Z-Image Turbo v4",keyword:"cyberrealistic_zit",description:"Download-only bundle for testing in ComfyUI; PixelForge generation support is not connected yet. About 20.7 GB total, or 12.6 GB if the FLUX Qwen encoder is installed. Start at 8–9 steps, CFG 1; negative prompts are unused.",page:"https://huggingface.co/cyberdelia/cyberrealistic_zimage",editing:false,generation:false,
+        files:&[
+            ModelFile {directory:"diffusion_models",file:"CyberRealistic_zit_v4.0.safetensors",url:"https://huggingface.co/cyberdelia/cyberrealistic_zimage/resolve/2b084ad2e15e6406e50b08fc16ca3229ddc8981b/CyberRealistic_zit_v4.0.safetensors",size:12_309_876_512,min:12_309_876_512,max:12_309_876_512},
+            ModelFile {directory:"text_encoders",file:"qwen_3_4b.safetensors",url:"https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",size:8_044_982_048,min:7_500_000_000,max:9_000_000_000},
+            ModelFile {directory:"vae",file:"ae.safetensors",url:"https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors",size:335_304_388,min:335_304_388,max:335_304_388},
+        ]},
     Model {name:"CyberRealistic XL v10 FP16",keyword:"cyberrealisticxl",description:"Photographic people, natural skin detail and cinematic lighting; 30+ steps, CFG 3–5. About 6.9 GB, with built-in VAE.",page:"https://cyberdelia.nl/models/cyberrealistic-xl",editing:false,generation:true,
         files:&[ModelFile {directory:"checkpoints",file:"CyberRealisticXLPlay_V10.0_FP16.safetensors",url:"https://huggingface.co/cyberdelia/CyberRealisticXL/resolve/c04ae13b465d19763561a834d625a3d504a4f315/CyberRealisticXLPlay_V10.0_FP16.safetensors",size:6_938_041_288,min:6_938_041_288,max:6_938_041_288}]},
     Model {name:"CyberRealistic Pony v18 CoreShift fp16",keyword:"cyberrealisticpony",description:"Pony XL character realism; 30+ steps, CFG 5",page:"https://huggingface.co/cyberdelia/CyberRealisticPony",editing:false,generation:true,
@@ -142,9 +151,9 @@ pub struct RemovalFile {pub path:PathBuf,pub bytes:u64}
 pub fn removal_plan(index:usize,root:&Path,backend_name:Option<&str>,include_shared:bool) -> Result<Vec<RemovalFile>,String> {
     let model=MODELS.get(index).ok_or("Unknown model")?;
     let root=root.canonicalize().map_err(|e|e.to_string())?;
-    let mut candidates:Vec<PathBuf>=model.files.iter().filter(|f|!model.editing || include_shared || f.directory=="diffusion_models")
+    let mut candidates:Vec<PathBuf>=model.files.iter().filter(|f|!model.bundle() || include_shared || f.directory=="diffusion_models")
         .map(|f|root.join(f.directory).join(f.file)).collect();
-    if !model.editing {
+    if !model.bundle() {
         if let Some(name)=backend_name {
             let relative=Path::new(name);
             if relative.components().any(|c|!matches!(c,std::path::Component::Normal(_))) || relative.extension().is_none_or(|ext|ext!="safetensors") {
@@ -332,24 +341,30 @@ mod tests {
         assert!(root.join(model.files[1].directory).join(model.files[1].file).is_file());
         assert!(root.join(model.files[2].directory).join(model.files[2].file).is_file());
         assert_eq!(removal_plan(index,&root,None,true).unwrap().len(),2);
-        assert!(removal_plan(0,&root,Some("../../outside.safetensors"),false).is_err());
+        let checkpoint=MODELS.iter().position(|model|!model.bundle()).unwrap();
+        assert!(removal_plan(checkpoint,&root,Some("../../outside.safetensors"),false).is_err());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn removal_uses_exact_detected_checkpoint_and_reports_disk_bytes() {
         let root=fixture();fs::create_dir(root.join("checkpoints")).unwrap();
         fs::write(root.join("checkpoints/alternate.safetensors"),b"abcdef").unwrap();
-        assert_eq!(remove_model_files(0,&root,Some("alternate.safetensors"),false).unwrap(),6);
+        let checkpoint=MODELS.iter().position(|model|!model.bundle()).unwrap();
+        assert_eq!(remove_model_files(checkpoint,&root,Some("alternate.safetensors"),false).unwrap(),6);
         assert!(!root.join("checkpoints/alternate.safetensors").exists());fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn new_models_share_only_the_correct_companion_files() {
+        let zimage=MODELS.iter().find(|m|m.keyword=="cyberrealistic_zit").unwrap();
+        assert!(zimage.bundle() && !zimage.generation && !zimage.editing);
         let qwen=MODELS.iter().find(|m|m.name==crate::ai_generation::QWEN_EDIT).unwrap();
         let newer=MODELS.iter().find(|m|m.name==crate::ai_generation::QWEN_EDIT_2511).unwrap();
         assert_ne!(qwen.files[0].file,newer.files[0].file);
         assert_eq!(qwen.files[1].file,newer.files[1].file);assert_eq!(qwen.files[2].file,newer.files[2].file);
         let flux=MODELS.iter().find(|m|m.name==crate::ai_generation::FLUX_KLEIN).unwrap();
+        assert_eq!(zimage.files[1].file,flux.files[1].file);
+        assert_ne!(zimage.files[2].file,flux.files[2].file);
         assert!(flux.generation&&flux.editing);
         assert_ne!(flux.files[1].file,qwen.files[1].file);assert_ne!(flux.files[2].file,qwen.files[2].file);
     }

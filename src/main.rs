@@ -1545,7 +1545,7 @@ impl PixelForge {
             }
             for (index,model) in model_installer::MODELS.iter().enumerate() {
                 let present=self.install_folder.as_ref().map(|root|model_installer::installed_files(model,root)).unwrap_or(0);
-                let backend_model=(!model.editing).then(||self.generation_checkpoints.iter().find(|name|name.to_lowercase().contains(model.keyword)).cloned()).flatten();
+                let backend_model=(!model.bundle()).then(||self.generation_checkpoints.iter().find(|name|name.to_lowercase().contains(model.keyword)).cloned()).flatten();
                 let installed=present==model.files.len() || backend_model.is_some();
                 ui.group(|ui| {
                     // Use the whole column instead of sizing each card to its text.
@@ -1614,7 +1614,7 @@ impl PixelForge {
         let model=&model_installer::MODELS[index];let mut open=true;let mut confirm=false;let mut cancel=false;
         egui::Window::new("Remove Model").open(&mut open).collapsible(false).show(ctx,|ui| {
             ui.heading(model.name);
-            if model.editing {ui.checkbox(&mut shared,"Also remove the shared text encoder and VAE");ui.label("Shared files may be used by other models. Leave this unchecked to keep them.");}
+            if model.bundle() {ui.checkbox(&mut shared,"Also remove the shared text encoder and VAE");ui.label("Shared files may be used by other models. Leave this unchecked to keep them.");}
             match model_installer::removal_plan(index,&root,backend.as_deref(),shared) {
                 Ok(files)=>{
                     let bytes:u64=files.iter().map(|f|f.bytes).sum();ui.label(format!("Free {:.2} GB by permanently deleting:",bytes as f64/1e9));
