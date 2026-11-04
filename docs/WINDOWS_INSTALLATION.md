@@ -30,3 +30,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\Build-Installer.
 The output is under `target\installer`. GitHub Releases builds and publishes both the setup executable and portable ZIP, with a checksum for each.
 
 For isolated installer testing, compile with `-SmokeTest` into a separate output folder, then pass that **smoke-setup.exe** to `scripts\Test-Installer.ps1`. The fixture uses a separate app registration and shortcuts inside the test folder. It checks installation, optional shortcuts, upgrades/backups, and uninstall preserving a project. Real Program Files installation and Windows elevation prompts should also be checked manually before publication.
+
+## v0.6.3 development integrity and trust
+
+Local installer builds emit SHA256SUMS.txt and RELEASE-INTEGRITY.json alongside
+the setup file. Tag builds prepare a draft release for review instead of publishing
+it. See [release security](RELEASE_SECURITY.md) for the Defender / SmartScreen
+investigation, checksum limitations and the code-signing adoption plan. No security
+exclusions or disabled protections are needed for these checks.

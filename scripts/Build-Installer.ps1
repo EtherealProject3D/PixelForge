@@ -30,4 +30,6 @@ $compileArgs = @('/Qp', "/DAppVersion=$version", "/DSourceDir=$SourceDir", "/DOu
 if ($SmokeTest) { $compileArgs += @('/DSmokeTest', '/DInstallerId=EtherealProject3D.PixelForge.SmokeTest') }
 & $Compiler @compileArgs (Join-Path $repoRoot 'installer\PixelForge.iss')
 if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed ($LASTEXITCODE)" }
+$installerName = if ($SmokeTest) { "PixelForge-v$version-windows-x64-smoke-setup.exe" } else { "PixelForge-v$version-windows-x64-setup.exe" }
+& (Join-Path $PSScriptRoot 'Write-ReleaseIntegrity.ps1') -Files @((Join-Path $OutputDir $installerName), (Join-Path $SourceDir 'PixelForge.exe')) -OutputDir $OutputDir
 Write-Host "Installer output: $OutputDir"

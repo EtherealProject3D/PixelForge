@@ -37,7 +37,20 @@ if ($Installer) {
 }
 # A tiny disposable GUI executable stands in for the restarted app.
 $mockExe = Join-Path $testRoot 'mock.exe'
-Add-Type -TypeDefinition 'public class UpdateSmoke { public static void Main() { System.IO.File.WriteAllText(System.Environment.GetEnvironmentVariable("PF_UPDATE_TEST_MARKER"), "restarted"); } }' -OutputAssembly $mockExe -OutputType WindowsApplication
+$mockSource = 'public class UpdateSmoke { public static void Main() { System.IO.File.WriteAllText(System.Environment.GetEnvironmentVariable("PF_UPDATE_TEST_MARKER"), "restarted"); } }'
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    # PowerShell 7 cannot emit executable assemblies. Use Windows PowerShell's compiler.
+    $env:PF_TEST_MOCK_SOURCE = $mockSource
+    $env:PF_TEST_MOCK_EXE = $mockExe
+    try {
+        & powershell.exe -NoProfile -NonInteractive -Command 'Add-Type -TypeDefinition $env:PF_TEST_MOCK_SOURCE -OutputAssembly $env:PF_TEST_MOCK_EXE -OutputType WindowsApplication'
+        if ($LASTEXITCODE -ne 0) { throw 'Could not compile isolated restart fixture.' }
+    } finally {
+        Remove-Item Env:PF_TEST_MOCK_SOURCE, Env:PF_TEST_MOCK_EXE -ErrorAction SilentlyContinue
+    }
+} else {
+    Add-Type -TypeDefinition $mockSource -OutputAssembly $mockExe -OutputType WindowsApplication
+}
 $env:PF_UPDATE_STAGED = $mockExe
 $env:PF_UPDATE_TARGET = Join-Path $testRoot 'installed.exe'
 $env:PF_UPDATE_PID = '2147480000'

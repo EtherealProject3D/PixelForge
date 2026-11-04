@@ -34,8 +34,6 @@ jobs:
           Copy-Item docs "$folder/docs" -Recurse
           $archive = "dist/PixelForge-$tag-windows-x64.zip"
           Compress-Archive -Path "$folder/*" -DestinationPath $archive
-          $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLowerInvariant()
-          "$hash  PixelForge-$tag-windows-x64.zip" | Set-Content "dist/SHA256SUMS.txt" -Encoding ascii
       - name: Build Windows installer
         shell: pwsh
         run: |
@@ -50,13 +48,17 @@ jobs:
           $tag = '${{ github.ref_name }}'
           & ./scripts/Build-Installer.ps1 -Compiler "$compilerRoot/ISCC.exe" -SourceDir "$PWD/dist/PixelForge-$tag-windows-x64" -OutputDir "$PWD/dist"
           $installer = "PixelForge-$tag-windows-x64-setup.exe"
-          $hash = (Get-FileHash -Algorithm SHA256 "dist/$installer").Hash.ToLowerInvariant()
-          "$hash  $installer" | Add-Content dist/SHA256SUMS.txt -Encoding ascii
-      - name: Publish GitHub release
+      - name: Verify package integrity
+        shell: pwsh
+        run: |
+          ./scripts/Test-ReleaseIntegrity.ps1
+          $tag = '${{ github.ref_name }}'
+          ./scripts/Write-ReleaseIntegrity.ps1 -Files @("dist/PixelForge-$tag-windows-x64.zip", "dist/PixelForge-$tag-windows-x64-setup.exe", "dist/PixelForge-$tag-windows-x64/PixelForge.exe") -OutputDir dist
+      - name: Prepare draft GitHub release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = '${{ github.ref_name }}'
-          gh release create $tag "dist/PixelForge-$tag-windows-x64.zip" "dist/PixelForge-$tag-windows-x64-setup.exe" dist/SHA256SUMS.txt --verify-tag --title "PixelForge $tag" --notes-file "docs/RELEASE_NOTES_$tag.md" --latest
-          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
+          gh release create $tag "dist/PixelForge-$tag-windows-x64.zip" "dist/PixelForge-$tag-windows-x64-setup.exe" dist/SHA256SUMS.txt dist/RELEASE-INTEGRITY.json --verify-tag --title "PixelForge $tag" --notes-file "docs/RELEASE_NOTES_$tag.md" --draft
+          if ($LASTEXITCODE -ne 0) { throw 'Draft release preparation failed' }
