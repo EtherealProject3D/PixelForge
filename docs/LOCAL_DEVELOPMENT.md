@@ -19,3 +19,17 @@ cargo run --locked --release
 ```
 
 The flag is inherited only by that process tree; it is not added to Windows system environment settings. The installed app launched from its normal shortcuts runs normally.
+
+## v0.6.3 display testing
+
+Open PixelForge Dev using the existing shortcut. In Settings > Display choose
+Fullscreen, or press F11. The title bar and taskbar should disappear across the
+entire current monitor. Press Esc to return to the previous window placement.
+Repeat from a maximized window. Close while fullscreen, reopen, and press Esc.
+Check at 150% Windows scaling and on a 32:9 display; change UI scale while
+fullscreen and check that returning to windowed preserves the physical size.
+Native monitor behavior still requires visual hardware verification.
+
+Display mode and the last normal rectangle are stored in display.json in the
+existing profile folder. Existing controls and native window-state files remain.
+The stable installation, models, and ComfyUI environments are not replaced.

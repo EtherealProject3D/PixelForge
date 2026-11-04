@@ -3,6 +3,7 @@
 mod adjustments;
 mod theme;
 mod profile;
+mod display;
 mod updater;
 mod ai_denoise;
 mod ai_generation;
@@ -692,6 +693,7 @@ struct PixelForge {
     fit_pending: bool,
     panning: bool,
     show_settings: bool,
+    display: display::Display,
     ai_tools_tab: bool,
     generation_tools_tab: bool,
     selection_tools_tab: bool,
@@ -883,6 +885,7 @@ impl Default for PixelForge {
             fit_pending: false,
             panning: false,
             show_settings: false,
+            display: display::Display::load(),
             selection_tools_tab: false,
             generation_tools_tab: false,
             ai_tools_tab: profile::settings_root().map(|base|base.join("sidebar_tab.txt"))
@@ -3039,11 +3042,13 @@ impl PixelForge {
         let mut open = self.show_settings;
         let mut changed = false;
 
-        egui::Window::new("Settings - Controls")
+        egui::Window::new("Settings")
             .open(&mut open)
             .default_width(390.0)
             .resizable(false)
             .show(ctx, |ui| {
+                self.display.ui(ui);
+                ui.add_space(12.0);
                 ui.heading("Appearance");
                 ui.separator();
 
@@ -6269,6 +6274,7 @@ impl eframe::App for PixelForge {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.display.update(ctx);
         // Keep native window persistence current even while the canvas is idle.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
         if ctx.input(|i|i.viewport().close_requested()) && self.dependency_manager.busy() {
