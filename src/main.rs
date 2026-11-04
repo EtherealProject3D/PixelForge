@@ -564,6 +564,7 @@ struct PixelForge {
     generation_texture: Option<TextureHandle>,
     generation_status: String,
     install_rx: Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    install_model_index: Option<usize>,
     install_progress: std::sync::Arc<std::sync::atomic::AtomicU64>,
     install_total: std::sync::Arc<std::sync::atomic::AtomicU64>,
     install_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -770,6 +771,7 @@ impl Default for PixelForge {
             generation_texture: None,
             generation_status: "Connect to local ComfyUI to begin".into(),
             install_rx: None,
+            install_model_index: None,
             install_progress: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             install_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             install_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1572,6 +1574,7 @@ impl PixelForge {
                             self.install_total.store(0,std::sync::atomic::Ordering::Relaxed);
                             let progress=self.install_progress.clone();let total=self.install_total.clone();let cancel=self.install_cancel.clone();
                             let (tx,rx)=std::sync::mpsc::channel();self.install_rx=Some(rx);
+                            self.install_model_index=Some(index);
                             self.install_status=format!("Downloading {}…",model.name);
                             let repaint=ui.ctx().clone();
                             std::thread::spawn(move || {
@@ -1583,19 +1586,23 @@ impl PixelForge {
                     if present>0 || backend_model.is_some() {
                         if ui.add_enabled(!self.generation_running&&!self.ai_running&&self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Remove Model…")).clicked() {
                             if let Some(root)=&self.install_folder {self.remove_model=Some((index,root.clone(),backend_model.clone(),false));}
-                            else {self.install_status="Choose the model folder before removing files".into();}
+                            else {self.install_model_index=None;self.install_status="Choose the model folder before removing files".into();}
                         }
+                    }
+                    if self.install_model_index==Some(index) {
+                        if self.install_rx.is_some() {
+                            let bytes=self.install_progress.load(std::sync::atomic::Ordering::Relaxed);
+                            let total=self.install_total.load(std::sync::atomic::Ordering::Relaxed);
+                            ui.add(egui::ProgressBar::new(if total>0 {bytes as f32/total as f32} else {0.0})
+                                .text(if total>0 {format!("{:.2} / {:.2} GB",bytes as f64/1e9,total as f64/1e9)} else {"Preparing download…".into()}));
+                            if ui.button("Cancel Download").clicked() {self.install_cancel.store(true,std::sync::atomic::Ordering::Relaxed);}
+                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                        }
+                        if !self.install_status.is_empty() {ui.label(&self.install_status);}
                     }
                 });
             }
-            if self.install_rx.is_some() {
-                let bytes=self.install_progress.load(std::sync::atomic::Ordering::Relaxed);
-                let total=self.install_total.load(std::sync::atomic::Ordering::Relaxed);
-                ui.add(egui::ProgressBar::new(if total>0 {bytes as f32/total as f32} else {0.0})
-                    .text(format!("{:.2} / {:.2} GB",bytes as f64/1e9,total as f64/1e9)));
-                if ui.button("Cancel Download").clicked() {self.install_cancel.store(true,std::sync::atomic::Ordering::Relaxed);}
-            }
-            if !self.install_status.is_empty() {ui.label(&self.install_status);}
+            if self.install_model_index.is_none() && !self.install_status.is_empty() {ui.label(&self.install_status);}
             ui.label("Existing complete files are kept. Refresh models after installation; Qwen may need a ComfyUI restart.");
             if ui.add_enabled(self.generation_models_rx.is_none(),egui::Button::new("Refresh Installed Models")).clicked() {self.refresh_generation_models(ui.ctx());}
         });
@@ -1620,6 +1627,7 @@ impl PixelForge {
         });
         if confirm {
             ai_generation::stop_managed_backend();
+            self.install_model_index=Some(index);
             self.install_status=match model_installer::remove_model_files(index,&root,backend.as_deref(),shared) {
                 Ok(bytes)=>{
                     if model.editing {
@@ -2377,6 +2385,7 @@ impl PixelForge {
         std::mem::swap(&mut self.generation_texture, &mut other.generation_texture);
         std::mem::swap(&mut self.generation_status, &mut other.generation_status);
         std::mem::swap(&mut self.install_rx, &mut other.install_rx);
+        std::mem::swap(&mut self.install_model_index, &mut other.install_model_index);
         std::mem::swap(&mut self.install_progress, &mut other.install_progress);
         std::mem::swap(&mut self.install_total, &mut other.install_total);
         std::mem::swap(&mut self.install_cancel, &mut other.install_cancel);
