@@ -22,7 +22,7 @@ impl Model {
     pub fn bundle(&self) -> bool { self.files.iter().any(|file|file.directory!="checkpoints") }
 }
 pub const MODELS: &[Model] = &[
-    Model {name:"CyberRealistic Z-Image Turbo v4",keyword:"cyberrealistic_zit",description:"Download-only bundle for testing in ComfyUI; PixelForge generation support is not connected yet. About 20.7 GB total, or 12.6 GB if the FLUX Qwen encoder is installed. Start at 8–9 steps, CFG 1; negative prompts are unused.",page:"https://huggingface.co/cyberdelia/cyberrealistic_zimage",editing:false,generation:false,
+    Model {name:crate::ai_generation::Z_IMAGE,keyword:"cyberrealistic_zit",description:"Fast photographic generation with natural lighting and detail. About 20.7 GB total, or 12.6 GB if the FLUX Qwen encoder is installed. Start at 8–9 steps, CFG 1; negative prompts are unused.",page:"https://huggingface.co/cyberdelia/cyberrealistic_zimage",editing:false,generation:true,
         files:&[
             ModelFile {directory:"diffusion_models",file:"CyberRealistic_zit_v4.0.safetensors",url:"https://huggingface.co/cyberdelia/cyberrealistic_zimage/resolve/2b084ad2e15e6406e50b08fc16ca3229ddc8981b/CyberRealistic_zit_v4.0.safetensors",size:12_309_876_512,min:12_309_876_512,max:12_309_876_512},
             ModelFile {directory:"text_encoders",file:"qwen_3_4b.safetensors",url:"https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/text_encoders/qwen_3_4b.safetensors",size:8_044_982_048,min:7_500_000_000,max:9_000_000_000},
@@ -357,7 +357,7 @@ mod tests {
     #[test]
     fn new_models_share_only_the_correct_companion_files() {
         let zimage=MODELS.iter().find(|m|m.keyword=="cyberrealistic_zit").unwrap();
-        assert!(zimage.bundle() && !zimage.generation && !zimage.editing);
+        assert!(zimage.bundle() && zimage.generation && !zimage.editing);
         let qwen=MODELS.iter().find(|m|m.name==crate::ai_generation::QWEN_EDIT).unwrap();
         let newer=MODELS.iter().find(|m|m.name==crate::ai_generation::QWEN_EDIT_2511).unwrap();
         assert_ne!(qwen.files[0].file,newer.files[0].file);

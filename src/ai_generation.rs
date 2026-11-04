@@ -20,6 +20,8 @@ pub struct Request {
 pub const QWEN_EDIT: &str = "Qwen-Image-Edit 2509 (FP8)";
 pub const QWEN_EDIT_2511: &str = "Qwen-Image-Edit 2511 (FP8)";
 pub const FLUX_KLEIN: &str = "FLUX.2 Klein 4B (FP8)";
+pub const Z_IMAGE: &str = "CyberRealistic Z-Image Turbo v4";
+const Z_IMAGE_UNET: &str = "CyberRealistic_zit_v4.0.safetensors";
 const QWEN_2511_UNET: &str = "qwen_image_edit_2511_fp8mixed.safetensors";
 const FLUX_UNET: &str = "flux-2-klein-4b-fp8.safetensors";
 const FLUX_CLIP: &str = "qwen_3_4b.safetensors";
@@ -30,6 +32,34 @@ const QWEN_VAE: &str = "qwen_image_vae.safetensors";
 
 pub fn is_qwen(model:&str)->bool {model==QWEN_EDIT || model==QWEN_EDIT_2511}
 pub fn is_instruction_model(model:&str)->bool {is_qwen(model)||model==FLUX_KLEIN}
+pub fn ignores_negative(model:&str)->bool {model==FLUX_KLEIN || model==Z_IMAGE}
+
+fn z_image_workflow(prompt:&str,seed:u64,steps:u32,width:u32,height:u32)->Value {
+    json!({
+        "1":{"class_type":"UNETLoader","inputs":{"unet_name":Z_IMAGE_UNET,"weight_dtype":"default"}},
+        "2":{"class_type":"CLIPLoader","inputs":{"clip_name":FLUX_CLIP,"type":"lumina2","device":"default"}},
+        "3":{"class_type":"VAELoader","inputs":{"vae_name":"ae.safetensors"}},
+        "4":{"class_type":"EmptySD3LatentImage","inputs":{"width":width,"height":height,"batch_size":1}},
+        "8":{"class_type":"CLIPTextEncode","inputs":{"clip":["2",0],"text":prompt}},
+        "9":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["8",0]}},
+        "10":{"class_type":"ModelSamplingAuraFlow","inputs":{"model":["1",0],"shift":3.0}},
+        "5":{"class_type":"KSampler","inputs":{"model":["10",0],"positive":["8",0],"negative":["9",0],"latent_image":["4",0],"seed":seed,"steps":steps,"cfg":1.0,"sampler_name":"res_multistep","scheduler":"simple","denoise":1.0}},
+        "6":{"class_type":"VAEDecode","inputs":{"samples":["5",0],"vae":["3",0]}},
+        "7":{"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge_ZImage","images":["6",0]}}
+    })
+}
+
+fn validate_z_image_nodes(info:&Value)->Result<(),String> {
+    for node in ["UNETLoader","CLIPLoader","VAELoader","EmptySD3LatentImage","ModelSamplingAuraFlow","ConditioningZeroOut","CLIPTextEncode","KSampler","VAEDecode","SaveImage"] {
+        if info.get(node).is_none() {return Err(format!("Z-Image Turbo needs ComfyUI node {node}. Update ComfyUI from Dependencies."));}
+    }
+    for (node,input,value) in [("UNETLoader","unet_name",Z_IMAGE_UNET),("CLIPLoader","clip_name",FLUX_CLIP),("VAELoader","vae_name","ae.safetensors"),("CLIPLoader","type","lumina2"),("KSampler","sampler_name","res_multistep"),("KSampler","scheduler","simple")] {
+        if !info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|name.as_str()==Some(value))) {
+            return Err(format!("Z-Image Turbo needs {input}: {value}. Install the complete bundle in Model Library, refresh models, and update/restart ComfyUI if needed."));
+        }
+    }
+    Ok(())
+}
 fn qwen_unet(model:&str)->&'static str {if model==QWEN_EDIT_2511 {QWEN_2511_UNET} else {QWEN_UNET}}
 
 fn qwen_workflow(filename: &str, prompt: &str, negative: &str, seed: u64, steps: u32, model:&str) -> Value {
@@ -287,6 +317,12 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
     if !(1..=100).contains(&request.steps) {return Err("Steps must be between 1 and 100".into());}
     let qwen = is_qwen(&request.checkpoint);
     let flux=request.checkpoint==FLUX_KLEIN;
+    let z_image=request.checkpoint==Z_IMAGE;
+    if z_image {
+        if request.source.is_some() {return Err("Z-Image Turbo currently supports new image generation. Choose FLUX or Qwen for edits.".into());}
+        let info:Value=client()?.get(format!("{BASE}/object_info")).send().map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json().map_err(|e|e.to_string())?;
+        validate_z_image_nodes(&info)?;
+    }
     if qwen {
         if request.source.is_none() { return Err("Qwen Edit requires an existing image. Use a generation checkpoint to create one first.".into()); }
         let info: Value = client()?.get(format!("{BASE}/object_info")).send().map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
@@ -309,6 +345,7 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         "7": {"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge","images":["6",0]}}
     });
     if flux {workflow=flux_workflow(None,&request.prompt,request.seed,request.steps,request.width,request.height);}
+    if z_image {workflow=z_image_workflow(&request.prompt,request.seed,request.steps,request.width,request.height);}
     let http = client()?;
 
     if let Some(source) = request.source.as_ref() {
@@ -490,6 +527,34 @@ mod qwen_tests {
 #[cfg(test)]
 mod local_model_tests {
     use super::*;
+    #[test]
+    fn z_image_graph_uses_its_own_loaders_and_distilled_sampling() {
+        let graph=z_image_workflow("portrait",123,9,1024,768);
+        assert_eq!(graph["1"]["inputs"]["unet_name"],Z_IMAGE_UNET);
+        assert_eq!(graph["2"]["inputs"]["type"],"lumina2");
+        assert_eq!(graph["3"]["inputs"]["vae_name"],"ae.safetensors");
+        assert_eq!(graph["4"]["class_type"],"EmptySD3LatentImage");
+        assert_eq!(graph["4"]["inputs"]["width"],1024);
+        assert_eq!(graph["4"]["inputs"]["height"],768);
+        assert_eq!(graph["5"]["inputs"]["model"],json!(["10",0]));
+        assert_eq!(graph["5"]["inputs"]["negative"],json!(["9",0]));
+        assert_eq!(graph["5"]["inputs"]["cfg"],1.0);
+        assert_eq!(graph["5"]["inputs"]["steps"],9);
+        assert_eq!(graph["5"]["inputs"]["seed"],123);
+        assert_eq!(graph["9"]["class_type"],"ConditioningZeroOut");
+        assert!(!is_instruction_model(Z_IMAGE));
+        assert!(ignores_negative(Z_IMAGE));
+    }
+    #[test]
+    fn z_image_validation_detects_missing_files_and_incompatible_backend() {
+        assert!(validate_z_image_nodes(&json!({})).unwrap_err().contains("Update ComfyUI"));
+        let mut info=json!({});
+        for node in ["UNETLoader","CLIPLoader","VAELoader","EmptySD3LatentImage","ModelSamplingAuraFlow","ConditioningZeroOut","CLIPTextEncode","KSampler","VAEDecode","SaveImage"] {info[node]=json!({"input":{"required":{}}});}
+        for (node,input,value) in [("UNETLoader","unet_name",Z_IMAGE_UNET),("CLIPLoader","clip_name",FLUX_CLIP),("VAELoader","vae_name","ae.safetensors"),("CLIPLoader","type","lumina2"),("KSampler","sampler_name","res_multistep"),("KSampler","scheduler","simple")] {info[node]["input"]["required"][input]=json!([[value]]);}
+        assert!(validate_z_image_nodes(&info).is_ok());
+        info["VAELoader"]["input"]["required"]["vae_name"]=json!([[FLUX_VAE]]);
+        assert!(validate_z_image_nodes(&info).unwrap_err().contains("ae.safetensors"));
+    }
     #[test]
     fn qwen_versions_route_to_their_own_weights_and_sampling_shift() {
         for (model,file,shift) in [(QWEN_EDIT,QWEN_UNET,3.0),(QWEN_EDIT_2511,QWEN_2511_UNET,3.1)] {

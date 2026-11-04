@@ -1119,7 +1119,7 @@ impl PixelForge {
         self.capture_workspace_editor();
         let style = GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len() - 1)].1;
         let steps=if ai_generation::is_qwen(&checkpoint) {self.qwen_steps} else if checkpoint==ai_generation::FLUX_KLEIN && self.refinement_source.is_some() {self.flux_steps} else {self.generation_steps};
-        let cfg=if ai_generation::is_qwen(&checkpoint) {4.0} else if checkpoint==ai_generation::FLUX_KLEIN {1.0} else {self.generation_cfg};
+        let cfg=if ai_generation::is_qwen(&checkpoint) {4.0} else if ai_generation::ignores_negative(&checkpoint) {1.0} else {self.generation_cfg};
         let prompt = if ai_generation::is_instruction_model(&checkpoint) && self.refinement_source.is_some() {
             self.refinement_prompt.clone()
         } else if self.refinement_source.is_some() {
@@ -1135,8 +1135,8 @@ impl PixelForge {
         };
         self.generation_batch_settings = Some(GenerationSettings {
             prompt: self.generation_prompt.clone(),
-            negative: if checkpoint==ai_generation::FLUX_KLEIN {String::new()} else {self.generation_negative.clone()},
-            auto_negative: !ai_generation::is_instruction_model(&checkpoint) && self.generation_auto_negative,
+            negative: if ai_generation::ignores_negative(&checkpoint) {String::new()} else {self.generation_negative.clone()},
+            auto_negative: !ai_generation::is_instruction_model(&checkpoint) && !ai_generation::ignores_negative(&checkpoint) && self.generation_auto_negative,
             checkpoint: checkpoint.clone(),
             style: self.generation_style,
             ratio: self.generation_size,
@@ -1156,7 +1156,7 @@ impl PixelForge {
         let request = ai_generation::Request {
             checkpoint: checkpoint.clone(),
             prompt,
-            negative: if checkpoint==ai_generation::FLUX_KLEIN {String::new()} else if !ai_generation::is_instruction_model(&checkpoint) && self.generation_auto_negative {
+            negative: if ai_generation::ignores_negative(&checkpoint) {String::new()} else if !ai_generation::is_instruction_model(&checkpoint) && self.generation_auto_negative {
                 let base=automatic_negative_prompt(GENERATION_STYLES[self.generation_style.min(GENERATION_STYLES.len()-1)].0);
                 if self.generation_negative.trim().is_empty() {base.to_owned()}
                 else {format!("{base}, {}",self.generation_negative.trim())}
@@ -1242,7 +1242,7 @@ impl PixelForge {
                 self.generation_models_rx = None;
                 match result {
                     Ok(models) => {
-                        if !models.contains(&self.generation_checkpoint) && self.generation_checkpoint!=ai_generation::FLUX_KLEIN {
+                        if !models.contains(&self.generation_checkpoint) && self.generation_checkpoint!=ai_generation::FLUX_KLEIN && self.generation_checkpoint!=ai_generation::Z_IMAGE {
                             self.generation_checkpoint =
                                 models.first().cloned().unwrap_or_default();
                         }
@@ -1349,6 +1349,8 @@ impl PixelForge {
         let name = checkpoint.to_ascii_lowercase();
         if checkpoint==ai_generation::FLUX_KLEIN {
             (4,1.0,"FLUX Klein distilled: 4 steps, CFG fixed at 1. Negative prompts are unused.")
+        } else if checkpoint==ai_generation::Z_IMAGE {
+            (9,1.0,"Z-Image Turbo: start at 9 steps, CFG fixed at 1. Negative prompts are unused.")
         } else if name.contains("cyberrealisticpony") || name.contains("pony") {
             (30, 5.0, "Pony-based checkpoint: start at 30 steps, CFG 5.")
         } else if name.contains("cyberrealisticxl") {
@@ -1556,7 +1558,7 @@ impl PixelForge {
                     ui.hyperlink_to("Model page and license",model.page);
                     if installed {
                         if model.generation && ui.button("Use for Generation").clicked() {
-                            self.generation_checkpoint=if model.editing {model.name.into()} else {backend_model.clone().unwrap_or_else(||model.files[0].file.to_owned())};
+                            self.generation_checkpoint=if model.bundle() {model.name.into()} else {backend_model.clone().unwrap_or_else(||model.files[0].file.to_owned())};
                             let (steps,cfg,_)=Self::recommended_generation_settings(&self.generation_checkpoint);
                             self.generation_steps=steps;self.generation_cfg=cfg;
                         }
@@ -1630,7 +1632,7 @@ impl PixelForge {
             self.install_model_index=Some(index);
             self.install_status=match model_installer::remove_model_files(index,&root,backend.as_deref(),shared) {
                 Ok(bytes)=>{
-                    if model.editing {
+                    if model.bundle() {
                         if self.edit_checkpoint==model.name {self.edit_checkpoint=String::new();}
                         if self.generation_checkpoint==model.name {self.generation_checkpoint=self.generation_checkpoints.first().cloned().unwrap_or_default();}
                     }
@@ -1659,7 +1661,9 @@ impl PixelForge {
             self.generation_cfg = recommended_cfg;
         }
         let selected = self.generation_checkpoint.to_ascii_lowercase();
-        let best_for = if selected.contains("cyberrealisticxl") {
+        let best_for = if self.generation_checkpoint==ai_generation::Z_IMAGE {
+            "Best for: Fast photographic generation, people, natural lighting, and texture."
+        } else if selected.contains("cyberrealisticxl") {
             "Best for: Photographic people, natural skin detail, portraits, and cinematic lighting."
         } else if selected.contains("realvis") {
             "Best for: Natural-looking photography, portraits, landscapes, and everyday scenes."
@@ -1812,7 +1816,7 @@ impl PixelForge {
         ui.label("When disabled, seeds increment from the starting seed.");
         ui.label("Steps");
         ui.add(egui::Slider::new(&mut self.generation_steps, 1..=100));
-        if self.generation_checkpoint==ai_generation::FLUX_KLEIN {ui.label("FLUX CFG is fixed at 1");} else {
+        if ai_generation::ignores_negative(&self.generation_checkpoint) {ui.label("This model uses CFG 1");} else {
             ui.label("CFG");
             ui.add(egui::Slider::new(&mut self.generation_cfg, 1.0..=20.0));
         }
@@ -1928,7 +1932,7 @@ impl PixelForge {
         theme::section(ui, "Initial prompt");
         let checkpoint_before_selection = self.generation_checkpoint.clone();
         let model_row_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button)) + ui.spacing().item_spacing.y;
-        let generation_menu_height = model_row_height * (self.generation_checkpoints.len() + 1) as f32 + 16.0;
+        let generation_menu_height = model_row_height * (self.generation_checkpoints.len() + 2) as f32 + 16.0;
         egui::ComboBox::from_id_salt("initial_generation_model").width(ui.available_width()).height(generation_menu_height).truncate()
             .selected_text(if self.generation_checkpoint.is_empty() {
                 "Select a checkpoint"
@@ -1937,6 +1941,7 @@ impl PixelForge {
             })
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut self.generation_checkpoint,ai_generation::FLUX_KLEIN.into(),format!("{} — Fast generation, prompt-driven images, instruction-based editing",ai_generation::FLUX_KLEIN));
+                ui.selectable_value(&mut self.generation_checkpoint,ai_generation::Z_IMAGE.into(),format!("{} — Fast photographic generation, natural lighting",ai_generation::Z_IMAGE));
                 for checkpoint in &self.generation_checkpoints {
                     let lower = checkpoint.to_ascii_lowercase();
                     let best_for = if lower.contains("cyberrealistic") || lower.contains("pony") {
@@ -1969,6 +1974,9 @@ impl PixelForge {
         }
         ui.separator();
         theme::section(ui, "Negative prompt");
+        if self.generation_checkpoint==ai_generation::Z_IMAGE {
+            ui.label("Z-Image Turbo uses CFG 1: negative prompts do not affect its output.");
+        }
         if self.generation_checkpoint==ai_generation::FLUX_KLEIN || editing_checkpoint(&self.generation_checkpoint,&self.edit_checkpoint,true)==ai_generation::FLUX_KLEIN {
             ui.label("FLUX Klein uses CFG 1: negative prompts do not affect its output.");
         }
@@ -1991,6 +1999,9 @@ impl PixelForge {
         });
         ui.label(format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
         let edit_model=editing_checkpoint(&self.generation_checkpoint,&self.edit_checkpoint,true).to_owned();
+        if edit_model==ai_generation::Z_IMAGE {
+            ui.label("Z-Image Turbo creates new images. Choose FLUX, Qwen, or an SDXL model above to apply edits.");
+        }
         if ai_generation::is_qwen(&edit_model) {
             ui.small("Instruction-based editing · CFG 4");
             ui.label("Qwen steps");
@@ -2014,7 +2025,7 @@ impl PixelForge {
             ui.spacing_mut().slider_width=(ui.available_width()-80.0).max(60.0);
             ui.add(egui::Slider::new(&mut self.refinement_strength, 0.01..=1.0));
         }
-        let ready = has_image && !self.generation_running && !self.ai_running && !self.conversation_draft.trim().is_empty() && !editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true).is_empty();
+        let ready = has_image && edit_model!=ai_generation::Z_IMAGE && !self.generation_running && !self.ai_running && !self.conversation_draft.trim().is_empty() && !editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true).is_empty();
         let has_selection = self.has_edit_selection();
         ui.horizontal_wrapped(|ui| {
             if ui.add_enabled(ready, theme::primary("Apply Edit")).on_hover_text("Edit the whole image").clicked() {
