@@ -212,55 +212,42 @@ pub fn ensure_server() -> Result<(), String> {
         if child.try_wait().map_err(|e| e.to_string())?.is_some() { *owned = None; }
     }
     if owned.is_none() {
-        let managed=crate::dependencies::active_path(crate::dependencies::Component::Comfy);
-        let mut command=if let Some(folder)=managed {
-            let mut command=Command::new(folder.join("python_embeded/python.exe"));
-            command.current_dir(&folder).arg("-s").arg("ComfyUI/main.py").arg("--windows-standalone-build");
-            let models=crate::dependencies::root().join("models");
-            std::fs::create_dir_all(&models).map_err(|e|e.to_string())?;
-            let config=crate::dependencies::root().join("extra-model-paths.yaml");
+        let config = crate::backend::Config::load();
+        let folder = config.resolve()?;
+        let runtime = crate::compatibility::probe(&folder)?;
+        // Non-NVIDIA installations keep their existing launcher behavior.
+        if runtime["cuda"].is_string() {
+            crate::compatibility::preflight(&runtime, &config.mode)?;
+        } else if config.mode == "legacy" || config.mode == "modern" {
+            return Err("Selected NVIDIA backend has no CUDA runtime. Open Dependencies and choose a matching package.".into());
+        }
+        let mut command = Command::new(crate::compatibility::python(&folder).ok_or("Backend Python missing")?);
+        command.current_dir(&folder).arg("-s").arg("ComfyUI/main.py");
+        if folder.join("python_embeded/python.exe").is_file() {command.arg("--windows-standalone-build");}
+        if config.mode == "legacy" || crate::compatibility::selected_device(&runtime)
+            .and_then(|d|d["capability"][0].as_u64()).is_some_and(|major|major<=6) {
+            command.args(["--force-fp32", "--use-pytorch-cross-attention"]);
+        }
+        let settings = crate::profile::settings_root().ok_or("APPDATA unavailable")?;
+        std::fs::create_dir_all(&settings).map_err(|e|e.to_string())?;
+        let mut model_configs = Vec::new();
+        let models = crate::dependencies::root().join("models");
+        if models.is_dir() {
+            let config = settings.join("extra-model-paths.yaml");
             let yaml=serde_yaml::to_string(&serde_json::json!({"pixelforge":{"base_path":models,"checkpoints":"checkpoints","diffusion_models":"diffusion_models","text_encoders":"text_encoders","vae":"vae"}})).map_err(|e|e.to_string())?;
             std::fs::write(&config,yaml).map_err(|e|e.to_string())?;
-            command.arg("--extra-model-paths-config").arg(config);
-            // Reuse the Desktop model paths as well when present.
-            if let Some(roaming)=std::env::var_os("APPDATA") {
-                if let Ok(entries)=std::fs::read_dir(PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths")) {
-                    let mut files:Vec<_>=entries.flatten().map(|e|e.path()).filter(|p|p.extension().is_some_and(|e|e=="yaml")).collect();files.sort();
-                    if let Some(config)=files.first() {command.arg(config);}
-                }
-            }
-            command
-        } else {
-        let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable")?;
-        let root = PathBuf::from(local).join("Comfy-Desktop/ComfyUI-Installs");
-        let roaming = std::env::var_os("APPDATA").ok_or("APPDATA is unavailable")?;
-        let configs = PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths");
-        let mut installs: Vec<_> = std::fs::read_dir(&root)
-            .map_err(|e| format!("ComfyUI installation not found: {e}. Open Dependencies to install ComfyUI"))?
-            .filter_map(Result::ok).map(|e| e.path())
-            .filter(|p| p.join("ComfyUI/main.py").is_file()
-                && p.join("ComfyUI/.venv/Scripts/python.exe").is_file()).collect();
-        installs.sort();
-        let install = installs.into_iter().next().ok_or(
-            "No ComfyUI Python backend found. Open Dependencies to install ComfyUI, or install ComfyUI Desktop."
-        )?;
-        let mut command = Command::new(install.join("ComfyUI/.venv/Scripts/python.exe"));
-        command.current_dir(&install)
-            .arg("-s").arg("ComfyUI/main.py")
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .stdin(Stdio::null());
-        if let Ok(entries) = std::fs::read_dir(&configs) {
-            let mut files: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect();
-            files.sort();
-            if let Some(config) = files.first() {
-                command.arg("--extra-model-paths-config").arg(config);
+            model_configs.push(config);
+        }
+        if let Some(roaming)=std::env::var_os("APPDATA") {
+            if let Ok(entries)=std::fs::read_dir(PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths")) {
+                let mut files:Vec<_>=entries.flatten().map(|e|e.path()).filter(|p|p.extension().is_some_and(|e|e=="yaml")).collect();files.sort();
+                if let Some(config)=files.first() {command.arg("--extra-model-paths-config").arg(config);}
             }
         }
-            command
-        };
+        if !model_configs.is_empty() {command.arg("--extra-model-paths-config").args(model_configs);}
+        let log = std::fs::File::create(settings.join("backend.log")).map_err(|e|e.to_string())?;
         command.arg("--disable-auto-launch").arg("--listen").arg("127.0.0.1").arg("--port").arg("8188")
-            .stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
+            .stdout(log.try_clone().map_err(|e|e.to_string())?).stderr(log).stdin(Stdio::null());
         #[cfg(windows)] {use std::os::windows::process::CommandExt;command.creation_flags(0x08000000);}
         *owned = Some(command.spawn().map_err(|e| format!("Cannot start ComfyUI backend: {e}"))?);
     }
@@ -272,11 +259,13 @@ pub fn ensure_server() -> Result<(), String> {
         if let Some(child) = owned.as_mut() {
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 *owned = None;
-                return Err(format!("ComfyUI backend exited during startup ({status}). Start it in ComfyUI Desktop to inspect the error."));
+                let path=crate::profile::settings_root().ok_or("APPDATA unavailable")?.join("backend.log");
+                let raw=std::fs::read_to_string(&path).unwrap_or_default();
+                return Err(format!("Backend exited ({status}). Log: {}\n{}",path.display(),crate::compatibility::actionable(&raw)));
             }
         }
     }
-    Err("ComfyUI did not become ready within 90 seconds. Check ComfyUI Desktop.".into())
+    Err("ComfyUI did not become ready within 90 seconds. Inspect backend.log in the PixelForge profile and run GPU diagnostics in Dependencies.".into())
 }
 
 pub fn stop_managed_backend() {
@@ -462,7 +451,7 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
             .json().map_err(|e| e.to_string())?;
         if let Some(job) = history.get(&id) {
             if job.pointer("/status/status_str").and_then(Value::as_str) == Some("error") {
-                return Err(format!("ComfyUI generation failed: {}", job["status"]));
+                return Err(crate::compatibility::actionable(&format!("ComfyUI generation failed: {}", job["status"])));
             }
             if let Some(images) = job.pointer("/outputs/7/images").and_then(Value::as_array) {
                 if let Some(first) = images.first() {

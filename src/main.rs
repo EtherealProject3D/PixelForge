@@ -4,6 +4,8 @@ mod adjustments;
 mod theme;
 mod profile;
 mod display;
+mod compatibility;
+mod backend;
 mod updater;
 mod ai_denoise;
 mod ai_generation;
