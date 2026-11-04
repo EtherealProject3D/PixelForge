@@ -28,6 +28,9 @@ try {
     if (-not(Test-Path $desktop)) {throw 'Opted-in desktop shortcut missing.'}
     if ((Get-FileHash ($app+'.previous')).Hash -ne $beforeHash) {throw 'Previous executable backup missing or incorrect.'}
     [IO.File]::WriteAllText((Join-Path $fixture 'photo-project.pxf'),'user project fixture')
+    $downloadsFixture = Join-Path $fixture 'test-managed-downloads'
+    New-Item -ItemType Directory -Path $downloadsFixture -Force | Out-Null
+    [IO.File]::WriteAllText((Join-Path $downloadsFixture 'model.bin'),'download fixture')
 } finally {
     if (Test-Path $uninstaller) {
         $uninstall = Start-Process $uninstaller -ArgumentList '/VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru -WindowStyle Hidden
@@ -37,5 +40,6 @@ try {
 if (Test-Path (Join-Path $fixture 'PixelForge.exe')) {throw 'Uninstall left the executable behind.'}
 if (Test-Path (Join-Path $fixture 'Test Shortcuts\Start Menu\PixelForge.lnk')) {throw 'Uninstall left a shortcut behind.'}
 if ([IO.File]::ReadAllText((Join-Path $fixture 'photo-project.pxf')) -ne 'user project fixture') {throw 'Uninstall changed the user project.'}
+if ([IO.File]::ReadAllText((Join-Path $fixture 'test-managed-downloads\model.bin')) -ne 'download fixture') {throw 'Silent uninstall removed managed downloads.'}
 Write-Host 'PASS: installation, Start menu target, optional desktop shortcut, upgrade backup, and uninstall preserving a project.'
 Write-Host "Fixture: $fixture"

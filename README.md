@@ -97,7 +97,7 @@ The **Dependencies** window reports status and offers supported install, update,
 
 Open **Updates → Check for Updates** to see newer published stable versions and their release notes. Download the verified package, save all open projects, finish running operations, then choose **Install & Restart**. Installed copies open the setup wizard and request Windows administrator permission; portable copies update in place in a writable folder. Both retain a previous executable backup. Users on v0.6.0 need to download v0.6.1 manually first. Source checkouts should continue using Git pull and rebuild; the development launcher rebuilds the checked-out code.
 
-Installed copies can be removed using Windows **Installed apps**. Uninstall removes the application and its shortcuts; projects and separately downloaded model/dependency data are retained.
+Installed copies can be removed using Windows **Installed apps**. Uninstall removes the application and its shortcuts and offers to remove PixelForge-managed downloaded models and dependencies to free disk space. Keeping downloads is the default. Projects and settings are retained.
 
 See [Windows installation options](docs/WINDOWS_INSTALLATION.md) for installer, portable, update, and installer-build details.
 

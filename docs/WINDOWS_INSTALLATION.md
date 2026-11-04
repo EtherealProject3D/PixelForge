@@ -6,7 +6,7 @@ Run **PixelForge-v0.6.1-windows-x64-setup.exe**. Windows requests administrator 
 
 Setup adds a **PixelForge** entry to the Start menu and offers a **Create a desktop shortcut** checkbox, initially unchecked. Updating an existing installation keeps its destination and shortcut choices. The finish page can open PixelForge using the original user's permissions.
 
-Use Windows **Installed apps** to uninstall. The uninstaller removes application files and shortcuts, while leaving projects and separately downloaded model/dependency data alone. Settings and managed downloads continue to use the user's AppData folders.
+Use Windows **Installed apps** to uninstall. The uninstaller removes application files and shortcuts and asks whether to remove downloaded AI models and dependencies. Choose No (the default) to keep downloads for reinstalling, or Yes to remove the current user's `%LOCALAPPDATA%\PixelForge\deps` folder, including managed ComfyUI, models, engines, caches, and rollback versions. These downloads are shared with PixelForge Dev and other copies; close them first. Projects, settings, and separately installed ComfyUI are retained. Silent uninstall always keeps downloads. Downloads belonging to other Windows users are not removed.
 
 ## Portable ZIP
 

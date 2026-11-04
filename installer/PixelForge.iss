@@ -70,6 +70,45 @@ Filename: "{app}\PixelForge.exe"; Description: "Open PixelForge"; Flags: nowait 
 Type: files; Name: "{app}\PixelForge.exe.previous"
 
 [Code]
+var
+  RemoveManagedDownloads: Boolean;
+
+function ManagedDownloadsPath(): String;
+begin
+#ifdef SmokeTest
+  Result := ExpandConstant('{app}\test-managed-downloads');
+#else
+  Result := ExpandConstant('{localappdata}\PixelForge\deps');
+#endif
+end;
+
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  Downloads: String;
+begin
+  Downloads := ManagedDownloadsPath();
+  if CurUninstallStep = usUninstall then begin
+    RemoveManagedDownloads := False;
+    { Silent uninstall always keeps downloads. No command-line deletion override. }
+    if (not UninstallSilent) and DirExists(Downloads) then
+      RemoveManagedDownloads := MsgBox(
+        'Also remove downloaded AI models and dependencies?' + #13#10#13#10 +
+        'This frees disk space by deleting PixelForge-managed models, ComfyUI, ' +
+        'restoration engines, download caches, and retained rollback versions.' + #13#10#13#10 +
+        'These downloads are shared with PixelForge Dev and other PixelForge copies. ' +
+        'They will need to be downloaded again. Close those copies before continuing.' + #13#10#13#10 +
+        'Saved projects, settings, and separately installed ComfyUI are kept.' + #13#10#13#10 +
+        'Folder: ' + Downloads + #13#10#13#10 +
+        'Yes = remove downloads. No = keep them for a future reinstall.',
+        mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES;
+  end;
+  if (CurUninstallStep = usPostUninstall) and RemoveManagedDownloads then begin
+    if not DelTree(Downloads, True, True, True) then
+      MsgBox('Some downloads could not be removed. Close any running AI tools, then remove the remaining files from:' + #13#10 +
+        Downloads, mbError, MB_OK);
+  end;
+end;
+
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
