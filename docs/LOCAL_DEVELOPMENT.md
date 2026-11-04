@@ -5,6 +5,8 @@
 
 Development windows are titled **PixelForge Dev v…**. Window placement, mouse/UI controls, and sidebar preferences are stored separately under `%APPDATA%\PixelForgeDev`; the installed release keeps `%APPDATA%\PixelForge`.
 
+Window size and screen position use the framework's native persistence in `window-state.ron`, saved while idle and on exit. Old `window.cfg` and `window_native.cfg` files are no longer applied. After upgrading to this mechanism, position the window once to establish its new saved placement.
+
 The dev copy does not install published app updates. Pull or edit source, close the dev copy, then reopen its shortcut to build it. Changes stay on a development branch until intentionally merged and released.
 
 Model files, AI engines, and the local ComfyUI endpoint remain shared to avoid duplicating large installations. Dependency/model installation, updates, or removal can therefore affect both copies. Use separate `.pxf` files for test projects when preserving a production project.
