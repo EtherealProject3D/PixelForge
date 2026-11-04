@@ -123,32 +123,49 @@ mod native_window {
 
     #[link(name = "user32")]
     unsafe extern "system" {
-        fn FindWindowW(class: *const u16, name: *const u16) -> *mut c_void;
+        fn EnumWindows(callback: unsafe extern "system" fn(*mut c_void,isize)->i32, data:isize)->i32;
+        fn GetWindowThreadProcessId(hwnd:*mut c_void,pid:*mut u32)->u32;
+        fn GetWindowTextW(hwnd:*mut c_void,text:*mut u16,count:i32)->i32;
         fn GetWindowPlacement(hwnd: *mut c_void, placement: *mut Placement) -> i32;
-        fn SetWindowPos(hwnd: *mut c_void, after: *mut c_void,
-            x: i32, y: i32, width: i32, height: i32, flags: u32) -> i32;
+        fn SetWindowPlacement(hwnd: *mut c_void, placement: *const Placement) -> i32;
     }
 
     fn handle() -> *mut c_void {
-        let title: Vec<u16> = crate::profile::window_title().encode_utf16().chain(Some(0)).collect();
-        unsafe { FindWindowW(std::ptr::null(), title.as_ptr()) }
+        struct Search {pid:u32,title:Vec<u16>,handle:*mut c_void}
+        unsafe extern "system" fn visit(hwnd:*mut c_void,data:isize)->i32 {
+            let search=unsafe {&mut *(data as *mut Search)};
+            let mut pid=0;
+            unsafe {GetWindowThreadProcessId(hwnd,&mut pid);}
+            if pid==search.pid {
+                let mut text=[0u16;512];
+                let length=unsafe {GetWindowTextW(hwnd,text.as_mut_ptr(),text.len() as i32)}.max(0) as usize;
+                if text[..length]==search.title {search.handle=hwnd;return 0;}
+            }
+            1
+        }
+        let mut search=Search {pid:std::process::id(),title:crate::profile::window_title().encode_utf16().collect(),handle:std::ptr::null_mut()};
+        unsafe {EnumWindows(visit,&mut search as *mut Search as isize);}
+        search.handle
     }
 
     fn path() -> Option<PathBuf> {
         Some(crate::profile::settings_root()?.join("window_native.cfg"))
     }
 
-    pub fn restore() {
-        let Some(path) = path() else { return; };
-        let Ok(contents) = std::fs::read_to_string(path) else { return; };
-        let values: Vec<i32> = contents.split_whitespace()
-            .filter_map(|v| v.parse().ok()).collect();
-        if values.len() != 4 || values[2] < 800 || values[3] < 500 { return; }
+    pub fn restore() -> bool {
+        let Some(path) = path() else { return true; };
+        let Ok(contents) = std::fs::read_to_string(path) else { return true; };
+        let Some((x,y,width,height,maximized))=super::parse_native_placement(&contents) else {return true;};
         let hwnd = handle();
-        if hwnd.is_null() { return; }
-        // SWP_NOZORDER | SWP_NOACTIVATE. SetWindowPos expects physical pixels.
-        unsafe { SetWindowPos(hwnd, std::ptr::null_mut(),
-            values[0], values[1], values[2], values[3], 0x0004 | 0x0010); }
+        if hwnd.is_null() { return false; }
+        // Get/SetWindowPlacement both use workspace coordinates, including taskbar offsets.
+        let placement=Placement {
+            length:std::mem::size_of::<Placement>() as u32,
+            show_cmd:if maximized {3} else {1},
+            normal:Rect {left:x,top:y,right:x+width,bottom:y+height},
+            ..Placement::default()
+        };
+        unsafe { SetWindowPlacement(hwnd,&placement)!=0 }
     }
 
     pub fn save() {
@@ -170,9 +187,29 @@ mod native_window {
                 return;
             }
         }
-        if let Err(err) = std::fs::write(path, format!("{} {} {} {}", r.left, r.top, w, h)) {
+        let maximized=placement.show_cmd==3 || placement.flags&2!=0;
+        if let Err(err) = std::fs::write(path, format!("{} {} {} {} {}", r.left, r.top, w, h, i32::from(maximized))) {
             eprintln!("Native window placement save failed: {err}");
         }
+    }
+}
+
+fn parse_native_placement(contents:&str)->Option<(i32,i32,i32,i32,bool)> {
+    let values=contents.split_whitespace().map(str::parse::<i32>).collect::<Result<Vec<_>,_>>().ok()?;
+    if !(4..=5).contains(&values.len()) || values[2]<800 || values[3]<500
+        || values[0].checked_add(values[2]).is_none() || values[1].checked_add(values[3]).is_none() {return None;}
+    Some((values[0],values[1],values[2],values[3],values.get(4)==Some(&1)))
+}
+
+#[cfg(test)]
+mod placement_tests {
+    #[test]
+    fn native_placement_retains_physical_coordinates_and_maximized_state() {
+        assert_eq!(super::parse_native_placement("-1900 40 1800 1000 1"),Some((-1900,40,1800,1000,true)));
+        assert_eq!(super::parse_native_placement("3653 0 2122 1406"),Some((3653,0,2122,1406,false)));
+        assert!(super::parse_native_placement("100 200 invalid 900 0").is_none());
+        assert!(super::parse_native_placement("100 200 400 300 0").is_none());
+        assert!(super::parse_native_placement("2147483647 0 1200 900 0").is_none());
     }
 }
 
@@ -6372,8 +6409,8 @@ impl eframe::App for PixelForge {
 
         #[cfg(target_os = "windows")]
         if !self.native_window_restored {
-            native_window::restore();
-            self.native_window_restored = true;
+            self.native_window_restored = native_window::restore();
+            if !self.native_window_restored {ctx.request_repaint();}
         }
 
         // Always keep a fallback placement so saving never depends on the
@@ -7003,6 +7040,7 @@ fn main() -> eframe::Result {
         .with_title(profile::window_title())
         .with_icon(icon_data)
         .with_min_inner_size([800.0, 500.0]);
+    #[cfg(not(target_os = "windows"))]
     if let Some(saved) = WindowPlacement::load() {
         viewport = viewport
             .with_position([saved.x, saved.y])
@@ -7012,6 +7050,8 @@ fn main() -> eframe::Result {
         // A fresh install starts in a movable window so its placement can be saved.
         viewport = viewport.with_inner_size([1400.0, 900.0]);
     }
+    #[cfg(target_os = "windows")]
+    { viewport=viewport.with_inner_size([1400.0,900.0]); }
     let options = eframe::NativeOptions {
         viewport,
         ..Default::default()
