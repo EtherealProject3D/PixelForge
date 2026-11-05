@@ -1516,7 +1516,7 @@ impl PixelForge {
         egui::ComboBox::from_id_salt("crop_ratio").width(ui.available_width()).truncate()
             .selected_text(if !crop.locked {"Free aspect ratio"} else {
                 let (_,w,h)=GENERATION_SIZES[crop.preset];
-                if (crop.rect.aspect_ratio()-w as f32/h as f32).abs()<0.001 {GENERATION_SIZES[crop.preset].0}else{"Custom locked ratio"}
+                if (crop.locked_ratio()-w as f32/h as f32).abs()<0.001 {GENERATION_SIZES[crop.preset].0}else{"Custom locked ratio"}
             }).show_ui(ui,|ui| {
                 for (index,&(label,_,_)) in GENERATION_SIZES.iter().enumerate() {
                     if ui.selectable_label(crop.preset==index,label).clicked() {selected=Some(index);}
@@ -1527,9 +1527,31 @@ impl PixelForge {
             let (_,w,h)=GENERATION_SIZES[index];
             crop.set_aspect(w as f32/h as f32,size);
         }
-        let [_,_,width,height]=crop.pixels(size);
-        ui.label(format!("Crop: {width} × {height} pixels"));
-        ui.small("Drag corners or edges to resize; drag inside to move the crop. Middle-drag moves the image beneath it; scroll to zoom.");
+        let [_,_,mut width,mut height]=crop.pixels(size);
+        let mut width_changed=false;
+        let mut height_changed=false;
+        ui.horizontal(|ui| {
+            ui.label("Crop Width");
+            width_changed=ui.add(egui::DragValue::new(&mut width).range(1..=size[0]).speed(1).suffix(" px").update_while_editing(false)).changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label("Crop Height");
+            height_changed=ui.add(egui::DragValue::new(&mut height).range(1..=size[1]).speed(1).suffix(" px").update_while_editing(false)).changed();
+        });
+        if width_changed || height_changed {crop.set_pixel_size(width,height,width_changed,size);}
+        ui.small("Click a size to type an exact pixel value, or drag the number to adjust.");
+        ui.label("Zoom mode");
+        egui::ComboBox::from_id_salt("crop_zoom_mode").width(ui.available_width()).truncate()
+            .selected_text(match crop.zoom_mode {crop::ZoomMode::Workspace=>"Zoom image and crop together",crop::ZoomMode::ImageOnly=>"Zoom image inside crop"})
+            .show_ui(ui,|ui| {
+                ui.selectable_value(&mut crop.zoom_mode,crop::ZoomMode::Workspace,"Zoom image and crop together");
+                ui.selectable_value(&mut crop.zoom_mode,crop::ZoomMode::ImageOnly,"Zoom image inside crop");
+            });
+        ui.small("Scroll over the image or use + / − to zoom. Drag the crop's corners or edges to resize; drag inside to move it.");
+        ui.small(match crop.zoom_mode {
+            crop::ZoomMode::Workspace=>"Image and crop zoom together without changing crop pixels. Middle-drag pans the whole view.",
+            crop::ZoomMode::ImageOnly=>"The frame stays in place while the image zooms inside it. Middle-drag repositions the image within the frame.",
+        });
         let mut apply=false;let mut cancel=false;
         ui.horizontal(|ui| {
             apply=ui.add_enabled(available,theme::primary("Apply Crop")).clicked();
@@ -7188,6 +7210,7 @@ mod workspace_tests {
         app.generation_workspace=true;app.bind_workspace_editor(&ctx);
         let mut crop=crop::Crop::new(0,[8,6]);
         crop.rect=Rect::from_min_max(egui::pos2(1.0,1.0),egui::pos2(6.0,5.0));
+        crop.set_pixel_size(5,4,true,[8,6]);
         app.crop=Some(crop);app.apply_workspace_crop(&ctx);
         assert_eq!(app.generation_gallery.len(),2);
         assert_eq!(app.generation_gallery[0].pixels,pixels);

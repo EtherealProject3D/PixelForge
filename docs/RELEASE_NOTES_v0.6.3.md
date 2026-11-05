@@ -121,3 +121,33 @@ Try: open an image, select Edit > Crop Image, drag a corner with lock off, choos
 16:9 with lock on, then pan and zoom beneath the frame. Apply and compare with the
 original version. Save and reopen a test .pxf. Under Generate > Generation settings,
 choose Medium and verify output dimensions while changing ratio and rounding.
+
+## Crop zoom modes and numeric sizes
+
+The crop sidebar now has editable Crop Width and Crop Height pixel fields. Click a
+number to type or drag it to adjust; typed values commit on Enter or focus change.
+With aspect lock off they are independent. With lock on, the edited dimension drives
+the other, rounded to one pixel. Sizes stay inside the source image and preserve the
+crop center where possible; these fields do not upscale or resample the original.
+
+Zoom mode offers:
+
+- Zoom image and crop together (default): scrolling over the image and the + / minus
+  buttons enlarge or shrink both together, without changing the selected source pixels
+  or output dimensions. Middle-drag pans the whole preview.
+- Zoom image inside crop: the frame stays fixed on screen while the image scales
+  beneath it, changing the selected source pixels and output dimensions. Middle-drag
+  repositions the image inside the frame; blank edges remain prevented.
+
+Changing the zoom option alone does not move the frame or alter the crop. Handles
+and numeric sizing remain available in both modes. Fit restores the preview camera.
+Apply Crop still creates a new version and retains the original.
+
+Validation: 130 Rust tests passed, zero failures, one optional dependency test ignored.
+Includes exact numeric size application through the save/reopen path, source-edge
+limits, locked ratios from either axis, both zoom modes and mode switching.
+
+Try: in Edit > Crop Image, enter a width and height with lock off; enable lock and
+change just one dimension. Zoom with each mode and watch the fields: together mode
+keeps the numbers unchanged; image-inside mode changes them as you zoom. Apply and
+verify the new version's dimensions while the original remains available.

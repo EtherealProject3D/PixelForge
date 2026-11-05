@@ -1,11 +1,18 @@
 //! Transient, pixel-accurate crop selection and an independent preview camera.
 use egui::{Color32, Pos2, Rect, Sense, Stroke, StrokeKind, TextureId, Ui, Vec2};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ZoomMode {
+    Workspace,
+    ImageOnly,
+}
+
 pub struct Crop {
     pub source: usize,
     pub rect: Rect,
     pub locked: bool,
     pub preset: usize,
+    pub zoom_mode: ZoomMode,
     aspect: f32,
     zoom: f32,
     zoom_request: f32,
@@ -24,6 +31,7 @@ impl Crop {
             },
             locked: false,
             preset: 0,
+            zoom_mode: ZoomMode::Workspace,
             aspect: bounds.aspect_ratio(),
             zoom: 1.0,
             zoom_request: 1.0,
@@ -53,6 +61,42 @@ impl Crop {
     }
     pub fn lock_current(&mut self) {
         self.aspect = self.rect.aspect_ratio();
+    }
+    pub fn locked_ratio(&self) -> f32 {
+        self.aspect
+    }
+
+    /// Set actual source-pixel dimensions, retaining the center wherever the image allows.
+    /// Only the edited axis drives a locked ratio; the second axis rounds to one pixel.
+    pub fn set_pixel_size(&mut self, width: u32, height: u32, width_changed: bool, size: [u32; 2]) {
+        let mut w = width.clamp(1, size[0]);
+        let mut h = height.clamp(1, size[1]);
+        if self.locked {
+            if width_changed {
+                h = (w as f32 / self.aspect).round().max(1.0) as u32;
+                if h > size[1] {
+                    h = size[1];
+                    w = (h as f32 * self.aspect).round().max(1.0) as u32;
+                }
+            } else {
+                w = (h as f32 * self.aspect).round().max(1.0) as u32;
+                if w > size[0] {
+                    w = size[0];
+                    h = (w as f32 / self.aspect).round().max(1.0) as u32;
+                }
+            }
+        }
+        w = w.clamp(1, size[0]);
+        h = h.clamp(1, size[1]);
+        let center = self.rect.center();
+        let x = (center.x - w as f32 / 2.0)
+            .round()
+            .clamp(0.0, (size[0] - w) as f32);
+        let y = (center.y - h as f32 / 2.0)
+            .round()
+            .clamp(0.0, (size[1] - h) as f32);
+        self.rect = Rect::from_min_size(egui::pos2(x, y), egui::vec2(w as f32, h as f32));
+        self.drag = None;
     }
     pub fn pixels(&self, size: [u32; 2]) -> [u32; 4] {
         let x = (self.rect.min.x.round() as u32).min(size[0].saturating_sub(1));
@@ -86,9 +130,13 @@ impl Crop {
             if middle || scroll != 0.0 || self.zoom_request != 1.0 {
                 if scroll != 0.0 || self.zoom_request != 1.0 {
                     let old_scale = scale;
-                    let minimum = (screen_crop.width() / bounds.width())
-                        .max(screen_crop.height() / bounds.height())
-                        / fit;
+                    let minimum = if self.zoom_mode == ZoomMode::ImageOnly {
+                        (screen_crop.width() / bounds.width())
+                            .max(screen_crop.height() / bounds.height())
+                            / fit
+                    } else {
+                        0.05
+                    };
                     self.zoom = (self.zoom * (scroll * 0.002).exp() * self.zoom_request)
                         .clamp(minimum.max(0.05), 32.0_f32.max(minimum));
                     scale = fit * self.zoom;
@@ -104,14 +152,17 @@ impl Crop {
                 if middle {
                     image = image.translate(ui.input(|i| i.pointer.delta()));
                 }
-                // Keep the frame still while panning/zooming the image beneath it.
-                image = image.translate(cover_translation(image, screen_crop));
+                if self.zoom_mode == ZoomMode::ImageOnly {
+                    // Image-only mode changes the selected pixels inside a fixed screen frame.
+                    image = image.translate(cover_translation(image, screen_crop));
+                    self.rect = Rect::from_min_max(
+                        ((screen_crop.min - image.min) / scale).to_pos2(),
+                        ((screen_crop.max - image.min) / scale).to_pos2(),
+                    );
+                    self.rect = bounded(self.rect, bounds);
+                }
+                // Workspace mode leaves the source-pixel rectangle untouched.
                 self.pan = image.center() - canvas.center();
-                self.rect = Rect::from_min_max(
-                    ((screen_crop.min - image.min) / scale).to_pos2(),
-                    ((screen_crop.max - image.min) / scale).to_pos2(),
-                );
-                self.rect = bounded(self.rect, bounds);
                 ui.ctx().set_cursor_icon(if middle {
                     egui::CursorIcon::Grabbing
                 } else {
@@ -370,6 +421,65 @@ pub(crate) fn resize(
 mod tests {
     use super::*;
     #[test]
+    fn numeric_dimensions_are_exact_and_stay_within_source_edges() {
+        let mut crop = Crop::new(0, [1001, 777]);
+        crop.rect = Rect::from_min_max(egui::pos2(800.5, 600.25), egui::pos2(1000.5, 776.25));
+        crop.set_pixel_size(101, 203, true, [1001, 777]);
+        let [x, y, w, h] = crop.pixels([1001, 777]);
+        assert_eq!((w, h), (101, 203));
+        assert!(x + w <= 1001 && y + h <= 777);
+        crop.set_pixel_size(0, u32::MAX, false, [1001, 777]);
+        assert_eq!(&crop.pixels([1001, 777])[2..], &[1, 777]);
+    }
+    #[test]
+    fn numeric_locked_sizes_follow_either_axis_and_keep_preset_ratio() {
+        let mut crop = Crop::new(0, [1000, 600]);
+        crop.set_aspect(16.0 / 9.0, [1000, 600]);
+        crop.set_pixel_size(640, 10, true, [1000, 600]);
+        assert_eq!(&crop.pixels([1000, 600])[2..], &[640, 360]);
+        crop.set_pixel_size(10, 270, false, [1000, 600]);
+        assert_eq!(&crop.pixels([1000, 600])[2..], &[480, 270]);
+        crop.set_pixel_size(10, 600, false, [1000, 600]);
+        assert_eq!(&crop.pixels([1000, 600])[2..], &[1000, 563]);
+        assert_eq!(crop.locked_ratio(), 16.0 / 9.0);
+    }
+    #[test]
+    fn zoom_modes_change_the_view_or_the_selected_pixels_without_jumping_on_switch() {
+        let ctx = egui::Context::default();
+        let mut crop = Crop::new(0, [1000, 600]);
+        crop.set_pixel_size(600, 300, true, [1000, 600]);
+        let frame = |crop: &mut Crop| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1200.0, 800.0))),
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default()
+                    .show(ctx, |ui| crop.show(ui, TextureId::Managed(0), [1000, 600]));
+            });
+        };
+        frame(&mut crop);
+        let original = crop.rect;
+        crop.zoom_by(2.0);
+        frame(&mut crop);
+        assert_eq!(crop.zoom, 2.0);
+        assert_eq!(crop.rect, original);
+        assert_eq!(&crop.pixels([1000, 600])[2..], &[600, 300]);
+        crop.zoom_mode = ZoomMode::ImageOnly;
+        frame(&mut crop);
+        assert_eq!(crop.rect, original); // Changing the option alone doesn't change the crop.
+        crop.zoom_by(2.0);
+        frame(&mut crop);
+        assert_eq!(crop.zoom, 4.0);
+        assert_eq!(&crop.pixels([1000, 600])[2..], &[300, 150]);
+        let selected = crop.rect;
+        crop.zoom_mode = ZoomMode::Workspace;
+        crop.zoom_by(0.5);
+        frame(&mut crop);
+        assert_eq!(crop.rect, selected);
+        assert_eq!(&crop.pixels([1000, 600])[2..], &[300, 150]);
+    }
+    #[test]
     fn free_resize_and_move_stay_inside_image() {
         let bounds = Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 600.0));
         let start = Rect::from_min_max(egui::pos2(100.0, 100.0), egui::pos2(500.0, 400.0));
@@ -401,6 +511,7 @@ mod tests {
     fn mouse_handles_pan_and_zoom_adjust_the_preview_without_losing_the_frame() {
         let ctx = egui::Context::default();
         let mut crop = Crop::new(0, [1000, 600]);
+        crop.zoom_mode = ZoomMode::ImageOnly;
         let mut canvas = Rect::NOTHING;
         let frame = |crop: &mut Crop, canvas: &mut Rect, events| {
             let input = egui::RawInput {
