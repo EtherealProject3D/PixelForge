@@ -64,9 +64,26 @@ impl Display {
         );
         crate::interaction::label(ui,"The fullscreen shortcut can be changed under Hotkeys.");
         crate::interaction::label(ui,"Uses the entire current monitor, including ultrawide displays.");
+        if ui.button("Reset Window Size and Position").on_hover_text("Return to a movable 1200 × 800 window on the current display.").clicked() {
+            self.reset_window(ui.ctx());
+        }
         if !self.error.is_empty() {
             ui.colored_label(egui::Color32::YELLOW, &self.error);
         }
+    }
+    fn reset_window(&mut self, ctx: &Context) {
+        let scale = ctx.pixels_per_point();
+        let origin = if self.fullscreen {
+            ctx.input(|i| i.viewport().outer_rect.map(|r| r.min * scale)).unwrap_or(egui::Pos2::ZERO)
+        } else { egui::Pos2::ZERO };
+        self.placement = Some([origin.x + 80.0, origin.y + 80.0, 1200.0, 800.0]);
+        self.last_position = Some([origin.x + 80.0, origin.y + 80.0]);
+        self.fullscreen = false;
+        self.maximized = false;
+        self.restore_frames = 4;
+        ctx.send_viewport_cmd(Cmd::Fullscreen(false));
+        ctx.request_repaint();
+        self.save();
     }
     /// Fullscreen has no OS title bar, so keep its window actions in the app menu bar.
     pub fn window_controls(&mut self, ui: &mut egui::Ui) {
@@ -91,13 +108,16 @@ impl Display {
         let response = ui.interact(rect, ui.id().with("window_title_drag"), egui::Sense::click_and_drag());
         if !self.fullscreen {
             if response.double_clicked() { self.maximize_or_restore(ui.ctx()); }
-            else if response.drag_started() { ui.ctx().send_viewport_cmd(Cmd::StartDrag); }
+            else if response.drag_started_by(egui::PointerButton::Primary) { ui.ctx().send_viewport_cmd(Cmd::StartDrag); }
         }
     }
     pub fn resize_edges(&self, ctx: &Context) {
         if self.fullscreen || ctx.input(|i| i.viewport().maximized.unwrap_or(false)) { return; }
         let r = ctx.screen_rect();
         if let Some(p) = ctx.input(|i| i.pointer.hover_pos()) {
+            // Native moves can deliver positions outside the client area, especially
+            // across different monitor scales. They are never resize hit targets.
+            if !r.contains(p) || ctx.input(|i| i.viewport().focused == Some(false)) { return; }
             let left=p.x < r.left()+5.0; let right=p.x > r.right()-5.0;
             let top=p.y < r.top()+5.0; let bottom=p.y > r.bottom()-5.0;
             use egui::ResizeDirection::*;
@@ -109,7 +129,11 @@ impl Display {
             };
             if let Some(direction)=direction {
                 ctx.set_cursor_icon(match direction { North|South=>egui::CursorIcon::ResizeVertical, East|West=>egui::CursorIcon::ResizeHorizontal, NorthWest|SouthEast=>egui::CursorIcon::ResizeNwSe, _=>egui::CursorIcon::ResizeNeSw });
-                if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {ctx.send_viewport_cmd(Cmd::BeginResize(direction));}
+                let pressed_on_edge = ctx.input(|i| i.events.iter().any(|event| matches!(event,
+                    egui::Event::PointerButton {pos, button: egui::PointerButton::Primary, pressed: true, ..}
+                    if r.contains(*pos) && (pos.x < r.left()+5.0 || pos.x > r.right()-5.0 || pos.y < r.top()+5.0 || pos.y > r.bottom()-5.0)
+                )));
+                if pressed_on_edge {ctx.send_viewport_cmd(Cmd::BeginResize(direction));}
             }
         }
     }
@@ -275,6 +299,28 @@ fn valid_placement(v: [f32; 4]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pointer_outside_window_cannot_start_native_resize() {
+        let ctx = Context::default();
+        let display = Display::default();
+        let pos = egui::pos2(1500.0, 900.0);
+        let output = ctx.run(egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0,800.0))),
+            events: vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default(),
+            }], ..Default::default()
+        }, |ctx| display.resize_edges(ctx));
+        assert!(!output.viewport_output[&egui::ViewportId::ROOT].commands.iter().any(|c| matches!(c, Cmd::BeginResize(_))));
+    }
+    #[test]
+    fn recovery_replaces_stuck_geometry_with_normal_window() {
+        let ctx = Context::default();
+        let mut display = Display {fullscreen:true, placement:Some([370.0,771.0,4502.0,1539.0]), applied:Some(true), ..Default::default()};
+        let _ = ctx.run(Default::default(), |ctx| display.reset_window(ctx));
+        for _ in 0..4 {let _ = ctx.run(Default::default(), |ctx| display.update(ctx));}
+        assert!(!display.fullscreen);
+        assert_eq!(display.placement,Some([80.0,80.0,1200.0,800.0]));
+    }
     #[test]
     fn startup_positions_on_saved_display_before_fullscreen() {
         let ctx = Context::default();

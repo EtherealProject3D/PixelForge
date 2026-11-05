@@ -242,3 +242,9 @@ build since Dev intentionally does not use the release updater.
 - Slider tracks require Alt+wheel for single-unit changes, Ctrl+Alt for decimal precision, and Shift+Alt for five-unit changes. Without Alt, the panel scrolls normally. Direct numeric fields retain their existing wheel controls. Active numeric editing consumes smoothed follow-up scroll frames.
 - Validation: 142 tests passed, one ignored; release dev build completed. Actual multi-monitor restart checks remain for the user: move to another monitor, resize and restart; repeat fullscreen and maximized, then use F11 to verify the normal-window rectangle is retained.
 - Themes remain deferred to v0.6.4.
+
+### Stuck-window recovery
+
+- Ignore resize hit tests outside the client window and require a fresh primary press inside its resize edge. Limit title dragging to the primary button.
+- Settings > Visuals includes Reset Window Size and Position, usable from fullscreen to recover a stuck normal-window rectangle.
+- Validation: 144 tests passed, one ignored, including outside-window resize rejection and recovery from a 4502-pixel-wide saved rectangle. Cross-monitor dragging still requires hardware verification.
