@@ -712,6 +712,7 @@ struct PixelForge {
     version_texture_a: Option<TextureHandle>,
     version_texture_b: Option<TextureHandle>,
     pending_open: Option<PendingOpen>,
+    file_drops: std::collections::VecDeque<PathBuf>,
     exit_confirmation: bool,
     exit_allowed: bool,
 }
@@ -907,6 +908,7 @@ impl Default for PixelForge {
             version_texture_a: None,
             version_texture_b: None,
             pending_open: None,
+            file_drops: Default::default(),
             exit_confirmation: false,
             exit_allowed: false,
         }
@@ -1014,6 +1016,69 @@ impl PixelForge {
         self.gamma = a.gamma;
     }
 
+    fn handle_file_drops(&mut self, ctx: &egui::Context) {
+        // Keep the queue outside document swaps so multi-file drops retain their order.
+        let mut queue = std::mem::take(&mut self.file_drops);
+        let dropped = ctx.input_mut(|i| std::mem::take(&mut i.raw.dropped_files));
+        if !dropped.is_empty() {ctx.request_repaint();}
+        for file in dropped {
+            if let Some(path) = file.path { queue.push_back(path); }
+            else { self.status = "Drop a local image or .pxf project file".into(); }
+        }
+        while let Some(path) = queue.front().cloned() {
+            if self.generation_running || self.ai_running || self.exporting || self.ai_saving
+                || self.install_rx.is_some() || self.dependency_manager.busy()
+                || self.inactive_tabs.iter().any(|(_,tab)|tab.ai_running || tab.exporting || tab.ai_saving)
+                || self.pending_open.is_some() || self.closing_tab.is_some() || self.exit_confirmation {
+                self.status = "Dropped files queued until the current operation finishes".into();
+                break;
+            }
+            let extension = path.extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase();
+            if !path.is_file() || !["pxf","png","jpg","jpeg","webp","bmp","tif","tiff"].contains(&extension.as_str()) {
+                self.status = format!("Cannot open {}: drop an image or .pxf project file",path.display());
+                self.generation_status = self.status.clone();
+                queue.pop_front();
+                continue;
+            }
+            // Studio projects replace the shared workspace, so protect every dirty tab.
+            let replaces_workspace = extension == "pxf" && generation_project::is_generation(&path).unwrap_or(false);
+            if replaces_workspace && (self.project_dirty || self.inactive_tabs.iter().any(|(_,tab)|tab.project_dirty)) {
+                let mut open = false;
+                let mut cancel = false;
+                egui::Window::new("Open dropped project?").collapsible(false).resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER,[0.0,0.0]).show(ctx,|ui| {
+                        ui.label(format!("Open {}?",path.file_name().unwrap_or_default().to_string_lossy()));
+                        ui.label("This project replaces the current workspace. Save your work first, or discard it to continue.");
+                        ui.horizontal(|ui| {
+                            if ui.button("Save Workspace & Open").clicked() {
+                                self.generation_status.clear();
+                                self.capture_workspace_editor();
+                                self.save_generation_project(false);
+                                open = self.generation_status.starts_with("Saved ");
+                            }
+                            open |= ui.button("Discard & Open").clicked();
+                            cancel = ui.button("Cancel").clicked();
+                        });
+                    });
+                if cancel {queue.pop_front();continue;}
+                if !open {break;}
+            }
+            queue.pop_front();
+            if extension == "pxf" {
+                if replaces_workspace {self.generation_status.clear();}
+                self.open_project_path(ctx,path);
+                if replaces_workspace && self.generation_status.starts_with("Opened ") {
+                    self.inactive_tabs.clear();
+                    self.project_path=None;
+                    self.image_path=None;
+                    self.project_dirty=false;
+                }
+            } else {self.load_image_path(ctx,path);}
+            self.ensure_workspace(ctx);
+        }
+        self.file_drops = queue;
+    }
+
     fn open_image(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "webp", "bmp", "tiff"])
@@ -1022,16 +1087,16 @@ impl PixelForge {
             return;
         };
 
-        self.create_project_tab();
         self.load_image_path(ctx, path);
     }
 
     fn load_image_path(&mut self, ctx: &egui::Context, path: PathBuf) {
-        self.capture_workspace_editor();
-        self.workspace_editor=None;
-        self.generation_workspace=false;
         match image::open(&path) {
             Ok(img) => {
+                self.create_project_tab();
+                self.capture_workspace_editor();
+                self.workspace_editor=None;
+                self.generation_workspace=false;
                 let rgba = img.to_rgba8();
                 let size = [rgba.width() as usize, rgba.height() as usize];
 
@@ -2869,6 +2934,10 @@ impl PixelForge {
 
     fn open_project(&mut self, ctx: &egui::Context) {
         let Some(path) = rfd::FileDialog::new().add_filter("PixelForge Project", &["pxf"]).pick_file() else {return};
+        self.open_project_path(ctx, path);
+    }
+
+    fn open_project_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         match generation_project::is_generation(&path) {
             Ok(true) => {self.open_generation_project(&path,ctx);return;}
             Ok(false) => {},
@@ -6875,6 +6944,7 @@ impl eframe::App for PixelForge {
             self.generation_tools_tab=true;self.ai_tools_tab=false;self.selection_tools_tab=false;
             self.generation_workspace=true;self.model_library_reveal=true;
         }
+        self.handle_file_drops(ctx);
         self.show_model_removal(ctx);
         self.show_controls_settings(ctx);
         self.show_unsaved_prompt(ctx);
@@ -6902,6 +6972,7 @@ fn main() -> eframe::Result {
     };
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(profile::window_title())
+        .with_drag_and_drop(true)
         .with_icon(icon_data)
         .with_min_inner_size([800.0, 500.0]);
     viewport=viewport.with_inner_size([1400.0,900.0]);
@@ -6991,6 +7062,59 @@ mod conversation_tests {
 #[cfg(test)]
 mod workspace_tests {
     use super::*;
+    fn drop_test_files(app:&mut PixelForge,ctx:&egui::Context,paths:&[PathBuf]) {
+        let mut input=egui::RawInput::default();
+        input.dropped_files=paths.iter().map(|path|egui::DroppedFile {path:Some(path.clone()),..Default::default()}).collect();
+        let _=ctx.run(input,|ctx|app.handle_file_drops(ctx));
+    }
+    #[test]
+    fn dropped_images_and_editor_projects_open_without_losing_existing_work() {
+        let root=std::env::temp_dir().join(format!("pixelforge-drops-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        let first=root.join("first.PNG");let second=root.join("second.png");let bad=root.join("bad.png");
+        image::RgbaImage::from_pixel(2,1,image::Rgba([40,40,40,255])).save(&first).unwrap();
+        image::RgbaImage::from_pixel(2,1,image::Rgba([80,80,80,255])).save(&second).unwrap();
+        std::fs::write(&bad,b"not an image").unwrap();
+        let ctx=egui::Context::default();let mut app=PixelForge::default();
+        drop_test_files(&mut app,&ctx,&[first,second]);
+        assert_eq!(app.generation_gallery.len(),2);
+        assert_eq!(app.inactive_tabs.len(),1);
+        assert!(app.inactive_tabs[0].1.project_dirty);
+        let active=app.active_tab;
+        drop_test_files(&mut app,&ctx,&[bad]);
+        assert_eq!(app.active_tab,active);
+        assert_eq!(app.generation_gallery.len(),2);
+        assert!(app.status.starts_with("Open failed:"));
+        let project=root.join("editor.PXF");
+        app.generation_workspace=false;app.project_path=Some(project.clone());app.save_project(false);
+        assert!(project.is_file());
+        drop_test_files(&mut app,&ctx,&[project]);
+        assert_eq!(app.inactive_tabs.len(),2);
+        assert_eq!(app.original_pixels.as_ref().unwrap().get_pixel(0,0)[0],80);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn dropped_studio_project_waits_for_unsaved_workspace_and_opens_cleanly() {
+        let path=std::env::temp_dir().join(format!("pixelforge-studio-drop-{}.pxf",std::process::id()));
+        let pixels=image::RgbaImage::from_pixel(2,1,image::Rgba([100,100,100,255]));
+        generation_project::save(&path,&generation_project::GalleryProject {
+            items:vec![generation_project::GalleryImage {settings:serde_json::json!({"prompt":"Dropped project"}),pixels,seed:42}],
+            selected:0,compare_index:0,compare:false,current:serde_json::json!({})
+        }).unwrap();
+        let ctx=egui::Context::default();let mut app=PixelForge::default();
+        app.project_dirty=true;
+        drop_test_files(&mut app,&ctx,&[path.clone()]);
+        assert_eq!(app.file_drops.front(),Some(&path));
+        assert!(app.generation_gallery.is_empty());
+        app.project_dirty=false;
+        drop_test_files(&mut app,&ctx,&[]);
+        assert!(app.file_drops.is_empty());
+        assert_eq!(app.generation_project_path,Some(path.clone()));
+        assert_eq!(app.generation_gallery[0].seed,42);
+        assert_eq!(app.generation_gallery[0].settings.prompt,"Dropped project");
+        assert_eq!(app.original_pixels.as_ref().unwrap().get_pixel(0,0)[0],100);
+        std::fs::remove_file(path).unwrap();
+    }
     #[test]
     fn restoration_panel_renders_with_independent_prompt_and_model() {
         let ctx = egui::Context::default();

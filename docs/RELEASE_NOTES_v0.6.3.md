@@ -68,3 +68,18 @@ trust prompts remain manual acceptance checks. No final v0.6.3 publication is ap
   D5DD2CD448D842EF3667DB0438D2CA33506F672FA0BE06081F8ECB2A58DA8FF2.
 
 Native display / monitor acceptance and model generation are still manual checks.
+
+## Drag-and-drop opening
+
+Drop local PNG, JPEG, WebP, BMP, TIFF or .pxf project files anywhere in the app.
+Multiple images / editor projects open in order through the existing loaders.
+Generation Studio projects use their stored gallery, prompts and settings; replacing
+an unsaved workspace offers Save Workspace & Open, Discard & Open, or Cancel.
+Drops wait while generation, processing, exporting or setup is active. Unsupported
+or unreadable files report an error; an unreadable image does not replace the active
+document. Windows Explorer drag-and-drop still follows normal Windows permissions.
+
+Validation: 117 Rust tests passed, one optional dependency test ignored. Simulated
+native drop events cover multiple images, corrupt images, editor projects and
+Generation Studio project opening with an unsaved-work guard. Manually test by
+dragging an image and .pxf from Explorer onto the dev window, including fullscreen.
