@@ -152,7 +152,7 @@ fn caption_button(ui: &mut egui::Ui, caption: Caption) -> egui::Response {
         Caption::Close => "Close PixelForge",
     };
     let response = ui
-        .add(egui::Button::new("").min_size(egui::vec2(40.0, 28.0)))
+        .add_sized(egui::vec2(28.0, 22.0), egui::Button::new(""))
         .on_hover_text(label);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let painter = ui.painter();

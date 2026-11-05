@@ -2725,9 +2725,24 @@ impl PixelForge {
                         }
                         ui.separator();
                     }
-                    if ui.button("+").on_hover_text("Open another image").clicked() {
-                        self.open_image(ctx);
-                    }
+                    ui.scope(|ui| {
+                        ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
+                        ui.spacing_mut().interact_size.y = 20.0;
+                        ui.menu_button("+", |ui| {
+                            if ui.button("New Blank Project").clicked() {
+                                self.create_project_tab();
+                                ui.close();
+                            }
+                            if ui.button("Open Image…").clicked() {
+                                ui.close();
+                                self.open_image(ctx);
+                            }
+                            if ui.button("Open Project…").clicked() {
+                                ui.close();
+                                self.open_project(ctx);
+                            }
+                        }).response.on_hover_text("New or open project");
+                    });
                 });
             });
         });
@@ -3291,6 +3306,7 @@ impl PixelForge {
 
         egui::Window::new("Settings")
             .open(&mut open)
+            .collapsible(false)
             .default_width(450.0)
             .resizable(true)
             .vscroll(true)

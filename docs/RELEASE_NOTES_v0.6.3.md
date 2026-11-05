@@ -214,3 +214,9 @@ a prompt field has selected text; right-click selected read-only text; wheel ove
 strength with no modifier / Ctrl / Shift; Ctrl-drag an editable number; check the
 centered top-bar title and unsaved indicator. Release startup checks need a release
 build since Dev intentionally does not use the release updater.
+# Dev follow-up: compact controls and numeric scrolling
+
+- Numeric wheel adjustment also consumes egui's smoothed follow-up scroll frames, keeping the surrounding panel still.
+- Settings cannot collapse; its close button remains available.
+- Fullscreen caption buttons are smaller, and the compact + tab menu offers New Blank Project, Open Image, and Open Project.
+- Validation: 139 automated tests passed, one ignored; release dev build completed.

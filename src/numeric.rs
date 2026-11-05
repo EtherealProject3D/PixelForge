@@ -108,20 +108,19 @@ fn wheel(
             .sum::<f64>();
         (delta, i.modifiers)
     });
-    if delta == 0.0 {
-        return None;
-    }
+    // egui smooths wheel input across later frames without new MouseWheel events.
+    // Consume those frames too while over a numeric control, before the parent scroll area.
+    ui.ctx().input_mut(|i| {
+        i.raw_scroll_delta = egui::Vec2::ZERO;
+        i.smooth_scroll_delta = egui::Vec2::ZERO;
+        i.events.retain(|e| !matches!(e, egui::Event::MouseWheel { .. }));
+    });
+    if delta == 0.0 { return None; }
     let id = response.id.with("wheel_remainder");
     let accumulated = ui.data(|d| d.get_temp::<f64>(id)).unwrap_or(0.0) + delta;
     let notches = accumulated.trunc();
     ui.ctx()
         .data_mut(|d| d.insert_temp(id, accumulated - notches));
-    ui.ctx().input_mut(|i| {
-        i.raw_scroll_delta = egui::Vec2::ZERO;
-        i.smooth_scroll_delta = egui::Vec2::ZERO;
-        i.events
-            .retain(|e| !matches!(e, egui::Event::MouseWheel { .. }));
-    });
     if notches == 0.0 {
         return None;
     }
@@ -325,6 +324,38 @@ impl Widget for DragValue<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn numeric_wheel_does_not_scroll_parent_on_smoothed_followup_frames() {
+        let ctx = egui::Context::default();
+        let mut value = 50_u32;
+        let mut rect = egui::Rect::NOTHING;
+        for frame in 0..20 {
+            let mut events = vec![egui::Event::PointerMoved(rect.center())];
+            if frame == 1 {
+                events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Line,
+                    delta: egui::vec2(0.0, -3.0),
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            if frame == 0 { events.clear(); }
+            let _ = ctx.run(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
+                time: Some(frame as f64 / 60.0),
+                events,
+                ..Default::default()
+            }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let area = egui::ScrollArea::vertical().show(ui, |ui| {
+                        rect = ui.add(Slider::new(&mut value, 0..=100)).rect;
+                        ui.add_space(1000.0);
+                    });
+                    assert_eq!(area.state.offset.y, 0.0, "parent scrolled on frame {frame}");
+                });
+            });
+        }
+        assert_eq!(value, 47);
+    }
     #[test]
     fn wheel_uses_displayed_units_modifiers_and_stops_parent_scrolling() {
         let ctx = egui::Context::default();
