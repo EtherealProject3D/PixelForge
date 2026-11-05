@@ -101,6 +101,24 @@ impl Binding {
             )
     }
 }
+fn reference_group(ui: &mut Ui, title: &str, rows: &[(&str, &str)]) {
+    ui.add_space(12.0);
+    ui.strong(title);
+    ui.separator();
+    egui::Grid::new(("hotkey_reference", title))
+        .num_columns(2)
+        .striped(true)
+        .max_col_width((ui.available_width() - 16.0).max(120.0) / 2.0)
+        .spacing(egui::vec2(16.0, 6.0))
+        .show(ui, |ui| {
+            for &(action, control) in rows {
+                ui.add(egui::Label::new(action).wrap());
+                ui.add(egui::Label::new(egui::RichText::new(control).code()).wrap());
+                ui.end_row();
+            }
+        });
+}
+
 pub struct Settings {
     pub automatic_updates: bool,
     pub bindings: [Binding; 7],
@@ -261,14 +279,54 @@ impl Settings {
             self.save();
         }
         ui.small(&self.message);
-        ui.collapsing("Text and mouse reference",|ui| {
-            ui.label("Ctrl+A selects all. Select other text with the mouse. Shift+arrow/Home/End selection and Ctrl+H/W/U/K text deletion are disabled.");
-            ui.label("Default text aliases: Ctrl+Shift+Z redo; Ctrl+Insert copy; Shift+Insert paste; Shift+Delete cut. These follow the standard defaults and are retired when their corresponding binding is reassigned.");
-            ui.label("Backspace / Delete remove characters or selected text; Ctrl+Backspace / Ctrl+Delete remove words. Shift+Tab still moves focus backward. Alt+F4 is the Windows close shortcut.");
-            ui.label("Arrow keys move the text cursor; Ctrl+Left/Right move by word. Home/End move within a line, Ctrl+Home/End to the text boundaries. Tab / Shift+Tab move focus. Enter confirms entries; Esc cancels applicable dialogs or numeric entry.");
-            ui.label("Mouse wheel over sliders requires Alt: Alt ±1; Ctrl+Alt ±0.1 where decimals apply; Shift+Alt ±5. Over numeric fields Alt is optional. Values use displayed units and respect bounds and dimension rounding. Ctrl+drag gives fine numeric adjustment.");
-            ui.label("Image wheel: zoom. Pan and fit gestures are listed in the Mouse Controls tab. Crop zoom follows its selected mode; middle-double-click resets its view. Double-click a saved selection to activate it. Drag a comparison divider while Compare is checked.");
-        });
+        reference_group(ui, "Text editing", &[
+            ("Select text", "Mouse drag"),
+            ("Text context menu", "Right-click"),
+            ("Move cursor", "Arrow keys"),
+            ("Move by word", "Ctrl+Left / Right"),
+            ("Start / end of line", "Home / End"),
+            ("Start / end of text", "Ctrl+Home / End"),
+            ("Delete character or selection", "Backspace / Delete"),
+            ("Delete word", "Ctrl+Backspace / Delete"),
+            ("Next / previous field", "Tab / Shift+Tab"),
+            ("Confirm entry", "Enter"),
+            ("Cancel entry or applicable dialog", "Esc"),
+        ]);
+        ui.small("Select All uses the customizable shortcut above. Other text selection uses the mouse. Shift+navigation selection and Ctrl+H/W/U/K deletion are disabled.");
+        reference_group(ui, "Default text aliases", &[
+            ("Redo", "Ctrl+Shift+Z"),
+            ("Copy", "Ctrl+Insert"),
+            ("Cut", "Shift+Delete"),
+            ("Paste", "Shift+Insert"),
+        ]);
+        ui.small("These aliases apply while the corresponding customizable shortcut uses its default binding.");
+        reference_group(ui, "Slider controls", &[
+            ("Adjust by 1", "Alt+wheel"),
+            ("Adjust by 0.1", "Ctrl+Alt+wheel"),
+            ("Adjust by 5", "Shift+Alt+wheel"),
+            ("Adjust value", "Click and drag"),
+            ("Fine adjustment", "Ctrl+drag"),
+            ("Scroll panel", "Wheel without Alt"),
+        ]);
+        reference_group(ui, "Numeric fields", &[
+            ("Type a value", "Click the value"),
+            ("Adjust by 1", "Wheel"),
+            ("Adjust by 0.1", "Ctrl+wheel"),
+            ("Adjust by 5", "Shift+wheel"),
+            ("Adjust / fine adjustment", "Drag / Ctrl+drag"),
+        ]);
+        ui.small("Decimal steps apply to decimal-capable fields. Steps use displayed units and respect limits and dimension rounding.");
+        reference_group(ui, "Workspace and windows", &[
+            ("Zoom image", "Wheel over image"),
+            ("Pan / fit image", "See Mouse Controls tab"),
+            ("Reset crop view", "Middle-button double-click"),
+            ("Activate saved selection", "Double-click selection"),
+            ("Move comparison divider", "Drag with Compare enabled"),
+            ("Move window", "Drag unused title-bar space"),
+            ("Maximize / restore window", "Double-click title bar"),
+            ("Close window", "Alt+F4"),
+        ]);
+        ui.small("Crop zoom follows the selected crop zoom mode. Fullscreen uses the customizable shortcut above.");
         ui.add_space(12.0);
     }
     /// Translate custom commands to the editor's native events before widgets consume input.

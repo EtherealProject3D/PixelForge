@@ -261,3 +261,8 @@ build since Dev intentionally does not use the release updater.
 - Windows title dragging now follows physical desktop cursor coordinates and a fixed starting-size snapshot instead of the native move/DPI loop. Apply a final movement on mouse release and suspend geometry persistence while movement settles.
 - Remove the earlier competing size correction on native DPI changes.
 - Validation: 145 tests passed, one ignored; dev rebuild completed. User verification of cross-monitor dragging is still required.
+
+### Readable Hotkeys reference
+
+- Replace the collapsed paragraph reference with visible, grouped action/control rows for text editing, default aliases, sliders, numeric fields, and workspace/window controls. Reference controls remain read-only; customizable shortcuts remain above.
+- Validation: cargo check and release dev build completed.
