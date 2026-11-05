@@ -151,3 +151,16 @@ Try: in Edit > Crop Image, enter a width and height with lock off; enable lock a
 change just one dimension. Zoom with each mode and watch the fields: together mode
 keeps the numbers unchanged; image-inside mode changes them as you zoom. Apply and
 verify the new version's dimensions while the original remains available.
+
+## Edit sidebar organization
+
+The Edit sidebar is ordered Histogram, Crop, Image Adjustments, then Image Analysis.
+All four use matching blue-accent headings with a disclosure arrow immediately after
+the title. Click a heading to collapse or expand its content; each starts expanded.
+Auto Enhance is the first subgroup within Image Adjustments, followed by the reset /
+adjustment-target controls and sliders. Light & Tone, Tonal Range, Color, and the
+analysis groups are plain subheadings, without separate collapse controls.
+
+The existing 130 regression tests pass (one optional dependency test ignored).
+Check the four section headings in Edit, collapse and reopen Image Adjustments, and
+confirm Auto Enhance and all slider groups reappear together.

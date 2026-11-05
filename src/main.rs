@@ -1497,8 +1497,26 @@ impl PixelForge {
         if !self.generation_gallery.is_empty() {self.generation_workspace=true;self.bind_workspace_editor(ctx);}
     }
 
+    fn show_edit_sidebar(&mut self,ui:&mut egui::Ui,ctx:&egui::Context) {
+        theme::collapsible_section(ui,"Histogram",|ui|self.show_histogram(ui));
+        ui.add_space(8.0);
+        theme::collapsible_section(ui,"Crop",|ui|self.show_crop_controls(ui,ctx));
+        ui.add_space(8.0);
+        theme::collapsible_section(ui,"Image Adjustments",|ui| {
+            ui.strong("Auto Enhance");
+            if ui.add_enabled(!self.exporting,egui::Button::new("Auto Enhance Image")).clicked() {
+                self.run_auto_enhance(ctx);
+            }
+            ui.label("Automatic exposure, tonal and color correction. Fine-tune the results with the sliders below.");
+            ui.separator();
+            self.show_adjustments(ui);
+        });
+        ui.add_space(8.0);
+        theme::collapsible_section(ui,"Image Analysis",|ui|self.show_image_analysis(ui));
+        ui.add_space(12.0);
+    }
+
     fn show_crop_controls(&mut self,ui:&mut egui::Ui,ctx:&egui::Context) {
-        theme::section(ui,"Crop");
         let available=!self.generation_running && !self.ai_running && !self.exporting && !self.ai_saving;
         if self.crop.is_none() {
             if ui.add_enabled(available && !self.generation_gallery.is_empty(),egui::Button::new("Crop Image")).clicked() {
@@ -5074,112 +5092,102 @@ impl PixelForge {
         }
     }
     fn show_image_analysis(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Image Analysis")
-            .id_salt("pixelforge_image_analysis")
-            .default_open(true)
+        let Some(report) = analysis::Analysis::from_histogram(&self.histogram) else {
+            ui.label("No image data available.");
+            return;
+        };
+
+        ui.strong("Exposure");
+        ui.strong(report.exposure);
+
+        ui.add_space(6.0);
+
+        ui.label(format!(
+            "Average brightness: {:.0} / 255",
+            report.mean_luminance
+        ));
+
+        ui.separator();
+
+        ui.strong("Clipping");
+
+        ui.label(format!("Near-black pixels: {:.2}%", report.shadow_clipping));
+
+        ui.label(format!(
+            "Near-white pixels: {:.2}%",
+            report.highlight_clipping
+        ));
+
+        ui.separator();
+
+        ui.strong("Tonal Distribution");
+
+        ui.label(format!("Shadows: {:.1}%", report.shadows));
+
+        ui.label(format!("Midtones: {:.1}%", report.midtones));
+
+        ui.label(format!("Highlights: {:.1}%", report.highlights));
+
+        ui.separator();
+
+        ui.strong("Color Balance");
+        ui.strong(report.color_balance);
+
+        ui.small(format!(
+            "Average RGB: {:.0} / {:.0} / {:.0}",
+            report.red_mean, report.green_mean, report.blue_mean
+        ));
+
+        ui.separator();
+
+        ui.strong("Recommendations");
+
+        egui::ScrollArea::vertical()
+            .id_salt("pixelforge_recommendations_scroll")
+            .max_height(110.0)
+            .min_scrolled_height(110.0)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
-                let Some(report) = analysis::Analysis::from_histogram(&self.histogram) else {
-                    ui.label("No image data available.");
-                    return;
-                };
+                ui.set_min_height(110.0);
 
-                ui.label("Exposure");
-                ui.strong(report.exposure);
-
-                ui.add_space(6.0);
-
-                ui.label(format!(
-                    "Average brightness: {:.0} / 255",
-                    report.mean_luminance
-                ));
-
-                ui.separator();
-
-                ui.label("Clipping");
-
-                ui.label(format!("Near-black pixels: {:.2}%", report.shadow_clipping));
-
-                ui.label(format!(
-                    "Near-white pixels: {:.2}%",
-                    report.highlight_clipping
-                ));
-
-                ui.separator();
-
-                ui.label("Tonal Distribution");
-
-                ui.label(format!("Shadows: {:.1}%", report.shadows));
-
-                ui.label(format!("Midtones: {:.1}%", report.midtones));
-
-                ui.label(format!("Highlights: {:.1}%", report.highlights));
-
-                ui.separator();
-
-                ui.label("Color Balance");
-                ui.strong(report.color_balance);
-
-                ui.small(format!(
-                    "Average RGB: {:.0} / {:.0} / {:.0}",
-                    report.red_mean, report.green_mean, report.blue_mean
-                ));
-
-                ui.separator();
-
-                ui.label("Recommendations");
-
-                egui::ScrollArea::vertical()
-                    .id_salt("pixelforge_recommendations_scroll")
-                    .max_height(110.0)
-                    .min_scrolled_height(110.0)
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        ui.set_min_height(110.0);
-
-                        for recommendation in &report.recommendations {
-                            ui.add_space(4.0);
-                            ui.label(format!("• {recommendation}"));
-                        }
-                    });
-
-                ui.add_space(6.0);
-                ui.small(
-                    "Analysis uses the current processed preview. \
-                     Results are guidance, not definitive image-quality judgments.",
-                );
+                for recommendation in &report.recommendations {
+                    ui.add_space(4.0);
+                    ui.label(format!("• {recommendation}"));
+                }
             });
+
+        ui.add_space(6.0);
+        ui.small(
+            "Analysis uses the current processed preview. \
+             Results are guidance, not definitive image-quality judgments.",
+        );
     }
     fn show_histogram(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Histogram")
-            .id_salt("pixelforge_histogram")
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(
-                        &mut self.histogram_mode,
-                        histogram::HistogramMode::Rgb,
-                        "RGB",
-                    );
+        ui.horizontal(|ui| {
+            ui.selectable_value(
+                &mut self.histogram_mode,
+                histogram::HistogramMode::Rgb,
+                "RGB",
+            );
 
-                    ui.selectable_value(
-                        &mut self.histogram_mode,
-                        histogram::HistogramMode::Luminance,
-                        "Luminance",
-                    );
-                });
+            ui.selectable_value(
+                &mut self.histogram_mode,
+                histogram::HistogramMode::Luminance,
+                "Luminance",
+            );
+        });
 
-                ui.add_space(4.0);
-                self.histogram.show(ui, self.histogram_mode);
+        ui.add_space(4.0);
+        self.histogram.show(ui, self.histogram_mode);
 
-                ui.horizontal(|ui| {
-                    ui.small("Shadows");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.small("Highlights");
-                    });
-                });
-
-                ui.small("Based on the current image preview");
+        ui.horizontal(|ui| {
+            ui.small("Shadows");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.small("Highlights");
             });
+        });
+
+        ui.small("Based on the current image preview");
     }
     fn show_adjustments(&mut self, ui: &mut egui::Ui) {
         // Temporarily bind the existing sliders to the selection adjustment bank.
@@ -5211,7 +5219,8 @@ impl PixelForge {
             std::mem::swap(&mut self.gamma, &mut self.selection_adjustments.gamma);
         }
         if !self.generation_workspace {
-        ui.collapsing("Version History", |ui| {
+        ui.strong("Version History");
+        ui.scope(|ui| {
             ui.label("Save a version of your edits. AI results are stored as image snapshots automatically.");
             if ui
                 .add_enabled(
@@ -5324,8 +5333,6 @@ impl PixelForge {
 
         let before_comparison = (self.comparison_enabled, self.comparison_position);
         ui.horizontal(|ui| {
-            theme::section(ui, "Image Adjustments");
-
             let can_reset = self.brightness != 0.0
                 || self.contrast != 0.0
                 || self.exposure != 0.0
@@ -5413,10 +5420,8 @@ impl PixelForge {
 
         let mut changed = false;
 
-        egui::CollapsingHeader::new("Light & Tone")
-            .id_salt("pixelforge_Light_and_Tone")
-            .default_open(true)
-            .show(ui, |ui| {
+        ui.strong("Light & Tone");
+        ui.scope(|ui| {
                 ui.label("Exposure (EV)");
                 ui.horizontal(|ui| {
                     changed |= ui
@@ -5481,10 +5486,8 @@ impl PixelForge {
                 ui.add_space(6.0);
             });
 
-        egui::CollapsingHeader::new("Tonal Range")
-            .id_salt("pixelforge_Tonal_Range")
-            .default_open(false)
-            .show(ui, |ui| {
+        ui.strong("Tonal Range");
+        ui.scope(|ui| {
                 ui.label("Highlights");
                 ui.horizontal(|ui| {
                     changed |= ui
@@ -5549,10 +5552,8 @@ impl PixelForge {
                 ui.add_space(6.0);
             });
 
-        egui::CollapsingHeader::new("Color")
-            .id_salt("pixelforge_Color")
-            .default_open(true)
-            .show(ui, |ui| {
+        ui.strong("Color");
+        ui.scope(|ui| {
                 ui.label("Temperature (Cool / Warm)");
                 ui.horizontal(|ui| {
                     changed |= ui
@@ -6787,32 +6788,7 @@ impl eframe::App for PixelForge {
                             self.show_selection_sidebar(ui);
                         } else if !self.ai_tools_tab {
                             if self.texture.is_some() {
-                                self.show_crop_controls(ui,ctx);
-                                ui.add_space(10.0);
-                                theme::section(ui, "Auto Enhance");
-
-                                if ui
-                                    .add_enabled(
-                                        !self.exporting,
-                                        egui::Button::new("Auto Enhance Image"),
-                                    )
-                                    .clicked()
-                                {
-                                    self.run_auto_enhance(ctx);
-                                }
-
-                                ui.label(
-                                    "Automatic exposure, tonal and color correction. \
-                         Fine-tune the results with the sliders below.",
-                                );
-
-                                ui.add_space(10.0);
-                                self.show_histogram(ui);
-                                ui.add_space(8.0);
-                                self.show_image_analysis(ui);
-                                ui.add_space(8.0);
-                                self.show_adjustments(ui);
-                                ui.add_space(12.0);
+                                self.show_edit_sidebar(ui,ctx);
                             }
 
                         } else {
