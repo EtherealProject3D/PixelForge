@@ -12,8 +12,3 @@ User-requested scope, deferred from v0.6.3. Planning only; do not implement as p
 - Persist the chosen theme and all custom presets across restarts.
 - Apply changes immediately and provide a way to return to a built-in theme.
 - Check readability and consistent coverage across menus, dialogs, tabs, workspace controls, and disabled/hover/focus states.
-
-## Remaining v0.6.3 work (separate scope)
-
-- Remember the last monitor, windowed size and position, and fullscreen state across restarts.
-- Require Alt+wheel over sliders to adjust values; Ctrl+Alt gives decimal precision and Shift+Alt steps by five. Wheel alone scrolls the panel. Direct numeric fields retain their existing wheel controls.

@@ -6,6 +6,9 @@ pub struct Display {
     fullscreen: bool,
     applied: Option<bool>,
     placement: Option<[f32; 4]>,
+    last_position: Option<[f32; 2]>,
+    startup_prepared: bool,
+    startup_frames: u8,
     maximized: bool,
     restore_frames: u8,
     error: String,
@@ -19,6 +22,8 @@ impl Display {
         {
             state.fullscreen = value["fullscreen"].as_bool().unwrap_or(false);
             state.maximized = value["maximized"].as_bool().unwrap_or(false);
+            state.last_position = serde_json::from_value(value["last_position"].clone()).ok()
+                .filter(|p: &[f32; 2]| p.iter().all(|v| v.is_finite()));
             state.placement = serde_json::from_value(value["placement"].clone())
                 .ok()
                 .filter(|v: &[f32; 4]| valid_placement(*v));
@@ -38,7 +43,7 @@ impl Display {
             std::fs::write(
                 &temp,
                 serde_json::to_vec(&serde_json::json!({
-                    "fullscreen": self.fullscreen, "placement": self.placement, "maximized": self.maximized
+                    "fullscreen": self.fullscreen, "placement": self.placement, "maximized": self.maximized, "last_position": self.last_position
                 }))?,
             )?;
             std::fs::rename(temp, path)
@@ -113,6 +118,41 @@ impl Display {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
             self.fullscreen = !self.fullscreen;
         }
+        // Position a normal window on the saved display before asking Windows to
+        // enter fullscreen/maximized mode, which always uses the current monitor.
+        if self.applied.is_none() && !self.startup_prepared {
+            self.startup_prepared = true;
+            self.startup_frames = 3;
+            let scale = ctx.pixels_per_point();
+            ctx.send_viewport_cmd(Cmd::Fullscreen(false));
+            ctx.send_viewport_cmd(Cmd::Decorations(false));
+            ctx.send_viewport_cmd(Cmd::Maximized(false));
+            if let Some([_, _, w, h]) = self.placement {
+                ctx.send_viewport_cmd(Cmd::InnerSize(egui::vec2(w / scale, h / scale)));
+            }
+            if let Some([x,y]) = self.last_position.or(self.placement.map(|p| [p[0],p[1]])) {
+                ctx.send_viewport_cmd(Cmd::OuterPosition(egui::pos2(x / scale,y / scale)));
+            }
+            ctx.request_repaint();
+            return;
+        }
+        if self.startup_frames > 0 {
+            self.startup_frames -= 1;
+            ctx.request_repaint();
+            if self.startup_frames > 0 { return; }
+        }
+        if self.applied == Some(self.fullscreen) && self.restore_frames == 0 {
+            let viewport = ctx.input(|i| i.viewport().clone());
+            if viewport.minimized != Some(true) && viewport.fullscreen == Some(self.fullscreen) {
+                if let Some(rect) = viewport.outer_rect {
+                    let p = [rect.min.x * ctx.pixels_per_point(), rect.min.y * ctx.pixels_per_point()];
+                    if p.iter().all(|v| v.is_finite()) && self.last_position != Some(p) {
+                        self.last_position = Some(p);
+                        self.save();
+                    }
+                }
+            }
+        }
         // Observe placement only after transitions have settled. Never persist a fullscreen rectangle.
         if self.applied == Some(false) && self.restore_frames == 0 {
             let viewport = ctx.input(|i| i.viewport().clone());
@@ -140,8 +180,9 @@ impl Display {
             }
         }
         if self.applied != Some(self.fullscreen) {
-            // On startup eframe restores native placement and mode; override only mode.
+            let startup = self.applied.is_none();
             ctx.send_viewport_cmd(Cmd::Fullscreen(self.fullscreen));
+            if startup && !self.fullscreen {ctx.send_viewport_cmd(Cmd::Maximized(self.maximized));}
             if !self.fullscreen {
                 ctx.send_viewport_cmd(Cmd::Decorations(false));
                 if self.applied.is_some() || ctx.input(|i| i.viewport().fullscreen == Some(true)) {
@@ -234,6 +275,42 @@ fn valid_placement(v: [f32; 4]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_positions_on_saved_display_before_fullscreen() {
+        let ctx = Context::default();
+        ctx.set_pixels_per_point(1.5);
+        let mut display = Display {
+            fullscreen: true,
+            last_position: Some([-3840.0, 0.0]),
+            placement: Some([120.0, 60.0, 1500.0, 900.0]),
+            ..Default::default()
+        };
+        let output = ctx.run(Default::default(), |ctx| display.update(ctx));
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.contains(&Cmd::OuterPosition(egui::pos2(-2560.0, 0.0))));
+        assert!(commands.contains(&Cmd::InnerSize(egui::vec2(1000.0, 600.0))));
+        assert!(!commands.contains(&Cmd::Fullscreen(true)));
+        for _ in 0..2 {let _ = ctx.run(Default::default(), |ctx| display.update(ctx));}
+        let output = ctx.run(Default::default(), |ctx| display.update(ctx));
+        assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.contains(&Cmd::Fullscreen(true)));
+        assert_eq!(display.placement, Some([120.0, 60.0, 1500.0, 900.0]));
+    }
+    #[test]
+    fn startup_restores_windowed_size_position_and_maximized_state() {
+        let ctx = Context::default();
+        let mut display = Display {
+            maximized: true,
+            placement: Some([-1800.0, 80.0, 1200.0, 800.0]),
+            ..Default::default()
+        };
+        let output = ctx.run(Default::default(), |ctx| display.update(ctx));
+        let commands = &output.viewport_output[&egui::ViewportId::ROOT].commands;
+        assert!(commands.contains(&Cmd::OuterPosition(egui::pos2(-1800.0, 80.0))));
+        assert!(commands.contains(&Cmd::InnerSize(egui::vec2(1200.0, 800.0))));
+        for _ in 0..2 {let _ = ctx.run(Default::default(), |ctx| display.update(ctx));}
+        let output = ctx.run(Default::default(), |ctx| display.update(ctx));
+        assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.contains(&Cmd::Maximized(true)));
+    }
     #[test]
     fn placement_accepts_ultrawide_and_negative_monitor_coordinates() {
         assert!(valid_placement([-5120.0, 0.0, 5120.0, 1440.0]));

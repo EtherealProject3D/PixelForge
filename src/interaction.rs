@@ -195,7 +195,7 @@ impl Settings {
     pub fn shortcut(&self, action: Action) -> String {
         self.bindings[action as usize].label()
     }
-    pub fn ui(&mut self, ui: &mut Ui) {
+    pub fn updates_ui(&mut self, ui: &mut Ui) {
         ui.heading("Updates");
         ui.separator();
         if ui
@@ -210,7 +210,8 @@ impl Settings {
         if crate::profile::is_dev() {
             ui.small("Automatic checks are disabled in PixelForge Dev, which updates from source.");
         }
-        ui.add_space(12.0);
+    }
+    pub fn hotkeys_ui(&mut self, ui: &mut Ui) {
         ui.heading("Hotkeys");
         ui.separator();
         for (index, action) in ACTIONS.into_iter().enumerate() {
@@ -265,8 +266,8 @@ impl Settings {
             ui.label("Default text aliases: Ctrl+Shift+Z redo; Ctrl+Insert copy; Shift+Insert paste; Shift+Delete cut. These follow the standard defaults and are retired when their corresponding binding is reassigned.");
             ui.label("Backspace / Delete remove characters or selected text; Ctrl+Backspace / Ctrl+Delete remove words. Shift+Tab still moves focus backward. Alt+F4 is the Windows close shortcut.");
             ui.label("Arrow keys move the text cursor; Ctrl+Left/Right move by word. Home/End move within a line, Ctrl+Home/End to the text boundaries. Tab / Shift+Tab move focus. Enter confirms entries; Esc cancels applicable dialogs or numeric entry.");
-            ui.label("Mouse wheel over numeric controls: ±1; Ctrl: ±0.1 where decimals apply; Shift: ±5. Values use displayed units and respect bounds and dimension rounding. Ctrl+drag gives fine numeric adjustment.");
-            ui.label("Image wheel: zoom. Pan and fit gestures are listed in Mouse Controls below. Crop zoom follows its selected mode; middle-double-click resets its view. Double-click a saved selection to activate it. Drag a comparison divider while Compare is checked.");
+            ui.label("Mouse wheel over sliders requires Alt: Alt ±1; Ctrl+Alt ±0.1 where decimals apply; Shift+Alt ±5. Over numeric fields Alt is optional. Values use displayed units and respect bounds and dimension rounding. Ctrl+drag gives fine numeric adjustment.");
+            ui.label("Image wheel: zoom. Pan and fit gestures are listed in the Mouse Controls tab. Crop zoom follows its selected mode; middle-double-click resets its view. Double-click a saved selection to activate it. Drag a comparison divider while Compare is checked.");
         });
         ui.add_space(12.0);
     }

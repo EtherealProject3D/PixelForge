@@ -3316,9 +3316,22 @@ impl PixelForge {
             .collapsible(false)
             .default_width(450.0)
             .resizable(true)
-            .vscroll(true)
+            .vscroll(false)
             .show(ctx, |ui| {
-                self.interaction.ui(ui);
+                let tab_id = ui.id().with("settings_tab");
+                let mut tab = ui.data(|d| d.get_temp::<usize>(tab_id)).unwrap_or(0);
+                let previous = tab;
+                ui.horizontal_wrapped(|ui| {
+                    for (index, title) in ["Visuals", "Mouse Controls", "Hotkeys"].iter().enumerate() {
+                        ui.selectable_value(&mut tab, index, *title);
+                    }
+                });
+                if tab != previous { self.interaction.cancel_capture(); }
+                ui.data_mut(|d| d.insert_temp(tab_id, tab));
+                ui.separator();
+                egui::ScrollArea::vertical().id_salt(("settings_content",tab)).max_height(580.0).show(ui, |ui| {
+                if tab == 2 { self.interaction.hotkeys_ui(ui); }
+                if tab == 0 {
                 self.display.ui(ui);
                 ui.add_space(12.0);
                 ui.heading("Appearance");
@@ -3350,6 +3363,8 @@ impl PixelForge {
                 crate::interaction::label(ui,"Changes apply immediately and are saved automatically.");
 
                 ui.add_space(12.0);
+                }
+                if tab == 1 {
                 ui.heading("Mouse Controls");
                 ui.separator();
 
@@ -3413,6 +3428,8 @@ impl PixelForge {
                 }
 
                 crate::interaction::label(ui,"Changes are saved automatically.");
+                }
+                });
             });
 
         self.show_settings = open;
@@ -7067,7 +7084,7 @@ impl eframe::App for PixelForge {
             && !self.exporting && !self.ai_saving && self.install_rx.is_none() && !self.dependency_manager.busy()
             && !self.inactive_tabs.iter().any(|(_,tab)|tab.project_dirty || tab.generation_running || tab.ai_running
                 || tab.exporting || tab.ai_saving || tab.install_rx.is_some());
-        if self.updater.show(ctx, can_restart) {
+        if self.updater.show(ctx, can_restart, &mut self.interaction) {
             self.exit_allowed=true;
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }

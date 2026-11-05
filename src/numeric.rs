@@ -198,7 +198,8 @@ impl Widget for Slider<'_> {
         } else {
             ui.ctx().data_mut(|d| d.remove::<f64>(precision));
         }
-        if let Some(next) = wheel(
+        let over_value = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| p.x >= response.rect.left() + ui.spacing().slider_width);
+        if (over_value || ui.input(|i| i.modifiers.alt)) && let Some(next) = wheel(
             ui,
             &mut response,
             value / scale,
@@ -213,7 +214,7 @@ impl Widget for Slider<'_> {
             (self.value)(Some(value / scale));
         }
         crate::interaction::numeric_text(ui, &response);
-        response.on_hover_text("Drag to adjust; Ctrl+drag for precision. Wheel: 1; Ctrl+wheel: 0.1; Shift+wheel: 5 (displayed units).")
+        response.on_hover_text("Drag to adjust; Ctrl+drag for precision. Over slider: Alt+wheel: 1; Ctrl+Alt+wheel: 0.1; Shift+Alt+wheel: 5. Over numeric value: Alt is optional.")
     }
 }
 pub struct DragValue<'a> {
@@ -327,6 +328,26 @@ impl Widget for DragValue<'_> {
 mod tests {
     use super::*;
     #[test]
+    fn slider_without_alt_leaves_value_and_panel_scrolling_alone() {
+        let ctx = egui::Context::default();
+        let mut value = 50_u32;
+        let mut rect = egui::Rect::NOTHING;
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {rect = ui.add(Slider::new(&mut value, 0..=100)).rect;});
+        });
+        let _ = ctx.run(egui::RawInput {
+            events: vec![egui::Event::PointerMoved(rect.left_center()+egui::vec2(20.0,0.0)), egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line, delta: egui::vec2(0.0,-1.0), modifiers: egui::Modifiers::NONE,
+            }], ..Default::default()
+        }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.add(Slider::new(&mut value, 0..=100));
+                assert_ne!(ui.input(|i| i.smooth_scroll_delta.y), 0.0);
+            });
+        });
+        assert_eq!(value, 50);
+    }
+    #[test]
     fn numeric_wheel_does_not_scroll_parent_on_smoothed_followup_frames() {
         let ctx = egui::Context::default();
         let mut value = 50_u32;
@@ -337,7 +358,7 @@ mod tests {
                 events.push(egui::Event::MouseWheel {
                     unit: egui::MouseWheelUnit::Line,
                     delta: egui::vec2(0.0, -3.0),
-                    modifiers: egui::Modifiers::NONE,
+                    modifiers: egui::Modifiers { alt: true, ..Default::default() },
                 });
             }
             if frame == 0 { events.clear(); }
@@ -345,6 +366,7 @@ mod tests {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 300.0))),
                 time: Some(frame as f64 / 60.0),
                 events,
+                modifiers: egui::Modifiers { alt: true, ..Default::default() },
                 ..Default::default()
             }, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
@@ -369,9 +391,10 @@ mod tests {
             });
         });
         for (modifiers, expected) in [
-            (egui::Modifiers::NONE, 0.51),
+            (egui::Modifiers { alt: true, ..Default::default() }, 0.51),
             (
                 egui::Modifiers {
+                    alt: true,
                     ctrl: true,
                     command: true,
                     ..Default::default()
@@ -380,6 +403,7 @@ mod tests {
             ),
             (
                 egui::Modifiers {
+                    alt: true,
                     shift: true,
                     ..Default::default()
                 },

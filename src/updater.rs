@@ -128,10 +128,12 @@ impl Manager {
         }
         if self.check_rx.is_some() {ctx.request_repaint_after(Duration::from_millis(100));}
     }
-    pub fn show(&mut self,ctx:&egui::Context,can_restart:bool)->bool {
+    pub fn show(&mut self,ctx:&egui::Context,can_restart:bool,settings:&mut crate::interaction::Settings)->bool {
         if crate::profile::is_dev() {
             if self.open {
                 egui::Window::new("PixelForge Dev").collapsible(false).open(&mut self.open).show(ctx,|ui| {
+                    settings.updates_ui(ui);
+                    ui.separator();
                     crate::interaction::label(ui,"This development copy uses the source checkout. Close it and reopen PixelForge Dev to rebuild the latest local code.");
                     crate::interaction::label(ui,"Use the installed PixelForge app for published releases and in-app updates.");
                 });
@@ -148,6 +150,8 @@ impl Manager {
         let mut restart=false;
         egui::Window::new("PixelForge Updates").collapsible(false).open(&mut open).default_width(520.0).min_width(440.0)
             .default_pos(ctx.screen_rect().center()-egui::vec2(260.0,160.0)).resizable(true).show(ctx,|ui| {
+            settings.updates_ui(ui);
+            ui.separator();
             ui.heading(format!("PixelForge v{}",env!("CARGO_PKG_VERSION")));
             crate::interaction::label(ui,"Updates come from published PixelForge GitHub releases.");
             if ui.add_enabled(!self.busy(),egui::Button::new("Check for Updates")).clicked() {

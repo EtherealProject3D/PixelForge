@@ -233,3 +233,12 @@ build since Dev intentionally does not use the release updater.
 - AI Result Strength remains at the chosen blend for subsequent operations instead of resetting to 100%; cleanup strength remains separate.
 - The centered Pixel Forge title is slightly bolder without changing the bar height.
 - Validation: 139 tests passed, one ignored; dev build completed.
+
+### Settings tabs, monitor memory, and Alt-wheel sliders
+
+- Settings has Visuals (display and interface scale), Mouse Controls, and Hotkeys tabs. Content scrolls beneath the tab row. Switching tabs cancels unfinished shortcut capture.
+- The automatic startup update checkbox lives in the existing Updates window, rather than a duplicate Settings tab.
+- Restore the saved display position and windowed dimensions before applying fullscreen or maximized mode at startup. Track fullscreen display position separately from the normal-window rectangle. Positions support negative coordinates and scaled displays.
+- Slider tracks require Alt+wheel for single-unit changes, Ctrl+Alt for decimal precision, and Shift+Alt for five-unit changes. Without Alt, the panel scrolls normally. Direct numeric fields retain their existing wheel controls. Active numeric editing consumes smoothed follow-up scroll frames.
+- Validation: 142 tests passed, one ignored; release dev build completed. Actual multi-monitor restart checks remain for the user: move to another monitor, resize and restart; repeat fullscreen and maximized, then use F11 to verify the normal-window rectangle is retained.
+- Themes remain deferred to v0.6.4.
