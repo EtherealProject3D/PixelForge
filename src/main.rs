@@ -1154,7 +1154,7 @@ impl PixelForge {
                 self.selection_adjustments = adjustments::Adjustments::default();
                 self.selection_adjustment_target = false;
                 self.comparison_position = 0.5;
-                self.comparison_enabled = true;
+                self.comparison_enabled = false;
                 self.divider_dragging = false;
                 self.selection_mask = None;
                 self.selection_texture = None;
@@ -2182,6 +2182,11 @@ impl PixelForge {
         self.bind_workspace_editor(ui.ctx());
         let available = ui.available_size();
         if !self.generation_compare {
+            // The shared viewer also supports legacy comparison modes. The Studio
+            // checkbox is authoritative, including after loading an image/project.
+            self.comparison_enabled = false;
+            self.version_comparison = false;
+            self.divider_dragging = false;
             let size=egui::vec2(available.x,(available.y-Self::workspace_filmstrip_height(ui)).max(1.0));
             let fit=(size.x/self.image_size[0].max(1) as f32).min(size.y/self.image_size[1].max(1) as f32);
             self.zoom=fit*self.generation_zoom;
@@ -7186,6 +7191,35 @@ mod workspace_tests {
         assert_eq!(app.selection_adjustments.exposure,0.25);
         assert_eq!(app.generation_gallery[0].pixels.get_pixel(0,0)[0],40);
         assert!(app.generation_gallery[0].editor.render(&app.generation_gallery[0].pixels).get_pixel(0,0)[0]>40);
+    }
+    #[test]
+    fn unchecked_compare_hides_legacy_dividers_and_checked_compare_shows_one() {
+        let ctx=egui::Context::default();
+        let mut app=PixelForge::default();
+        for value in [40,80] {
+            let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([value,value,value,255]));
+            let texture=ctx.load_texture(format!("compare_visibility_{value}"),ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
+            app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+        }
+        app.generation_workspace=true;
+        app.bind_workspace_editor(&ctx);
+        app.comparison_enabled=true;
+        app.version_comparison=true;
+        app.divider_dragging=true;
+        let frame=|app:&mut PixelForge| {
+            let input=egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1400.0,900.0))),..Default::default()};
+            ctx.run(input,|ctx| {egui::CentralPanel::default().show(ctx,|ui|app.show_generation_workspace(ui));})
+        };
+        let has_divider=|output:&egui::FullOutput|output.shapes.iter().any(|shape| match &shape.shape {
+            egui::Shape::LineSegment {points,stroke}=>points[0].x==points[1].x && (points[0].y-points[1].y).abs()>100.0 && stroke.width==2.0 && stroke.color==egui::Color32::WHITE,
+            _=>false,
+        });
+        assert!(!has_divider(&frame(&mut app)));
+        assert!(!app.comparison_enabled && !app.version_comparison && !app.divider_dragging);
+        app.generation_compare=true;
+        assert!(has_divider(&frame(&mut app)));
+        app.generation_compare=false;
+        assert!(!has_divider(&frame(&mut app)));
     }
     #[test]
     fn shared_compare_divider_drags_and_camera_survives_version_and_tool_changes() {
