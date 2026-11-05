@@ -2761,38 +2761,53 @@ impl PixelForge {
         egui::Window::new("Save changes before exiting?")
             .collapsible(false)
             .resizable(false)
-            .fixed_size([480.0, 150.0])
+            .auto_sized()
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ctx, |ui| {
-                ui.label("Your project has unsaved changes.");
-                ui.label("Save your work to keep the image versions and edits.");
-                ui.add_space(18.0);
+                let messages = [
+                    "Your project has unsaved changes.",
+                    "Save your work to keep the image versions and edits.",
+                ];
+                // Measure at the current UI scale; center the natural-size buttons
+                // as a group rather than stretching them or right-aligning the row.
+                let text_width = |text: &str, style: egui::TextStyle| {
+                    ui.painter().layout_no_wrap(text.into(), style.resolve(ui.style()), ui.visuals().text_color()).size().x
+                };
+                let button_width: f32 = ["Cancel", "Exit Without Saving", "Save & Exit"].iter()
+                    .map(|label| (text_width(label, egui::TextStyle::Button) + ui.spacing().button_padding.x * 2.0).max(ui.spacing().interact_size.x))
+                    .sum::<f32>() + ui.spacing().item_spacing.x * 2.0;
+                let content_width = messages.iter().map(|message| text_width(message, egui::TextStyle::Body))
+                    .fold(button_width, f32::max);
+                ui.set_width(content_width);
+                ui.vertical_centered(|ui| {
+                    for message in messages {ui.label(message);}
+                });
+                ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(6.0);
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(theme::primary("Save & Exit")).clicked() {
-                    self.save_project(false);
-
-                    // Only exit after a successful save.
-                    // Canceled or failed saves leave the app open.
-                    if !self.project_dirty {
+                ui.horizontal(|ui| {
+                    ui.add_space(((ui.available_width() - button_width) * 0.5).max(0.0));
+                    if ui.button("Cancel").clicked() || ui.input(|i|i.key_pressed(egui::Key::Escape)) {
                         self.exit_confirmation = false;
-                        self.exit_allowed = true;
-                        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
-                }
-
                     if ui.button("Exit Without Saving").clicked() {
                         self.exit_confirmation = false;
                         self.exit_allowed = true;
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
-                    if ui.button("Cancel").clicked() || ui.input(|i|i.key_pressed(egui::Key::Escape)) {
-                        self.exit_confirmation = false;
+                    if ui.add(theme::primary("Save & Exit")).clicked() {
+                        self.save_project(false);
+                        // Canceled or failed saves leave the app open.
+                        if !self.project_dirty {
+                            self.exit_confirmation = false;
+                            self.exit_allowed = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
                     }
                 });
             });
     }
+
     fn show_unsaved_prompt(&mut self, ctx: &egui::Context) {
         let Some(action) = self.pending_open else {
             return;
