@@ -226,3 +226,10 @@ build since Dev intentionally does not use the release updater.
 - Windowed and fullscreen modes share aligned caption controls without the native title strip. Windowed mode supports title dragging, double-click maximize/restore, and edge resizing.
 - Bold Pixel Forge stays centered; the version sits immediately to its right. The tab menu button has more padding and a centered plus.
 - Validation: 139 tests passed, one ignored; dev build and visual top-bar check completed.
+
+### Generate layout and retained result blend
+
+- Generation settings now sits below Initial prompt and above a labeled Select Model dropdown. Model Library uses the Edit-style accent section and right-side collapse arrow, with dependency setup reveal preserved.
+- AI Result Strength remains at the chosen blend for subsequent operations instead of resetting to 100%; cleanup strength remains separate.
+- The centered Pixel Forge title is slightly bolder without changing the bar height.
+- Validation: 139 tests passed, one ignored; dev build completed.

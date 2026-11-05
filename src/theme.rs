@@ -80,9 +80,19 @@ pub fn collapsible_section<R>(
     title: &str,
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
+    collapsible_section_reveal(ui, title, false, body)
+}
+
+pub fn collapsible_section_reveal<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    reveal: bool,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
     let id = ui.make_persistent_id(("edit_section", title));
     let mut state =
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+    if reveal { state.set_open(true); }
     let text = ui.painter().layout_no_wrap(
         title.into(),
         egui::TextStyle::Heading.resolve(ui.style()),

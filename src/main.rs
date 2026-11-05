@@ -1701,8 +1701,6 @@ impl PixelForge {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             ui.separator();
         }
-        ui.collapsing("Generation settings", |ui| self.show_generation_settings(ui));
-        ui.separator();
         self.show_conversation(ui);
         ui.separator();
         self.show_model_library(ui);
@@ -1715,7 +1713,7 @@ impl PixelForge {
     }
 
     fn show_model_library(&mut self,ui:&mut egui::Ui) {
-        egui::CollapsingHeader::new("Model Library").open(self.model_library_reveal.then_some(true)).show(ui,|ui| {
+        theme::collapsible_section_reveal(ui,"Model Library",self.model_library_reveal,|ui| {
             crate::interaction::label(ui,"Generation and editing models");
             if self.install_folder.is_none() && !self.install_folder_manual {
                 self.install_folder=model_installer::detect_models_folder(&self.generation_checkpoints);
@@ -2129,6 +2127,8 @@ impl PixelForge {
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
         theme::section(ui, "Initial prompt");
+        ui.collapsing("Generation settings", |ui| self.show_generation_settings(ui));
+        crate::interaction::label(ui,"Select Model");
         let checkpoint_before_selection = self.generation_checkpoint.clone();
         let model_row_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button)) + ui.spacing().item_spacing.y;
         let generation_menu_height = model_row_height * (self.generation_checkpoints.len() + 2) as f32 + 16.0;
@@ -4079,8 +4079,7 @@ impl PixelForge {
         let (tx, rx) = std::sync::mpsc::channel();
 
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        // A new cleanup uses its own requested strength, not the previous preview blend.
-        self.ai_strength = if denoise || restoration.is_some() { self.restoration_strength } else { 1.0 };
+        // Keep the user's result blend across operations; cleanup has a separate strength.
         self.ai_cancel = cancel.clone();
         self.ai_rx = Some(rx);
         self.workspace_ai_parent=self.workspace_editor;
@@ -6681,7 +6680,8 @@ impl eframe::App for PixelForge {
             let controls_left=bar.right()-112.0;
             self.display.title_drag(ui,egui::Rect::from_min_max(egui::pos2(bar.left()+left_width+8.0,bar.top()),egui::pos2(controls_left.max(bar.left()+left_width+8.0),bar.top()+28.0)));
             ui.painter().galley(title_pos,title.clone(),ui.visuals().strong_text_color());
-            ui.painter().galley(title_pos+egui::vec2(0.5,0.0),title,ui.visuals().strong_text_color());
+            ui.painter().galley(title_pos+egui::vec2(0.8,0.0),title.clone(),ui.visuals().strong_text_color());
+            ui.painter().galley(title_pos+egui::vec2(0.0,0.25),title,ui.visuals().strong_text_color());
             let version=format!("{}v{}",if profile::is_dev(){"Dev "}else{""},env!("CARGO_PKG_VERSION"));
             ui.painter().with_clip_rect(egui::Rect::from_min_max(egui::pos2(title_right+8.0,bar.top()),egui::pos2(controls_left,bar.top()+28.0))).text(egui::pos2(title_right+8.0,title_pos.y),egui::Align2::LEFT_TOP,version,egui::TextStyle::Small.resolve(ui.style()),ui.visuals().weak_text_color());
         });
