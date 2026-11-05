@@ -6475,6 +6475,9 @@ impl eframe::App for PixelForge {
                 if self.project_dirty {
                     ui.colored_label(egui::Color32::YELLOW, "* Unsaved changes");
                 }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    self.display.window_controls(ui);
+                });
             });
         });
         egui::SidePanel::right("tools")

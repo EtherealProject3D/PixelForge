@@ -2,6 +2,8 @@
 
 - Settings > Display: native fullscreen, F11 toggle, persistent mode and
   normal window placement. Uses the current monitor rather than a fixed resolution.
+  Fullscreen includes top-right minimize, restore-window, and close controls; close
+  uses the same unsaved-work checks as the native window X.
 - Dependencies: background GPU / VRAM / driver / compute capability and selected
   Python CUDA / PyTorch diagnostics; inspect the running server separately, copy or
   save the report, and read startup output in the profile's backend.log.
@@ -25,7 +27,9 @@ The five pre-existing post-v0.6.2 model-library development commits were retaine
 
 1. Close any old PixelForge Dev window. Open the existing PixelForge Dev shortcut
    (or scripts/Run-PixelForge.ps1); confirm the title says PixelForge Dev v0.6.3.
-2. Move and resize the window, select Settings > Display > Fullscreen. Confirm no
+2. Move and resize the window, select Settings > Display > Fullscreen. Test the
+   top-right minimize, restore-window and close controls (cancel any unsaved-work
+   prompt to keep editing). Confirm no
    title bar / taskbar, and full monitor coverage. F11 returns to the same placement.
 3. Enter fullscreen again and use F11. Repeat from a maximized window. Close while
    fullscreen, reopen, then F11. Check that the earlier normal placement is restored.

@@ -63,6 +63,24 @@ impl Display {
             ui.colored_label(egui::Color32::YELLOW, &self.error);
         }
     }
+    /// Fullscreen has no OS title bar, so keep its window actions in the app menu bar.
+    pub fn window_controls(&mut self, ui: &mut egui::Ui) {
+        if !self.fullscreen {
+            return;
+        }
+        // The parent lays these out right-to-left, matching Windows caption order.
+        if caption_button(ui, Caption::Close).clicked() {
+            // Use the native close-request path, including existing unsaved-work checks.
+            ui.ctx().send_viewport_cmd(Cmd::Close);
+        }
+        if caption_button(ui, Caption::Restore).clicked() {
+            self.fullscreen = false;
+            ui.ctx().request_repaint();
+        }
+        if caption_button(ui, Caption::Minimize).clicked() {
+            ui.ctx().send_viewport_cmd(Cmd::Minimized(true));
+        }
+    }
     pub fn update(&mut self, ctx: &Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
             self.fullscreen = !self.fullscreen;
@@ -119,6 +137,67 @@ impl Display {
             ctx.request_repaint();
         }
     }
+}
+#[derive(Clone, Copy)]
+enum Caption {
+    Minimize,
+    Restore,
+    Close,
+}
+fn caption_button(ui: &mut egui::Ui, caption: Caption) -> egui::Response {
+    let label = match caption {
+        Caption::Minimize => "Minimize",
+        Caption::Restore => "Restore window (leave fullscreen)",
+        Caption::Close => "Close PixelForge",
+    };
+    let response = ui
+        .add(egui::Button::new("").min_size(egui::vec2(40.0, 28.0)))
+        .on_hover_text(label);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    let painter = ui.painter();
+    let center = response.rect.center();
+    if matches!(caption, Caption::Close) && response.hovered() {
+        painter.rect_filled(response.rect, 2.0, egui::Color32::from_rgb(190, 35, 45));
+    }
+    let stroke = egui::Stroke::new(1.5_f32, ui.visuals().text_color());
+    match caption {
+        Caption::Minimize => {
+            painter.line_segment(
+                [
+                    center + egui::vec2(-5.0, 2.0),
+                    center + egui::vec2(5.0, 2.0),
+                ],
+                stroke,
+            );
+        }
+        Caption::Restore => {
+            for offset in [egui::vec2(2.0, -2.0), egui::Vec2::ZERO] {
+                painter.rect_stroke(
+                    egui::Rect::from_center_size(center + offset, egui::vec2(9.0, 9.0)),
+                    0.0,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        Caption::Close => {
+            painter.line_segment(
+                [
+                    center + egui::vec2(-5.0, -5.0),
+                    center + egui::vec2(5.0, 5.0),
+                ],
+                stroke,
+            );
+            painter.line_segment(
+                [
+                    center + egui::vec2(-5.0, 5.0),
+                    center + egui::vec2(5.0, -5.0),
+                ],
+                stroke,
+            );
+        }
+    }
+    response
 }
 fn valid_placement(v: [f32; 4]) -> bool {
     v.iter().all(|n| n.is_finite()) && v[2] >= 100.0 && v[3] >= 100.0
