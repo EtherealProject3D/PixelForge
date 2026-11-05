@@ -692,6 +692,7 @@ struct PixelForge {
     fit_pending: bool,
     panning: bool,
     show_settings: bool,
+    blank_project: bool,
     display: display::Display,
     ai_tools_tab: bool,
     generation_tools_tab: bool,
@@ -888,6 +889,7 @@ impl Default for PixelForge {
             fit_pending: false,
             panning: false,
             show_settings: false,
+            blank_project: false,
             display: display::Display::load(),
             selection_tools_tab: false,
             generation_tools_tab: false,
@@ -1094,6 +1096,7 @@ impl PixelForge {
         match image::open(&path) {
             Ok(img) => {
                 self.create_project_tab();
+                self.blank_project = false;
                 self.capture_workspace_editor();
                 self.workspace_editor=None;
                 self.generation_workspace=false;
@@ -1354,7 +1357,7 @@ impl PixelForge {
                 settings.seed = seed;
                 settings.width = image.width();
                 settings.height = image.height();
-                self.generation_gallery.push(GeneratedItem {editor: studio::EditorState::default(),
+                self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor: studio::EditorState::default(),
                     settings,
                     pixels: image,
                     texture,
@@ -1488,12 +1491,13 @@ impl PixelForge {
     }
 
     fn ensure_workspace(&mut self, ctx: &egui::Context) {
+        if self.blank_project { return; }
         if !self.generation_workspace && self.workspace_editor.is_none() {
             if let Some(pixels) = self.preview_source.as_ref().map(|p|p.as_ref().clone()).or_else(||self.original_pixels.clone()) {
                 let mut settings = settings_from_json(&serde_json::json!({"checkpoint":"Imported image","width":pixels.width(),"height":pixels.height()}));
                 settings.custom_size=true;
                 let texture=self.texture.as_ref().expect("loaded editor has texture").clone();
-                self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
+                self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
                 self.generation_selected=self.generation_gallery.len()-1;
                 self.workspace_editor=Some(self.generation_selected);
                 self.capture_workspace_editor();
@@ -1607,7 +1611,7 @@ impl PixelForge {
         settings.width=w;settings.height=h;settings.custom_size=true;
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("Crop at {x}, {y}: {w} × {h}"));
         let seed=item.seed;
-        self.generation_gallery.push(GeneratedItem {editor,settings,pixels,texture,seed});
+        self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor,settings,pixels,texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.refinement_source=None;
@@ -1626,7 +1630,7 @@ impl PixelForge {
         settings.refine_prompt=Some(label.into());
         let texture=ctx.load_texture(format!("studio_snapshot_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
         let seed=item.seed;
-        self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed});
+        self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -1681,7 +1685,7 @@ impl PixelForge {
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("{label} · strength {:.0}%",self.ai_strength*100.0));
         settings.checkpoint=format!("AI Tools: {label}");settings.width=pixels.width();settings.height=pixels.height();settings.steps=0;settings.cfg=0.0;
         let texture=ctx.load_texture(format!("studio_ai_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
-        self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
+        self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -2041,6 +2045,7 @@ impl PixelForge {
         for item in &project.items {
             if let Err(error)=studio::EditorState::from_json(&item.settings["editor"],item.pixels.width(),item.pixels.height()) {self.generation_status=format!("Open failed: {error}");return;}
         }
+        self.blank_project = false;
         self.workspace_editor=None;
         let gallery:Vec<GeneratedItem>=project.items.into_iter().enumerate().map(|(n,i)|{
             let editor=studio::EditorState::from_json(&i.settings["editor"],i.pixels.width(),i.pixels.height()).expect("validated Studio state");
@@ -2064,7 +2069,7 @@ impl PixelForge {
         if let Some(paths)=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","webp"]).pick_files() {
             let mut count=0;
             for path in paths {match image::open(&path) {
-                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,dimension_step:32,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};self.generation_gallery.push(GeneratedItem {editor: studio::EditorState::default(),settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
+                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,dimension_step:32,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor: studio::EditorState::default(),settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
                 Err(e)=>self.generation_status=format!("Import failed: {e}"),
             }}
             if count>0 {self.generation_status=format!("Imported {count} image(s)");}
@@ -2242,6 +2247,10 @@ impl PixelForge {
     }
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
+        if self.blank_project {
+            ui.centered_and_justified(|ui| { crate::interaction::label(ui,"Import an image, or choose Generate to create one."); });
+            return;
+        }
         self.bind_workspace_editor(ui.ctx());
         if self.generation_gallery.is_empty() {
             crate::interaction::strong(ui,"Image Studio");
@@ -2669,6 +2678,12 @@ impl PixelForge {
         if self.original_pixels.is_none() && self.inactive_tabs.is_empty() {
             return;
         }
+        self.create_blank_project_tab();
+        self.blank_project = false;
+    }
+
+    fn create_blank_project_tab(&mut self) {
+        self.capture_workspace_editor();
         let mut tabs = std::mem::take(&mut self.inactive_tabs);
         let previous = self.active_tab;
         let id = self.next_tab;
@@ -2678,6 +2693,7 @@ impl PixelForge {
         self.inactive_tabs = tabs;
         self.active_tab = id;
         self.next_tab = id + 1;
+        self.blank_project = true;
     }
 
     fn close_project_tab(&mut self, target: usize) {
@@ -2738,7 +2754,7 @@ impl PixelForge {
                         ui.painter().line_segment([center-egui::vec2(0.0,4.0), center+egui::vec2(0.0,4.0)], stroke);
                         egui::Popup::menu(&response).show(|ui| {
                             if ui.button("New Blank Project").clicked() {
-                                self.create_project_tab();
+                                self.create_blank_project_tab();
                                 ui.close();
                             }
                             if ui.button("Open Image…").clicked() {
@@ -3130,6 +3146,7 @@ impl PixelForge {
         };
 
         self.create_project_tab();
+        self.blank_project = false;
         let size = [data.pixels.width() as usize, data.pixels.height() as usize];
 
         let color = ColorImage::from_rgba_unmultiplied(size, data.pixels.as_raw());
@@ -7583,6 +7600,43 @@ mod workspace_tests {
         assert_eq!(loaded.generation_gallery[0].seed,42);
         assert_eq!(loaded.generation_gallery[0].settings.prompt,"Test");
     }
+    #[test]
+    fn explicit_blank_project_always_adds_a_tab_and_stays_empty() {
+        let ctx=egui::Context::default();
+        let mut app=PixelForge::default();
+        let initial=app.active_tab;
+        app.create_blank_project_tab();
+        assert_ne!(app.active_tab,initial);
+        assert_eq!(app.inactive_tabs.len(),1);
+        app.create_blank_project_tab();
+        assert_eq!(app.inactive_tabs.len(),2);
+        let pixels=image::RgbaImage::from_pixel(2,1,image::Rgba([40,40,40,255]));
+        app.blank_project=false;
+        app.texture=Some(ctx.load_texture("blank_tab_source",ColorImage::from_rgba_unmultiplied([2,1],pixels.as_raw()),TextureOptions::LINEAR));
+        app.original_pixels=Some(pixels);
+        app.generation_workspace=false;
+        app.image_size=[2,1];
+        app.ensure_workspace(&ctx);
+        app.project_dirty=true;
+        let populated=app.active_tab;
+        app.create_blank_project_tab();
+        let blank=app.active_tab;
+        app.ensure_workspace(&ctx);
+        assert!(app.blank_project);
+        assert!(app.original_pixels.is_none());
+        assert!(app.workspace_editor.is_none());
+        assert!(!app.project_dirty);
+        app.switch_project_tab(populated);
+        app.ensure_workspace(&ctx);
+        assert!(!app.blank_project);
+        assert!(app.original_pixels.is_some());
+        assert!(app.project_dirty);
+        app.switch_project_tab(blank);
+        app.ensure_workspace(&ctx);
+        assert!(app.blank_project);
+        assert!(app.original_pixels.is_none());
+    }
+
     #[test]
     fn plain_image_enters_workspace_once_and_documents_keep_their_own_selection() {
         let ctx=egui::Context::default();

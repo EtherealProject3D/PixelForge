@@ -273,3 +273,9 @@ build since Dev intentionally does not use the release updater.
 - Concurrent launches during loading bring forward that indicator instead of creating a second copy. Once ready, another launch asks whether to open another instance (Yes) or show the existing one (No). Dev and release coordinate separately; closing or crashing releases the coordinator automatically.
 - The Dev launcher opens current builds directly. Source/assets/build-input changes trigger a build with a centered loading prompt; duplicate build-launch requests are serialized. Both launcher entry points share this behavior.
 - Validation: 146 tests passed, one ignored; build completed; immediate double-launch produced one main window, and ready-state warning paths were exercised. One local direct launch measured 0.174 seconds to first UI frame; this excludes launcher/process startup overhead and is not a cold-start guarantee.
+
+### New Blank Project action
+
+- The explicit New Blank Project command always creates a new tab, including when the current tab is already empty. Import/open paths retain their existing tab-creation behavior.
+- Blank tabs remain empty when switching between tabs instead of automatically binding to an existing shared image version. Loading or generating content activates their workspace.
+- Validation: 147 tests passed, one ignored; release dev build completed. Regression coverage includes consecutive blank tabs and retaining unsaved image state across tab switches.
