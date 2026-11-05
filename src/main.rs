@@ -2726,8 +2726,8 @@ impl PixelForge {
                         ui.separator();
                     }
                     ui.scope(|ui| {
-                        ui.spacing_mut().button_padding = egui::vec2(4.0, 1.0);
-                        ui.spacing_mut().interact_size.y = 20.0;
+                        ui.spacing_mut().button_padding = egui::vec2(8.0, 3.0);
+                        ui.spacing_mut().interact_size.y = 26.0;
                         ui.menu_button("+", |ui| {
                             if ui.button("New Blank Project").clicked() {
                                 self.create_project_tab();
@@ -6528,6 +6528,7 @@ impl eframe::App for PixelForge {
         for action in self.interaction.begin_frame(ctx) {self.edit_command(ctx,action);}
         self.updater.poll(ctx,self.interaction.automatic_updates);
         self.display.update(ctx);
+        self.display.resize_edges(ctx);
         // Keep native window persistence current even while the canvas is idle.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
         if ctx.input(|i|i.viewport().close_requested()) && self.dependency_manager.busy() {
@@ -6554,10 +6555,11 @@ impl eframe::App for PixelForge {
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             let bar=ui.available_rect_before_wrap();
-            let title=ui.painter().layout_no_wrap("PixelForge".into(),egui::TextStyle::Button.resolve(ui.style()),ui.visuals().text_color());
+            let title=ui.painter().layout_no_wrap("Pixel Forge".into(),egui::TextStyle::Button.resolve(ui.style()),ui.visuals().text_color());
             let title_pos=egui::pos2(ctx.screen_rect().center().x-title.size().x/2.0,bar.top()+(ui.spacing().interact_size.y-title.size().y)/2.0);
             let left_width=(title_pos.x-bar.left()-12.0).max(100.0);
             ui.horizontal(|ui| {
+            ui.set_min_height(28.0);
             ui.allocate_ui_with_layout(egui::vec2(left_width,ui.spacing().interact_size.y),egui::Layout::left_to_right(egui::Align::Center),|ui| {
             egui::ScrollArea::horizontal().id_salt("top_bar_menus").max_width(left_width)
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui,|ui| {
@@ -6667,7 +6669,14 @@ impl eframe::App for PixelForge {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui|self.display.window_controls(ui));
             });
-            ui.painter().galley(title_pos,title,ui.visuals().text_color());
+            let title_pos=egui::pos2(title_pos.x, bar.top()+(28.0-title.size().y)/2.0);
+            let title_right=title_pos.x+title.size().x;
+            let controls_left=bar.right()-112.0;
+            self.display.title_drag(ui,egui::Rect::from_min_max(egui::pos2(bar.left()+left_width+8.0,bar.top()),egui::pos2(controls_left.max(bar.left()+left_width+8.0),bar.top()+28.0)));
+            ui.painter().galley(title_pos,title.clone(),ui.visuals().strong_text_color());
+            ui.painter().galley(title_pos+egui::vec2(0.5,0.0),title,ui.visuals().strong_text_color());
+            let version=format!("{}v{}",if profile::is_dev(){"Dev "}else{""},env!("CARGO_PKG_VERSION"));
+            ui.painter().with_clip_rect(egui::Rect::from_min_max(egui::pos2(title_right+8.0,bar.top()),egui::pos2(controls_left,bar.top()+28.0))).text(egui::pos2(title_right+8.0,title_pos.y),egui::Align2::LEFT_TOP,version,egui::TextStyle::Small.resolve(ui.style()),ui.visuals().weak_text_color());
         });
         self.show_project_tabs(ctx);
         egui::SidePanel::right("tools")
@@ -7070,6 +7079,7 @@ fn main() -> eframe::Result {
     };
     let mut viewport = egui::ViewportBuilder::default()
         .with_title(profile::window_title())
+        .with_decorations(false)
         .with_drag_and_drop(true)
         .with_icon(icon_data)
         .with_min_inner_size([800.0, 500.0]);

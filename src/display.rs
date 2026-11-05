@@ -65,20 +65,47 @@ impl Display {
     }
     /// Fullscreen has no OS title bar, so keep its window actions in the app menu bar.
     pub fn window_controls(&mut self, ui: &mut egui::Ui) {
-        if !self.fullscreen {
-            return;
-        }
         // The parent lays these out right-to-left, matching Windows caption order.
         if caption_button(ui, Caption::Close).clicked() {
             // Use the native close-request path, including existing unsaved-work checks.
             ui.ctx().send_viewport_cmd(Cmd::Close);
         }
         if caption_button(ui, Caption::Restore).clicked() {
-            self.fullscreen = false;
-            ui.ctx().request_repaint();
+            self.maximize_or_restore(ui.ctx());
         }
         if caption_button(ui, Caption::Minimize).clicked() {
             ui.ctx().send_viewport_cmd(Cmd::Minimized(true));
+        }
+    }
+    fn maximize_or_restore(&mut self, ctx: &Context) {
+        if self.fullscreen { self.fullscreen = false; }
+        else { ctx.send_viewport_cmd(Cmd::Maximized(!ctx.input(|i| i.viewport().maximized.unwrap_or(false)))); }
+        ctx.request_repaint();
+    }
+    pub fn title_drag(&mut self, ui: &mut egui::Ui, rect: egui::Rect) {
+        let response = ui.interact(rect, ui.id().with("window_title_drag"), egui::Sense::click_and_drag());
+        if !self.fullscreen {
+            if response.double_clicked() { self.maximize_or_restore(ui.ctx()); }
+            else if response.drag_started() { ui.ctx().send_viewport_cmd(Cmd::StartDrag); }
+        }
+    }
+    pub fn resize_edges(&self, ctx: &Context) {
+        if self.fullscreen || ctx.input(|i| i.viewport().maximized.unwrap_or(false)) { return; }
+        let r = ctx.screen_rect();
+        if let Some(p) = ctx.input(|i| i.pointer.hover_pos()) {
+            let left=p.x < r.left()+5.0; let right=p.x > r.right()-5.0;
+            let top=p.y < r.top()+5.0; let bottom=p.y > r.bottom()-5.0;
+            use egui::ResizeDirection::*;
+            let direction=match (left,right,top,bottom) {
+                (true,_,true,_)=>Some(NorthWest), (_,true,true,_)=>Some(NorthEast),
+                (true,_,_,true)=>Some(SouthWest), (_,true,_,true)=>Some(SouthEast),
+                (true,_,_,_)=>Some(West), (_,true,_,_)=>Some(East),
+                (_,_,true,_)=>Some(North), (_,_,_,true)=>Some(South), _=>None,
+            };
+            if let Some(direction)=direction {
+                ctx.set_cursor_icon(match direction { North|South=>egui::CursorIcon::ResizeVertical, East|West=>egui::CursorIcon::ResizeHorizontal, NorthWest|SouthEast=>egui::CursorIcon::ResizeNwSe, _=>egui::CursorIcon::ResizeNeSw });
+                if ctx.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary)) {ctx.send_viewport_cmd(Cmd::BeginResize(direction));}
+            }
         }
     }
     pub fn toggle(&mut self) {self.fullscreen=!self.fullscreen;}
@@ -116,7 +143,7 @@ impl Display {
             // On startup eframe restores native placement and mode; override only mode.
             ctx.send_viewport_cmd(Cmd::Fullscreen(self.fullscreen));
             if !self.fullscreen {
-                ctx.send_viewport_cmd(Cmd::Decorations(true));
+                ctx.send_viewport_cmd(Cmd::Decorations(false));
                 if self.applied.is_some() || ctx.input(|i| i.viewport().fullscreen == Some(true)) {
                     self.restore_frames = 3;
                 }
@@ -148,12 +175,13 @@ enum Caption {
 fn caption_button(ui: &mut egui::Ui, caption: Caption) -> egui::Response {
     let label = match caption {
         Caption::Minimize => "Minimize",
-        Caption::Restore => "Restore window (leave fullscreen)",
+        Caption::Restore => "Maximize / restore window",
         Caption::Close => "Close PixelForge",
     };
-    let response = ui
-        .add_sized(egui::vec2(28.0, 22.0), egui::Button::new(""))
-        .on_hover_text(label);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(28.0, 22.0), egui::Sense::click());
+    let response = response.on_hover_text(label);
+    let visuals = ui.style().interact(&response);
+    ui.painter().rect(rect, 3.0, visuals.bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     let painter = ui.painter();
     let center = response.rect.center();

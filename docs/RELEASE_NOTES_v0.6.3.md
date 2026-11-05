@@ -220,3 +220,9 @@ build since Dev intentionally does not use the release updater.
 - Settings cannot collapse; its close button remains available.
 - Fullscreen caption buttons are smaller, and the compact + tab menu offers New Blank Project, Open Image, and Open Project.
 - Validation: 139 automated tests passed, one ignored; release dev build completed.
+
+### Unified custom window bar
+
+- Windowed and fullscreen modes share aligned caption controls without the native title strip. Windowed mode supports title dragging, double-click maximize/restore, and edge resizing.
+- Bold Pixel Forge stays centered; the version sits immediately to its right. The tab menu button has more padding and a centered plus.
+- Validation: 139 tests passed, one ignored; dev build and visual top-bar check completed.
