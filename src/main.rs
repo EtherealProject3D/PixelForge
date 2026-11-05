@@ -6581,13 +6581,12 @@ impl eframe::App for PixelForge {
             let title=ui.painter().layout_no_wrap("Pixel Forge".into(),egui::TextStyle::Button.resolve(ui.style()),ui.visuals().text_color());
             let title_pos=egui::pos2(ctx.screen_rect().center().x-title.size().x/2.0,bar.top()+(ui.spacing().interact_size.y-title.size().y)/2.0);
             let left_width=(title_pos.x-bar.left()-12.0).max(100.0);
-            // Register the background drag target before menus and caption buttons,
-            // so actual buttons retain priority and all unused title-bar space drags.
-            self.display.title_drag(ui,egui::Rect::from_min_max(bar.min,egui::pos2((bar.right()-112.0).max(bar.left()),bar.top()+28.0)));
+            let mut menu_content_end = bar.left();
             ui.horizontal(|ui| {
             ui.set_min_height(28.0);
             ui.allocate_ui_with_layout(egui::vec2(left_width,ui.spacing().interact_size.y),egui::Layout::left_to_right(egui::Align::Center),|ui| {
             egui::ScrollArea::horizontal().id_salt("top_bar_menus").max_width(left_width)
+                .scroll_source(egui::scroll_area::ScrollSource { drag: false, ..Default::default() })
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui,|ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 ui.menu_button("File", |ui| {
@@ -6690,6 +6689,7 @@ impl eframe::App for PixelForge {
                 if self.project_dirty {
                     ui.colored_label(egui::Color32::YELLOW, "* Unsaved changes");
                 }
+                menu_content_end = ui.next_widget_position().x.min(bar.left()+left_width);
             });
             });
             });
@@ -6698,6 +6698,11 @@ impl eframe::App for PixelForge {
             let title_pos=egui::pos2(title_pos.x, bar.top()+(28.0-title.size().y)/2.0);
             let title_right=title_pos.x+title.size().x;
             let controls_left=bar.right()-112.0;
+            // Register this explicit target after the menu's child UI, using the
+            // actual last menu item rather than its much wider allocated space.
+            if menu_content_end < controls_left {
+                self.display.title_drag(ui,egui::Rect::from_min_max(egui::pos2(menu_content_end,bar.top()+5.0),egui::pos2(controls_left,bar.top()+28.0)));
+            }
             ui.painter().galley(title_pos,title.clone(),ui.visuals().strong_text_color());
             ui.painter().galley(title_pos+egui::vec2(0.8,0.0),title.clone(),ui.visuals().strong_text_color());
             ui.painter().galley(title_pos+egui::vec2(0.0,0.25),title,ui.visuals().strong_text_color());

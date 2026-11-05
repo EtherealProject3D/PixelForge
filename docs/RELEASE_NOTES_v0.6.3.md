@@ -254,3 +254,10 @@ build since Dev intentionally does not use the release updater.
 - Register the full unused title-bar background as a drag target before menus and caption buttons; blank space to the left of the title now participates.
 - On native monitor-scale changes in normal windowed mode, retain the previous physical window dimensions, bounded to 90% of the destination monitor, and avoid persisting intermediate geometry while the change settles.
 - Validation: 145 tests passed, one ignored; dev build completed. Actual laptop-to-external-monitor movement remains to be verified on the user setup.
+
+### Window dragging rework
+
+- Disable drag-to-scroll in the top menu and register the blank title-bar target after its child menu UI, beginning after the actual last menu item. Verified double-click maximize/restore in the blank region left of the title.
+- Windows title dragging now follows physical desktop cursor coordinates and a fixed starting-size snapshot instead of the native move/DPI loop. Apply a final movement on mouse release and suspend geometry persistence while movement settles.
+- Remove the earlier competing size correction on native DPI changes.
+- Validation: 145 tests passed, one ignored; dev rebuild completed. User verification of cross-monitor dragging is still required.

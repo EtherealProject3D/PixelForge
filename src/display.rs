@@ -10,11 +10,32 @@ pub struct Display {
     startup_prepared: bool,
     startup_frames: u8,
     last_native_scale: Option<f32>,
+    dragging: Option<WindowDrag>,
     scale_settle_frames: u8,
     maximized: bool,
     restore_frames: u8,
     error: String,
 }
+#[derive(Clone, Copy)]
+struct WindowDrag {
+    pointer: egui::Vec2,
+    origin: egui::Vec2,
+    size: egui::Vec2,
+}
+impl WindowDrag {
+    fn position(self, pointer: egui::Vec2) -> egui::Vec2 { self.origin + pointer - self.pointer }
+}
+#[cfg(windows)]
+fn desktop_pointer() -> Option<(egui::Vec2, bool)> {
+    use windows::Win32::{Foundation::POINT, UI::{WindowsAndMessaging::GetCursorPos, Input::KeyboardAndMouse::GetAsyncKeyState}};
+    let mut point = POINT::default();
+    unsafe {
+        GetCursorPos(&mut point).ok()?;
+        Some((egui::vec2(point.x as f32, point.y as f32), GetAsyncKeyState(1) < 0))
+    }
+}
+#[cfg(not(windows))]
+fn desktop_pointer() -> Option<(egui::Vec2, bool)> { None }
 impl Display {
     pub fn load() -> Self {
         let mut state = Self::default();
@@ -110,11 +131,25 @@ impl Display {
         let response = ui.interact(rect, ui.id().with("window_title_drag"), egui::Sense::click_and_drag());
         if !self.fullscreen {
             if response.double_clicked() { self.maximize_or_restore(ui.ctx()); }
-            else if response.drag_started_by(egui::PointerButton::Primary) { ui.ctx().send_viewport_cmd(Cmd::StartDrag); }
+            else if response.drag_started_by(egui::PointerButton::Primary) {
+                if let Some((pointer,_)) = desktop_pointer() {
+                    let viewport = ui.input(|i| i.viewport().clone());
+                    if viewport.maximized == Some(true) {
+                        self.maximize_or_restore(ui.ctx());
+                    } else if let (Some(outer),Some(inner)) = (viewport.outer_rect,viewport.inner_rect) {
+                        let scale = ui.ctx().pixels_per_point();
+                        let pointer_start = ui.input(|i| i.pointer.press_origin()).map(|p| outer.min.to_vec2()*scale + p.to_vec2()*scale).unwrap_or(pointer);
+                        self.dragging = Some(WindowDrag {pointer:pointer_start, origin:outer.min.to_vec2()*scale, size:inner.size()*scale});
+                        ui.ctx().request_repaint();
+                    }
+                }
+                #[cfg(not(windows))]
+                ui.ctx().send_viewport_cmd(Cmd::StartDrag);
+            }
         }
     }
     pub fn resize_edges(&self, ctx: &Context) {
-        if self.fullscreen || ctx.input(|i| i.viewport().maximized.unwrap_or(false)) { return; }
+        if self.fullscreen || self.dragging.is_some() || ctx.input(|i| i.viewport().maximized.unwrap_or(false)) { return; }
         let r = ctx.screen_rect();
         if let Some(p) = ctx.input(|i| i.pointer.hover_pos()) {
             // Native moves can deliver positions outside the client area, especially
@@ -144,6 +179,24 @@ impl Display {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
             self.fullscreen = !self.fullscreen;
         }
+        if let Some(drag) = self.dragging {
+            if !self.fullscreen && let Some((pointer,held)) = desktop_pointer() {
+                let scale = ctx.pixels_per_point();
+                let position = drag.position(pointer) / scale;
+                ctx.send_viewport_cmd(Cmd::OuterPosition(egui::pos2(position.x,position.y)));
+                // Avoid Windows' native move/DPI size loop. Keep physical dimensions
+                // stable using the original drag snapshot rather than intermediate frames.
+                let current_size = ctx.input(|i| i.viewport().inner_rect.map(|r|r.size()*scale));
+                if current_size.is_some_and(|size| (size-drag.size).length() > 2.0) {
+                    ctx.send_viewport_cmd(Cmd::InnerSize(drag.size/scale));
+                }
+                if !held { self.dragging = None; self.scale_settle_frames = 4; }
+                ctx.request_repaint();
+                return;
+            }
+            self.dragging = None;
+            self.scale_settle_frames = 4;
+        }
         // Position a normal window on the saved display before asking Windows to
         // enter fullscreen/maximized mode, which always uses the current monitor.
         if self.applied.is_none() && !self.startup_prepared {
@@ -170,18 +223,8 @@ impl Display {
         let viewport = ctx.input(|i| i.viewport().clone());
         if let Some(native_scale) = viewport.native_pixels_per_point {
             let changed = self.last_native_scale.replace(native_scale).is_some_and(|old| (old-native_scale).abs()>0.001);
-            if changed && self.applied == Some(false) && !self.fullscreen && viewport.maximized != Some(true) && self.restore_frames == 0 {
-                if let Some([_,_,w,h]) = self.placement {
-                    // Keep the previous physical footprint when Windows changes DPI.
-                    // Do not persist the intermediate geometry from that transition.
-                    let scale = ctx.pixels_per_point();
-                    let size = fit_window_size(egui::vec2(w,h), viewport.monitor_size.map(|m|m*scale));
-                    ctx.send_viewport_cmd(Cmd::InnerSize(size / scale));
-                    self.scale_settle_frames = 4;
-                    ctx.request_repaint();
-                    return;
-                }
-            }
+            if changed { self.scale_settle_frames = 4; }
+
         }
         if self.scale_settle_frames > 0 {
             self.scale_settle_frames -= 1;
@@ -254,11 +297,6 @@ impl Display {
         }
     }
 }
-fn fit_window_size(size: egui::Vec2, monitor: Option<egui::Vec2>) -> egui::Vec2 {
-    if let Some(monitor) = monitor.filter(|m| m.is_finite() && m.x > 0.0 && m.y > 0.0) {
-        size.min(monitor * 0.9)
-    } else { size }
-}
 #[derive(Clone, Copy)]
 enum Caption {
     Minimize,
@@ -328,7 +366,7 @@ fn valid_placement(v: [f32; 4]) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn dpi_change_preserves_saved_size_instead_of_expanded_intermediate_geometry() {
+    fn dpi_change_does_not_issue_competing_resize_commands_or_save_intermediate_geometry() {
         let ctx = Context::default();
         let mut display = Display {
             applied: Some(false), last_native_scale: Some(1.5),
@@ -342,9 +380,11 @@ mod tests {
         viewport.inner_rect = Some(egui::Rect::from_min_size(egui::pos2(100.0,100.0),egui::vec2(4502.0,1539.0)));
         viewport.outer_rect = viewport.inner_rect;
         let output = ctx.run(input, |ctx| display.update(ctx));
-        assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.contains(&Cmd::InnerSize(egui::vec2(1200.0,800.0))));
+        assert!(!output.viewport_output[&egui::ViewportId::ROOT].commands.iter().any(|c|matches!(c,Cmd::InnerSize(_))));
         assert_eq!(display.placement, Some([80.0,80.0,1200.0,800.0]));
-        assert_eq!(fit_window_size(egui::vec2(4502.0,1539.0),Some(egui::vec2(1920.0,1080.0))),egui::vec2(1728.0,972.0));
+        let drag = WindowDrag { pointer:egui::vec2(500.0,200.0), origin:egui::vec2(100.0,100.0), size:egui::vec2(1200.0,800.0) };
+        assert_eq!(drag.position(egui::vec2(-1000.0,300.0)),egui::vec2(-1400.0,200.0));
+        assert_eq!(drag.size,egui::vec2(1200.0,800.0));
     }
     #[test]
     fn pointer_outside_window_cannot_start_native_resize() {
