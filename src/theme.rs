@@ -25,11 +25,31 @@ pub fn apply(ctx: &egui::Context) {
     visuals.collapsing_header_frame = true;
     visuals.slider_trailing_fill = true;
     for (widget, fill, border) in [
-        (&mut visuals.widgets.noninteractive, PANEL, Color32::from_rgb(53, 64, 80)),
-        (&mut visuals.widgets.inactive, Color32::from_rgb(43, 53, 68), Color32::from_rgb(68, 83, 103)),
-        (&mut visuals.widgets.hovered, Color32::from_rgb(54, 73, 96), Color32::from_rgb(114, 170, 228)),
-        (&mut visuals.widgets.active, Color32::from_rgb(42, 88, 137), Color32::from_rgb(131, 194, 255)),
-        (&mut visuals.widgets.open, Color32::from_rgb(43, 61, 82), Color32::from_rgb(98, 147, 199)),
+        (
+            &mut visuals.widgets.noninteractive,
+            PANEL,
+            Color32::from_rgb(53, 64, 80),
+        ),
+        (
+            &mut visuals.widgets.inactive,
+            Color32::from_rgb(43, 53, 68),
+            Color32::from_rgb(68, 83, 103),
+        ),
+        (
+            &mut visuals.widgets.hovered,
+            Color32::from_rgb(54, 73, 96),
+            Color32::from_rgb(114, 170, 228),
+        ),
+        (
+            &mut visuals.widgets.active,
+            Color32::from_rgb(42, 88, 137),
+            Color32::from_rgb(131, 194, 255),
+        ),
+        (
+            &mut visuals.widgets.open,
+            Color32::from_rgb(43, 61, 82),
+            Color32::from_rgb(98, 147, 199),
+        ),
     ] {
         widget.bg_fill = fill;
         widget.weak_bg_fill = fill;
@@ -48,9 +68,89 @@ pub fn apply(ctx: &egui::Context) {
 pub fn section(ui: &mut egui::Ui, title: &str) {
     ui.horizontal(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(3.0, 19.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 2, Color32::from_rgb(116, 183, 255));
+        ui.painter()
+            .rect_filled(rect, 2, Color32::from_rgb(116, 183, 255));
         ui.heading(egui::RichText::new(title).color(TEXT).strong());
     });
+}
+
+/// Edit-panel section heading: accent bar, title, then the disclosure arrow.
+pub fn collapsible_section<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    collapsible_section_reveal(ui, title, false, body)
+}
+
+pub fn collapsible_section_reveal<R>(
+    ui: &mut egui::Ui,
+    title: &str,
+    reveal: bool,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> Option<R> {
+    let id = ui.make_persistent_id(("edit_section", title));
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+    if reveal { state.set_open(true); }
+    let text = ui.painter().layout_no_wrap(
+        title.into(),
+        egui::TextStyle::Heading.resolve(ui.style()),
+        TEXT,
+    );
+    let height = (text.size().y + 6.0).max(ui.spacing().interact_size.y);
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), height),
+        egui::Sense::click(),
+    );
+    if response.clicked() {
+        state.toggle(ui);
+    }
+    response.widget_info(|| {
+        egui::WidgetInfo::selected(
+            egui::WidgetType::CollapsingHeader,
+            ui.is_enabled(),
+            state.is_open(),
+            title,
+        )
+    });
+    if response.hovered() || response.has_focus() {
+        ui.painter()
+            .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+    }
+    let bar = egui::Rect::from_center_size(
+        egui::pos2(rect.left() + 1.5, rect.center().y),
+        egui::vec2(3.0, 19.0),
+    );
+    ui.painter()
+        .rect_filled(bar, 2.0, Color32::from_rgb(116, 183, 255));
+    let pos = egui::pos2(
+        rect.left() + 3.0 + ui.spacing().item_spacing.x,
+        rect.center().y - text.size().y / 2.0,
+    );
+    let center = egui::pos2(
+        pos.x + text.size().x + ui.spacing().item_spacing.x + 5.0,
+        rect.center().y,
+    );
+    ui.painter().galley(pos, text, TEXT);
+    let points = if state.is_open() {
+        vec![
+            center + egui::vec2(-4.0, -2.5),
+            center + egui::vec2(4.0, -2.5),
+            center + egui::vec2(0.0, 3.5),
+        ]
+    } else {
+        vec![
+            center + egui::vec2(-2.5, -4.0),
+            center + egui::vec2(3.5, 0.0),
+            center + egui::vec2(-2.5, 4.0),
+        ]
+    };
+    ui.painter()
+        .add(egui::Shape::convex_polygon(points, TEXT, Stroke::NONE));
+    state
+        .show_body_unindented(ui, body)
+        .map(|response| response.inner)
 }
 
 pub fn primary(label: &str) -> egui::Button<'_> {
@@ -63,14 +163,20 @@ pub fn primary(label: &str) -> egui::Button<'_> {
 mod tests {
     #[test]
     fn system_light_mode_cannot_replace_pixelforge_colors() {
-        let ctx=egui::Context::default();
+        let ctx = egui::Context::default();
         super::apply(&ctx);
-        for system_theme in [egui::Theme::Light,egui::Theme::Dark,egui::Theme::Light] {
-            let _=ctx.run(egui::RawInput {system_theme:Some(system_theme),..Default::default()},|ctx| {
-                assert!(ctx.style().visuals.dark_mode);
-                assert_eq!(ctx.style().visuals.panel_fill,super::PANEL);
-                assert_eq!(ctx.style().visuals.selection.bg_fill,super::ACCENT);
-            });
+        for system_theme in [egui::Theme::Light, egui::Theme::Dark, egui::Theme::Light] {
+            let _ = ctx.run(
+                egui::RawInput {
+                    system_theme: Some(system_theme),
+                    ..Default::default()
+                },
+                |ctx| {
+                    assert!(ctx.style().visuals.dark_mode);
+                    assert_eq!(ctx.style().visuals.panel_fill, super::PANEL);
+                    assert_eq!(ctx.style().visuals.selection.bg_fill, super::ACCENT);
+                },
+            );
         }
     }
 }

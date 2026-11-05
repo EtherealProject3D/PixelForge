@@ -2937,13 +2937,15 @@ dependencies = [
 
 [[package]]
 name = "pixelforge"
-version = "0.6.2"
+version = "0.6.3"
 dependencies = [
+ "arboard",
  "ash",
  "eframe",
  "egui",
  "fs2",
  "image",
+ "raw-window-handle",
  "reqwest",
  "rfd",
  "serde_json",

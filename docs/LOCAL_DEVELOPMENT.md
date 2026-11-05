@@ -1,7 +1,7 @@
 # Installed release and development copy
 
 - **PixelForge**: installed release in `C:\Program Files\Pixel Forge`, opened from its normal desktop/Start menu shortcuts. Uses published releases and the in-app updater.
-- **PixelForge Dev**: the source checkout, opened by `scripts\Launch-PixelForge.vbs` or `scripts\Run-PixelForge.ps1`. The launcher builds the current local checkout before opening it and sets `PIXELFORGE_DEV=1`.
+- **PixelForge Dev**: the source checkout, opened by `scripts\Launch-PixelForge.vbs` or `scripts\Run-PixelForge.ps1`. The launcher builds the current local checkout when its source, assets, or build inputs are newer than the executable, then opens it and sets `PIXELFORGE_DEV=1`.
 
 Development windows are titled **PixelForge Dev v…**. Window placement, mouse/UI controls, and sidebar preferences are stored separately under `%APPDATA%\PixelForgeDev`; the installed release keeps `%APPDATA%\PixelForge`.
 
@@ -19,3 +19,19 @@ cargo run --locked --release
 ```
 
 The flag is inherited only by that process tree; it is not added to Windows system environment settings. The installed app launched from its normal shortcuts runs normally.
+
+## v0.6.3 display testing
+
+Open PixelForge Dev using the existing shortcut. In Settings > Display choose
+Fullscreen, or press F11. The title bar and taskbar should disappear across the
+entire current monitor. Press F11 to return to the previous window placement.
+Repeat from a maximized window. Close while fullscreen, reopen, and press F11.
+Check at 150% Windows scaling and on a 32:9 display; change UI scale while
+fullscreen and check that returning to windowed preserves the physical size.
+Native monitor behavior still requires visual hardware verification.
+
+Display mode and the last normal rectangle are stored in display.json in the
+existing profile folder. Existing controls and native window-state files remain.
+The stable installation, models, and ComfyUI environments are not replaced.
+
+The Dev shortcut shows a loading window when a rebuild is required. Current builds launch directly. Repeated clicks while the executable is initializing focus its loading indicator; when it is ready, a second launch asks before opening another instance. The last direct-executable startup duration is recorded in `%APPDATA%\PixelForgeDev\startup-timing.txt`.

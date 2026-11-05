@@ -4,9 +4,9 @@
 
 PixelForge is a Windows desktop image studio that brings local AI generation, conversational editing, photo restoration, and traditional adjustments into one workspace. Generate an image or import a photograph, make changes, and compare every result without switching between separate viewers.
 
-**Version 0.6.2 · Windows x64 · Rust + egui · Local ComfyUI**
+**Version 0.6.3 · Windows x64 · Rust + egui · Local ComfyUI**
 
-[Download v0.6.2](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.2) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
+[Download v0.6.3](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.3) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
 
 ## One workspace, from first image to final export
 
@@ -64,6 +64,8 @@ The in-app **Model Library** provides installation status, downloads, progress, 
 | RealVisXL V5 | Generation, refinement, inpainting |
 | Juggernaut XL v9 | Generation, refinement, inpainting |
 | CyberRealisticPony v18 | Generation, refinement, inpainting |
+| CyberRealistic XL v10 FP16 (v0.6.3 development) | Generation, refinement, inpainting |
+| CyberRealistic Z-Image Turbo v4 (v0.6.3 development) | Generation; 9 steps, CFG 1 |
 | FLUX.2 Klein 4B FP8 | Generation, instruction editing, AI Restore |
 | Qwen-Image-Edit 2509 FP8 | Instruction editing, AI Restore |
 | Qwen-Image-Edit 2511 FP8 | Instruction editing, AI Restore |

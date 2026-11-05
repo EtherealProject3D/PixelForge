@@ -20,6 +20,8 @@ pub struct Request {
 pub const QWEN_EDIT: &str = "Qwen-Image-Edit 2509 (FP8)";
 pub const QWEN_EDIT_2511: &str = "Qwen-Image-Edit 2511 (FP8)";
 pub const FLUX_KLEIN: &str = "FLUX.2 Klein 4B (FP8)";
+pub const Z_IMAGE: &str = "CyberRealistic Z-Image Turbo v4";
+const Z_IMAGE_UNET: &str = "CyberRealistic_zit_v4.0.safetensors";
 const QWEN_2511_UNET: &str = "qwen_image_edit_2511_fp8mixed.safetensors";
 const FLUX_UNET: &str = "flux-2-klein-4b-fp8.safetensors";
 const FLUX_CLIP: &str = "qwen_3_4b.safetensors";
@@ -30,6 +32,34 @@ const QWEN_VAE: &str = "qwen_image_vae.safetensors";
 
 pub fn is_qwen(model:&str)->bool {model==QWEN_EDIT || model==QWEN_EDIT_2511}
 pub fn is_instruction_model(model:&str)->bool {is_qwen(model)||model==FLUX_KLEIN}
+pub fn ignores_negative(model:&str)->bool {model==FLUX_KLEIN || model==Z_IMAGE}
+
+fn z_image_workflow(prompt:&str,seed:u64,steps:u32,width:u32,height:u32)->Value {
+    json!({
+        "1":{"class_type":"UNETLoader","inputs":{"unet_name":Z_IMAGE_UNET,"weight_dtype":"default"}},
+        "2":{"class_type":"CLIPLoader","inputs":{"clip_name":FLUX_CLIP,"type":"lumina2","device":"default"}},
+        "3":{"class_type":"VAELoader","inputs":{"vae_name":"ae.safetensors"}},
+        "4":{"class_type":"EmptySD3LatentImage","inputs":{"width":width,"height":height,"batch_size":1}},
+        "8":{"class_type":"CLIPTextEncode","inputs":{"clip":["2",0],"text":prompt}},
+        "9":{"class_type":"ConditioningZeroOut","inputs":{"conditioning":["8",0]}},
+        "10":{"class_type":"ModelSamplingAuraFlow","inputs":{"model":["1",0],"shift":3.0}},
+        "5":{"class_type":"KSampler","inputs":{"model":["10",0],"positive":["8",0],"negative":["9",0],"latent_image":["4",0],"seed":seed,"steps":steps,"cfg":1.0,"sampler_name":"res_multistep","scheduler":"simple","denoise":1.0}},
+        "6":{"class_type":"VAEDecode","inputs":{"samples":["5",0],"vae":["3",0]}},
+        "7":{"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge_ZImage","images":["6",0]}}
+    })
+}
+
+fn validate_z_image_nodes(info:&Value)->Result<(),String> {
+    for node in ["UNETLoader","CLIPLoader","VAELoader","EmptySD3LatentImage","ModelSamplingAuraFlow","ConditioningZeroOut","CLIPTextEncode","KSampler","VAEDecode","SaveImage"] {
+        if info.get(node).is_none() {return Err(format!("Z-Image Turbo needs ComfyUI node {node}. Update ComfyUI from Dependencies."));}
+    }
+    for (node,input,value) in [("UNETLoader","unet_name",Z_IMAGE_UNET),("CLIPLoader","clip_name",FLUX_CLIP),("VAELoader","vae_name","ae.safetensors"),("CLIPLoader","type","lumina2"),("KSampler","sampler_name","res_multistep"),("KSampler","scheduler","simple")] {
+        if !info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|name.as_str()==Some(value))) {
+            return Err(format!("Z-Image Turbo needs {input}: {value}. Install the complete bundle in Model Library, refresh models, and update/restart ComfyUI if needed."));
+        }
+    }
+    Ok(())
+}
 fn qwen_unet(model:&str)->&'static str {if model==QWEN_EDIT_2511 {QWEN_2511_UNET} else {QWEN_UNET}}
 
 fn qwen_workflow(filename: &str, prompt: &str, negative: &str, seed: u64, steps: u32, model:&str) -> Value {
@@ -182,55 +212,42 @@ pub fn ensure_server() -> Result<(), String> {
         if child.try_wait().map_err(|e| e.to_string())?.is_some() { *owned = None; }
     }
     if owned.is_none() {
-        let managed=crate::dependencies::active_path(crate::dependencies::Component::Comfy);
-        let mut command=if let Some(folder)=managed {
-            let mut command=Command::new(folder.join("python_embeded/python.exe"));
-            command.current_dir(&folder).arg("-s").arg("ComfyUI/main.py").arg("--windows-standalone-build");
-            let models=crate::dependencies::root().join("models");
-            std::fs::create_dir_all(&models).map_err(|e|e.to_string())?;
-            let config=crate::dependencies::root().join("extra-model-paths.yaml");
+        let config = crate::backend::Config::load();
+        let folder = config.resolve()?;
+        let runtime = crate::compatibility::probe(&folder)?;
+        // Non-NVIDIA installations keep their existing launcher behavior.
+        if runtime["cuda"].is_string() {
+            crate::compatibility::preflight(&runtime, &config.mode)?;
+        } else if config.mode == "legacy" || config.mode == "modern" {
+            return Err("Selected NVIDIA backend has no CUDA runtime. Open Dependencies and choose a matching package.".into());
+        }
+        let mut command = Command::new(crate::compatibility::python(&folder).ok_or("Backend Python missing")?);
+        command.current_dir(&folder).arg("-s").arg("ComfyUI/main.py");
+        if folder.join("python_embeded/python.exe").is_file() {command.arg("--windows-standalone-build");}
+        if config.mode == "legacy" || crate::compatibility::selected_device(&runtime)
+            .and_then(|d|d["capability"][0].as_u64()).is_some_and(|major|major<=6) {
+            command.args(["--force-fp32", "--use-pytorch-cross-attention"]);
+        }
+        let settings = crate::profile::settings_root().ok_or("APPDATA unavailable")?;
+        std::fs::create_dir_all(&settings).map_err(|e|e.to_string())?;
+        let mut model_configs = Vec::new();
+        let models = crate::dependencies::root().join("models");
+        if models.is_dir() {
+            let config = settings.join("extra-model-paths.yaml");
             let yaml=serde_yaml::to_string(&serde_json::json!({"pixelforge":{"base_path":models,"checkpoints":"checkpoints","diffusion_models":"diffusion_models","text_encoders":"text_encoders","vae":"vae"}})).map_err(|e|e.to_string())?;
             std::fs::write(&config,yaml).map_err(|e|e.to_string())?;
-            command.arg("--extra-model-paths-config").arg(config);
-            // Reuse the Desktop model paths as well when present.
-            if let Some(roaming)=std::env::var_os("APPDATA") {
-                if let Ok(entries)=std::fs::read_dir(PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths")) {
-                    let mut files:Vec<_>=entries.flatten().map(|e|e.path()).filter(|p|p.extension().is_some_and(|e|e=="yaml")).collect();files.sort();
-                    if let Some(config)=files.first() {command.arg(config);}
-                }
-            }
-            command
-        } else {
-        let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA is unavailable")?;
-        let root = PathBuf::from(local).join("Comfy-Desktop/ComfyUI-Installs");
-        let roaming = std::env::var_os("APPDATA").ok_or("APPDATA is unavailable")?;
-        let configs = PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths");
-        let mut installs: Vec<_> = std::fs::read_dir(&root)
-            .map_err(|e| format!("ComfyUI installation not found: {e}. Open Dependencies to install ComfyUI"))?
-            .filter_map(Result::ok).map(|e| e.path())
-            .filter(|p| p.join("ComfyUI/main.py").is_file()
-                && p.join("ComfyUI/.venv/Scripts/python.exe").is_file()).collect();
-        installs.sort();
-        let install = installs.into_iter().next().ok_or(
-            "No ComfyUI Python backend found. Open Dependencies to install ComfyUI, or install ComfyUI Desktop."
-        )?;
-        let mut command = Command::new(install.join("ComfyUI/.venv/Scripts/python.exe"));
-        command.current_dir(&install)
-            .arg("-s").arg("ComfyUI/main.py")
-            .stdout(Stdio::null()).stderr(Stdio::null())
-            .stdin(Stdio::null());
-        if let Ok(entries) = std::fs::read_dir(&configs) {
-            let mut files: Vec<_> = entries.filter_map(Result::ok).map(|e| e.path())
-                .filter(|p| p.extension().is_some_and(|e| e == "yaml")).collect();
-            files.sort();
-            if let Some(config) = files.first() {
-                command.arg("--extra-model-paths-config").arg(config);
+            model_configs.push(config);
+        }
+        if let Some(roaming)=std::env::var_os("APPDATA") {
+            if let Ok(entries)=std::fs::read_dir(PathBuf::from(roaming).join("Comfy Desktop/instance-model-paths")) {
+                let mut files:Vec<_>=entries.flatten().map(|e|e.path()).filter(|p|p.extension().is_some_and(|e|e=="yaml")).collect();files.sort();
+                if let Some(config)=files.first() {command.arg("--extra-model-paths-config").arg(config);}
             }
         }
-            command
-        };
+        if !model_configs.is_empty() {command.arg("--extra-model-paths-config").args(model_configs);}
+        let log = std::fs::File::create(settings.join("backend.log")).map_err(|e|e.to_string())?;
         command.arg("--disable-auto-launch").arg("--listen").arg("127.0.0.1").arg("--port").arg("8188")
-            .stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
+            .stdout(log.try_clone().map_err(|e|e.to_string())?).stderr(log).stdin(Stdio::null());
         #[cfg(windows)] {use std::os::windows::process::CommandExt;command.creation_flags(0x08000000);}
         *owned = Some(command.spawn().map_err(|e| format!("Cannot start ComfyUI backend: {e}"))?);
     }
@@ -242,11 +259,13 @@ pub fn ensure_server() -> Result<(), String> {
         if let Some(child) = owned.as_mut() {
             if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
                 *owned = None;
-                return Err(format!("ComfyUI backend exited during startup ({status}). Start it in ComfyUI Desktop to inspect the error."));
+                let path=crate::profile::settings_root().ok_or("APPDATA unavailable")?.join("backend.log");
+                let raw=std::fs::read_to_string(&path).unwrap_or_default();
+                return Err(format!("Backend exited ({status}). Log: {}\n{}",path.display(),crate::compatibility::actionable(&raw)));
             }
         }
     }
-    Err("ComfyUI did not become ready within 90 seconds. Check ComfyUI Desktop.".into())
+    Err("ComfyUI did not become ready within 90 seconds. Inspect backend.log in the PixelForge profile and run GPU diagnostics in Dependencies.".into())
 }
 
 pub fn stop_managed_backend() {
@@ -275,18 +294,33 @@ impl Drop for ProgressStop {
     fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); }
 }
 
+fn valid_dimensions(width:u32,height:u32)->bool {
+    (256..=4096).contains(&width) && (256..=4096).contains(&height) && width%16==0 && height%16==0
+}
+#[cfg(test)]
+mod dimension_tests {
+    #[test] fn generator_accepts_finer_grid_and_rejects_invalid_dimensions() {
+        for (w,h) in [(1024,576),(1024,672),(1024,688),(288,1024)] {assert!(super::valid_dimensions(w,h));}
+        for (w,h) in [(1023,576),(1024,250),(4097,1024)] {assert!(!super::valid_dimensions(w,h));}
+    }
+}
 pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sync::atomic::AtomicU32>) -> Result<image::RgbaImage, String> {
     ensure_server()?;
     if request.prompt.trim().is_empty() { return Err("Enter a generation prompt".into()); }
     if request.checkpoint.trim().is_empty() { return Err("Select a local checkpoint".into()); }
-    if !(256..=4096).contains(&request.width) || !(256..=4096).contains(&request.height)
-        || request.width % 64 != 0 || request.height % 64 != 0 {
-        return Err("Dimensions must be multiples of 64, between 256 and 4096".into());
+    if !valid_dimensions(request.width,request.height) {
+        return Err("Dimensions must be multiples of 16, between 256 and 4096".into());
     }
     if cancel.load(Ordering::Relaxed) { return Err("Generation cancelled".into()); }
     if !(1..=100).contains(&request.steps) {return Err("Steps must be between 1 and 100".into());}
     let qwen = is_qwen(&request.checkpoint);
     let flux=request.checkpoint==FLUX_KLEIN;
+    let z_image=request.checkpoint==Z_IMAGE;
+    if z_image {
+        if request.source.is_some() {return Err("Z-Image Turbo currently supports new image generation. Choose FLUX or Qwen for edits.".into());}
+        let info:Value=client()?.get(format!("{BASE}/object_info")).send().map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json().map_err(|e|e.to_string())?;
+        validate_z_image_nodes(&info)?;
+    }
     if qwen {
         if request.source.is_none() { return Err("Qwen Edit requires an existing image. Use a generation checkpoint to create one first.".into()); }
         let info: Value = client()?.get(format!("{BASE}/object_info")).send().map_err(|e| e.to_string())?.error_for_status().map_err(|e| e.to_string())?.json().map_err(|e| e.to_string())?;
@@ -309,6 +343,7 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         "7": {"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge","images":["6",0]}}
     });
     if flux {workflow=flux_workflow(None,&request.prompt,request.seed,request.steps,request.width,request.height);}
+    if z_image {workflow=z_image_workflow(&request.prompt,request.seed,request.steps,request.width,request.height);}
     let http = client()?;
 
     if let Some(source) = request.source.as_ref() {
@@ -425,7 +460,7 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
             .json().map_err(|e| e.to_string())?;
         if let Some(job) = history.get(&id) {
             if job.pointer("/status/status_str").and_then(Value::as_str) == Some("error") {
-                return Err(format!("ComfyUI generation failed: {}", job["status"]));
+                return Err(crate::compatibility::actionable(&format!("ComfyUI generation failed: {}", job["status"])));
             }
             if let Some(images) = job.pointer("/outputs/7/images").and_then(Value::as_array) {
                 if let Some(first) = images.first() {
@@ -490,6 +525,34 @@ mod qwen_tests {
 #[cfg(test)]
 mod local_model_tests {
     use super::*;
+    #[test]
+    fn z_image_graph_uses_its_own_loaders_and_distilled_sampling() {
+        let graph=z_image_workflow("portrait",123,9,1024,768);
+        assert_eq!(graph["1"]["inputs"]["unet_name"],Z_IMAGE_UNET);
+        assert_eq!(graph["2"]["inputs"]["type"],"lumina2");
+        assert_eq!(graph["3"]["inputs"]["vae_name"],"ae.safetensors");
+        assert_eq!(graph["4"]["class_type"],"EmptySD3LatentImage");
+        assert_eq!(graph["4"]["inputs"]["width"],1024);
+        assert_eq!(graph["4"]["inputs"]["height"],768);
+        assert_eq!(graph["5"]["inputs"]["model"],json!(["10",0]));
+        assert_eq!(graph["5"]["inputs"]["negative"],json!(["9",0]));
+        assert_eq!(graph["5"]["inputs"]["cfg"],1.0);
+        assert_eq!(graph["5"]["inputs"]["steps"],9);
+        assert_eq!(graph["5"]["inputs"]["seed"],123);
+        assert_eq!(graph["9"]["class_type"],"ConditioningZeroOut");
+        assert!(!is_instruction_model(Z_IMAGE));
+        assert!(ignores_negative(Z_IMAGE));
+    }
+    #[test]
+    fn z_image_validation_detects_missing_files_and_incompatible_backend() {
+        assert!(validate_z_image_nodes(&json!({})).unwrap_err().contains("Update ComfyUI"));
+        let mut info=json!({});
+        for node in ["UNETLoader","CLIPLoader","VAELoader","EmptySD3LatentImage","ModelSamplingAuraFlow","ConditioningZeroOut","CLIPTextEncode","KSampler","VAEDecode","SaveImage"] {info[node]=json!({"input":{"required":{}}});}
+        for (node,input,value) in [("UNETLoader","unet_name",Z_IMAGE_UNET),("CLIPLoader","clip_name",FLUX_CLIP),("VAELoader","vae_name","ae.safetensors"),("CLIPLoader","type","lumina2"),("KSampler","sampler_name","res_multistep"),("KSampler","scheduler","simple")] {info[node]["input"]["required"][input]=json!([[value]]);}
+        assert!(validate_z_image_nodes(&info).is_ok());
+        info["VAELoader"]["input"]["required"]["vae_name"]=json!([[FLUX_VAE]]);
+        assert!(validate_z_image_nodes(&info).unwrap_err().contains("ae.safetensors"));
+    }
     #[test]
     fn qwen_versions_route_to_their_own_weights_and_sampling_shift() {
         for (model,file,shift) in [(QWEN_EDIT,QWEN_UNET,3.0),(QWEN_EDIT_2511,QWEN_2511_UNET,3.1)] {

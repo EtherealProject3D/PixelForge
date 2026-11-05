@@ -739,7 +739,7 @@ fn install_stage(
             return Err("ComfyUI embedded Python missing".into());
         }
         let health = if gpu.starts_with("nvidia") {
-            "import torch,safetensors; assert torch.cuda.is_available(), 'NVIDIA CUDA unavailable: update the GPU driver or choose a compatible package'"
+            "import torch,safetensors; assert torch.cuda.is_available(), 'NVIDIA CUDA unavailable: update the driver or choose a compatible package'; x=torch.ones((16,16),device='cuda'); y=x@x; torch.cuda.synchronize()"
         } else if gpu == "intel" {
             "import torch,safetensors; assert torch.xpu.is_available(), 'Intel GPU unavailable: check the GPU driver'"
         } else {
@@ -828,6 +828,10 @@ pub struct Manager {
     pub message: String,
     pub transfer: Transfer,
     pub gpu: String,
+    pub diagnostics: Option<Value>,
+    diagnostic_rx: Option<std::sync::mpsc::Receiver<Value>>,
+    diagnostic_started: bool,
+    backend: crate::backend::Config,
     rx: Option<std::sync::mpsc::Receiver<Result<Vec<Status>, String>>>,
     scanned: bool,
     inventory: Option<(Option<PathBuf>, Vec<String>)>,
@@ -841,6 +845,10 @@ impl Default for Manager {
             message: String::new(),
             transfer: Transfer::default(),
             gpu: "nvidia".into(),
+            diagnostics: None,
+            diagnostic_rx: None,
+            diagnostic_started: false,
+            backend: crate::backend::Config::load(),
             rx: None,
             scanned: false,
             inventory: None,
@@ -849,6 +857,13 @@ impl Default for Manager {
     }
 }
 impl Manager {
+    fn diagnose(&mut self) {
+        if self.diagnostic_rx.is_some() {return;}
+        let (tx,rx)=std::sync::mpsc::channel();
+        self.diagnostic_rx=Some(rx);
+        self.diagnostic_started=true;
+        std::thread::spawn(move|| {let _=tx.send(crate::compatibility::collect());});
+    }
     pub fn busy(&self) -> bool {
         self.rx.is_some()
     }
@@ -874,6 +889,16 @@ impl Manager {
         });
     }
     pub fn poll(&mut self, ctx: &egui::Context, models: Option<PathBuf>, known: Vec<String>) {
+        #[cfg(not(test))]
+        if !self.diagnostic_started {self.diagnose();}
+        if let Some(rx)=&self.diagnostic_rx {
+            match rx.try_recv() {
+                Ok(report)=> {self.diagnostics=Some(report);self.diagnostic_rx=None;}
+                Err(std::sync::mpsc::TryRecvError::Disconnected)=> {self.diagnostic_rx=None;self.message="GPU diagnostics worker ended".into();}
+                Err(_)=>ctx.request_repaint_after(Duration::from_millis(200)),
+            }
+        }
+
         if !self.busy()
             && (!self.scanned || self.inventory.as_ref() != Some(&(models.clone(), known.clone())))
         {
@@ -929,15 +954,51 @@ impl Manager {
         let mut library = false;
         let mut action = None;
         let mut refresh = false;
-        egui::Window::new("Dependencies").open(&mut open).default_width(650.0).default_height(740.0).default_pos(ctx.screen_rect().center()-egui::vec2(325.0,370.0)).resizable(true).vscroll(true).show(ctx,|ui| {
+        egui::Window::new("Dependencies").collapsible(false).open(&mut open).default_width(650.0).default_height(740.0).default_pos(ctx.screen_rect().center()-egui::vec2(325.0,370.0)).resizable(true).vscroll(true).show(ctx,|ui| {
             ui.heading("PixelForge setup and maintenance");
-            ui.label("Install missing components here. Updates use separate folders and keep the previous installation for rollback. Your existing ComfyUI Desktop setup is left untouched.");
+            crate::interaction::label(ui,"Install missing components here. Updates use separate folders and keep the previous installation for rollback. Your existing ComfyUI Desktop setup is left untouched.");
             ui.horizontal_wrapped(|ui| {
                 if ui.add_enabled(!self.busy(),egui::Button::new("Refresh Status")).clicked() {refresh=true;}
                 if ui.button("Open Model Library").clicked() {library=true;}
             });
-            ui.label("ComfyUI portable hardware:");
-            let hardware=[("nvidia","NVIDIA RTX (recommended)"),("nvidia_cu126","Older NVIDIA GPUs"),("amd","AMD"),("intel","Intel")];
+            ui.collapsing("GPU compatibility and backend selection", |ui| {
+                if let Err(e)=self.backend.ui(ui,!self.busy()&&!workspace_busy) {self.message=e;}
+                if ui.add_enabled(!self.busy()&&!workspace_busy,egui::Button::new("Stop PixelForge-owned backend")).clicked() {
+                    crate::ai_generation::stop_managed_backend();
+                    self.message="Owned backend stopped. Externally started servers were left running. Connect again to apply backend selection.".into();
+                }
+                if ui.add_enabled(self.diagnostic_rx.is_none()&&!workspace_busy,egui::Button::new("Run GPU diagnostics")).clicked() {self.diagnose();}
+                if self.diagnostic_rx.is_some() {ui.spinner();crate::interaction::label(ui,"Reading GPU / Python / running server information…");}
+                if let Some(report)=&self.diagnostics {
+                    crate::interaction::label(ui,report["hardware_columns"].as_str().unwrap_or(""));
+                    crate::interaction::label(ui,report["hardware_csv"].as_str().unwrap_or("Unknown GPU"));
+                    let runtime=&report["python_runtime"];
+                    crate::interaction::label(ui,format!("Selected Python: PyTorch {}, CUDA {}",runtime["torch"],runtime["cuda"]));
+                    if runtime.get("error").is_some() {crate::interaction::label(ui,format!("Runtime diagnostic: {}",runtime["error"]));}
+                    else if runtime["cuda"].is_string() {
+                        match crate::compatibility::preflight(runtime,report["backend_mode"].as_str().unwrap_or("auto")) {
+                            Ok(())=> {crate::interaction::label(ui,"CUDA kernel probe passed. This does not verify model generation.");}
+                            Err(e)=> {ui.colored_label(egui::Color32::YELLOW,e);}
+                        }
+                    }
+                    if let Some(server)=report["running_server"].as_object() {
+                        crate::interaction::label(ui,format!("Running server: PyTorch {}",server.get("system").unwrap_or(&Value::Null)["pytorch_version"]));
+                        if let Some(devices)=server.get("devices").and_then(Value::as_array) {
+                            for device in devices {crate::interaction::label(ui,format!("Serving GPU: {} — {:.1} GiB VRAM",device["name"],device["vram_total"].as_u64().unwrap_or(0) as f64/1_073_741_824.0));}
+                        }
+                    } else {crate::interaction::label(ui,"No running server detected at 127.0.0.1:8188.");}
+                    crate::interaction::label(ui,"Report is a snapshot. Refresh after changing the backend, driver or hardware. Driver CUDA limits and Python CUDA runtime versions are different.");
+                    if ui.button("Copy diagnostics").clicked() {ui.ctx().copy_text(serde_json::to_string_pretty(report).unwrap_or_default());}
+                    if ui.button("Save diagnostics…").clicked() {
+                        if let Some(path)=rfd::FileDialog::new().set_file_name("PixelForge-diagnostics.json").save_file() {
+                            self.message=match fs::write(path,serde_json::to_vec_pretty(report).unwrap_or_default()) {Ok(())=>"Diagnostics saved".into(),Err(e)=>format!("Cannot save diagnostics: {e}")};
+                        }
+                    }
+                }
+                if let Some(path)=crate::profile::settings_root() {crate::interaction::label(ui,format!("Startup log: {}",path.join("backend.log").display()));}
+            });
+            crate::interaction::label(ui,"ComfyUI portable hardware (for an explicitly requested install / update):");
+            let hardware=[("nvidia","NVIDIA RTX (recommended)"),("nvidia_cu126","GTX 10-series / older — CUDA 12.6, unverified"),("amd","AMD"),("intel","Intel")];
             let label=hardware.iter().find(|(id,_)|*id==self.gpu).map(|(_,label)|*label).unwrap_or("Choose GPU");
             egui::ComboBox::from_id_salt("dependency_hardware").selected_text(label).show_ui(ui,|ui| {for (id,label) in hardware {ui.selectable_value(&mut self.gpu,id.into(),label);}});
             for (category, (heading, description)) in [
@@ -949,13 +1010,13 @@ impl Manager {
                 if !self.rows.iter().any(|row|row.category()==category) {continue;}
                 ui.add_space(8.0);
                 crate::theme::section(ui,heading);
-                ui.label(description);
+                crate::interaction::label(ui,description);
             for row in self.rows.iter().filter(|row|row.category()==category) {
                 ui.group(|ui| {
                     ui.set_width(ui.available_width());
-                    ui.strong(&row.title);
+                    crate::interaction::strong(ui,&row.title);
                     ui.colored_label(if row.installed {egui::Color32::LIGHT_GREEN} else {egui::Color32::YELLOW},if row.installed {"Installed"} else {"Missing / needs setup"});
-                    ui.label(&row.detail);
+                    crate::interaction::label(ui,&row.detail);
                     if let Some(c)=row.component {
                         ui.horizontal_wrapped(|ui| {
                             if ui.add_enabled(!self.busy()&&!workspace_busy,egui::Button::new(if row.installed {"Check / Install Update"} else {"Install"})).clicked() {action=Some((c,false));}
@@ -967,9 +1028,9 @@ impl Manager {
                                 let bytes=self.transfer.bytes.load(Ordering::Relaxed);
                                 let label=if total>0 {format!("{:.1} / {:.1} MB",bytes as f64/1e6,total as f64/1e6)} else {"Preparing / installing…".into()};
                                 ui.add(egui::ProgressBar::new(if total>0 {(bytes as f32/total as f32).clamp(0.0,1.0)} else {0.0}).animate(true).text(label));
-                                ui.label(self.transfer.message.lock().map(|v|v.clone()).unwrap_or_default());
+                                crate::interaction::label(ui,self.transfer.message.lock().map(|v|v.clone()).unwrap_or_default());
                                 if ui.button("Cancel Setup").clicked() {self.transfer.cancel.store(true,Ordering::Relaxed);}
-                            } else {ui.label(&self.message);}
+                            } else {crate::interaction::label(ui,&self.message);}
                         }
                     } else if row.title.contains("model") {
                         if ui.button("Manage Models").clicked() {library=true;}
@@ -979,13 +1040,13 @@ impl Manager {
                 });
             }
             }
-            if workspace_busy {ui.label("Finish generation, image processing, or model downloads before changing dependencies.");}
+            if workspace_busy {crate::interaction::label(ui,"Finish generation, image processing, or model downloads before changing dependencies.");}
             if self.active_component.is_none() {
                 if self.busy() {ui.spinner();}
-                ui.label(&self.message);
+                crate::interaction::label(ui,&self.message);
             }
-            ui.label(format!("Managed installation folder: {}",root().display()));
-            ui.label("Retained versions use additional disk space. Keep old versions until you have tested the update. Portable ComfyUI includes Python and CUDA; the separate deblur runtime includes Python, ONNX Runtime, NumPy and OpenCV. GPU drivers are managed by the GPU vendor.");
+            crate::interaction::label(ui,format!("Managed installation folder: {}",root().display()));
+            crate::interaction::label(ui,"Retained versions use additional disk space. Keep old versions until you have tested the update. Portable ComfyUI includes Python and CUDA; the separate deblur runtime includes Python, ONNX Runtime, NumPy and OpenCV. GPU drivers are managed by the GPU vendor.");
         });
         self.open = open && !library;
         if refresh {
