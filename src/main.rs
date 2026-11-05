@@ -6467,8 +6467,8 @@ impl eframe::App for PixelForge {
 
                 let missing=self.dependency_manager.missing();
                 let label=if missing>0 {egui::RichText::new(format!("Dependencies ({missing})")).color(egui::Color32::YELLOW).strong()} else {egui::RichText::new("Dependencies")};
-                if ui.button(label).clicked() {self.dependency_manager.open=true;}
-                if ui.button("Updates").clicked() {self.updater.open=true;}
+                if ui.button(label).clicked() {self.dependency_manager.open=!self.dependency_manager.open;}
+                if ui.button("Updates").clicked() {self.updater.open=!self.updater.open;}
                 ui.separator();
                 ui.strong("PixelForge");
 

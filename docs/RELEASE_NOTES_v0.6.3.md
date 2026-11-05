@@ -1,6 +1,6 @@
 # PixelForge v0.6.3 — development, not approved for final release
 
-- Settings > Display: native fullscreen, F11 toggle, Esc exit, persistent mode and
+- Settings > Display: native fullscreen, F11 toggle, persistent mode and
   normal window placement. Uses the current monitor rather than a fixed resolution.
 - Dependencies: background GPU / VRAM / driver / compute capability and selected
   Python CUDA / PyTorch diagnostics; inspect the running server separately, copy or
@@ -27,8 +27,8 @@ The five pre-existing post-v0.6.2 model-library development commits were retaine
    (or scripts/Run-PixelForge.ps1); confirm the title says PixelForge Dev v0.6.3.
 2. Move and resize the window, select Settings > Display > Fullscreen. Confirm no
    title bar / taskbar, and full monitor coverage. F11 returns to the same placement.
-3. Enter fullscreen again and use Esc. Repeat from a maximized window. Close while
-   fullscreen, reopen, then Esc. Check that the earlier normal placement is restored.
+3. Enter fullscreen again and use F11. Repeat from a maximized window. Close while
+   fullscreen, reopen, then F11. Check that the earlier normal placement is restored.
 4. At Windows 150% scaling and on a 32:9 monitor, repeat; change UI scale while in
    fullscreen and check the restored physical window size. Test each connected monitor.
 5. Open Dependencies > GPU compatibility and backend selection. Keep Auto for your

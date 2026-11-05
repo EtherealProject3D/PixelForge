@@ -57,24 +57,15 @@ impl Display {
             true,
             "Fullscreen (hide title bar and taskbar)",
         );
-        ui.label("F11 toggles fullscreen. Esc returns to windowed mode.");
+        ui.label("F11 toggles fullscreen.");
         ui.label("Uses the entire current monitor, including ultrawide displays.");
         if !self.error.is_empty() {
             ui.colored_label(egui::Color32::YELLOW, &self.error);
         }
     }
     pub fn update(&mut self, ctx: &Context) {
-        let (f11, escape) = ctx.input_mut(|i| {
-            (
-                i.consume_key(egui::Modifiers::NONE, egui::Key::F11),
-                self.fullscreen && i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
-            )
-        });
-        if f11 {
+        if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
             self.fullscreen = !self.fullscreen;
-        }
-        if escape {
-            self.fullscreen = false;
         }
         // Observe placement only after transitions have settled. Never persist a fullscreen rectangle.
         if self.applied == Some(false) && self.restore_frames == 0 {
@@ -157,7 +148,7 @@ mod tests {
         assert!(commands.contains(&Cmd::OuterPosition(egui::pos2(-5120.0 / 1.5, 80.0))));
     }
     #[test]
-    fn shortcuts_toggle_and_escape_without_changing_geometry() {
+    fn only_f11_toggles_fullscreen_without_changing_geometry() {
         let ctx = Context::default();
         let mut display = Display {
             applied: Some(false),
@@ -188,6 +179,23 @@ mod tests {
             repeat: false,
             modifiers: Default::default(),
         });
+        let output = ctx.run(input, |ctx| display.update(ctx));
+        assert!(display.fullscreen, "Escape must leave fullscreen unchanged");
+        assert!(
+            !output.viewport_output[&egui::ViewportId::ROOT]
+                .commands
+                .contains(&Cmd::Fullscreen(false))
+        );
+        let mut input = egui::RawInput::default();
+        for pressed in [false, true] {
+            input.events.push(egui::Event::Key {
+                key: egui::Key::F11,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers: Default::default(),
+            });
+        }
         let output = ctx.run(input, |ctx| display.update(ctx));
         assert!(!display.fullscreen);
         assert!(

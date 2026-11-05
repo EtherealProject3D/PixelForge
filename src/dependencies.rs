@@ -954,7 +954,7 @@ impl Manager {
         let mut library = false;
         let mut action = None;
         let mut refresh = false;
-        egui::Window::new("Dependencies").open(&mut open).default_width(650.0).default_height(740.0).default_pos(ctx.screen_rect().center()-egui::vec2(325.0,370.0)).resizable(true).vscroll(true).show(ctx,|ui| {
+        egui::Window::new("Dependencies").collapsible(false).open(&mut open).default_width(650.0).default_height(740.0).default_pos(ctx.screen_rect().center()-egui::vec2(325.0,370.0)).resizable(true).vscroll(true).show(ctx,|ui| {
             ui.heading("PixelForge setup and maintenance");
             ui.label("Install missing components here. Updates use separate folders and keep the previous installation for rollback. Your existing ComfyUI Desktop setup is left untouched.");
             ui.horizontal_wrapped(|ui| {

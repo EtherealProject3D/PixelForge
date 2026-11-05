@@ -112,7 +112,7 @@ impl Manager {
     pub fn show(&mut self,ctx:&egui::Context,can_restart:bool)->bool {
         if crate::profile::is_dev() {
             if self.open {
-                egui::Window::new("PixelForge Dev").open(&mut self.open).show(ctx,|ui| {
+                egui::Window::new("PixelForge Dev").collapsible(false).open(&mut self.open).show(ctx,|ui| {
                     ui.label("This development copy uses the source checkout. Close it and reopen PixelForge Dev to rebuild the latest local code.");
                     ui.label("Use the installed PixelForge app for published releases and in-app updates.");
                 });
@@ -131,7 +131,7 @@ impl Manager {
         if !self.open {return false;}
         let mut open=true;
         let mut restart=false;
-        egui::Window::new("PixelForge Updates").open(&mut open).default_width(520.0).min_width(440.0)
+        egui::Window::new("PixelForge Updates").collapsible(false).open(&mut open).default_width(520.0).min_width(440.0)
             .default_pos(ctx.screen_rect().center()-egui::vec2(260.0,160.0)).resizable(true).show(ctx,|ui| {
             ui.heading(format!("PixelForge v{}",env!("CARGO_PKG_VERSION")));
             ui.label("Updates come from published PixelForge GitHub releases.");
