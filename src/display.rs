@@ -9,6 +9,8 @@ pub struct Display {
     last_position: Option<[f32; 2]>,
     startup_prepared: bool,
     startup_frames: u8,
+    last_native_scale: Option<f32>,
+    scale_settle_frames: u8,
     maximized: bool,
     restore_frames: u8,
     error: String,
@@ -165,6 +167,27 @@ impl Display {
             ctx.request_repaint();
             if self.startup_frames > 0 { return; }
         }
+        let viewport = ctx.input(|i| i.viewport().clone());
+        if let Some(native_scale) = viewport.native_pixels_per_point {
+            let changed = self.last_native_scale.replace(native_scale).is_some_and(|old| (old-native_scale).abs()>0.001);
+            if changed && self.applied == Some(false) && !self.fullscreen && viewport.maximized != Some(true) && self.restore_frames == 0 {
+                if let Some([_,_,w,h]) = self.placement {
+                    // Keep the previous physical footprint when Windows changes DPI.
+                    // Do not persist the intermediate geometry from that transition.
+                    let scale = ctx.pixels_per_point();
+                    let size = fit_window_size(egui::vec2(w,h), viewport.monitor_size.map(|m|m*scale));
+                    ctx.send_viewport_cmd(Cmd::InnerSize(size / scale));
+                    self.scale_settle_frames = 4;
+                    ctx.request_repaint();
+                    return;
+                }
+            }
+        }
+        if self.scale_settle_frames > 0 {
+            self.scale_settle_frames -= 1;
+            ctx.request_repaint();
+            return;
+        }
         if self.applied == Some(self.fullscreen) && self.restore_frames == 0 {
             let viewport = ctx.input(|i| i.viewport().clone());
             if viewport.minimized != Some(true) && viewport.fullscreen == Some(self.fullscreen) {
@@ -230,6 +253,11 @@ impl Display {
             ctx.request_repaint();
         }
     }
+}
+fn fit_window_size(size: egui::Vec2, monitor: Option<egui::Vec2>) -> egui::Vec2 {
+    if let Some(monitor) = monitor.filter(|m| m.is_finite() && m.x > 0.0 && m.y > 0.0) {
+        size.min(monitor * 0.9)
+    } else { size }
 }
 #[derive(Clone, Copy)]
 enum Caption {
@@ -299,6 +327,25 @@ fn valid_placement(v: [f32; 4]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dpi_change_preserves_saved_size_instead_of_expanded_intermediate_geometry() {
+        let ctx = Context::default();
+        let mut display = Display {
+            applied: Some(false), last_native_scale: Some(1.5),
+            placement: Some([80.0,80.0,1200.0,800.0]), ..Default::default()
+        };
+        let mut input = egui::RawInput::default();
+        let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+        viewport.native_pixels_per_point = Some(1.0);
+        viewport.fullscreen = Some(false);
+        viewport.monitor_size = Some(egui::vec2(1920.0,1080.0));
+        viewport.inner_rect = Some(egui::Rect::from_min_size(egui::pos2(100.0,100.0),egui::vec2(4502.0,1539.0)));
+        viewport.outer_rect = viewport.inner_rect;
+        let output = ctx.run(input, |ctx| display.update(ctx));
+        assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.contains(&Cmd::InnerSize(egui::vec2(1200.0,800.0))));
+        assert_eq!(display.placement, Some([80.0,80.0,1200.0,800.0]));
+        assert_eq!(fit_window_size(egui::vec2(4502.0,1539.0),Some(egui::vec2(1920.0,1080.0))),egui::vec2(1728.0,972.0));
+    }
     #[test]
     fn pointer_outside_window_cannot_start_native_resize() {
         let ctx = Context::default();

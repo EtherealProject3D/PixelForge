@@ -248,3 +248,9 @@ build since Dev intentionally does not use the release updater.
 - Ignore resize hit tests outside the client window and require a fresh primary press inside its resize edge. Limit title dragging to the primary button.
 - Settings > Visuals includes Reset Window Size and Position, usable from fullscreen to recover a stuck normal-window rectangle.
 - Validation: 144 tests passed, one ignored, including outside-window resize rejection and recovery from a 4502-pixel-wide saved rectangle. Cross-monitor dragging still requires hardware verification.
+
+### Mixed-DPI monitor move and title drag follow-up
+
+- Register the full unused title-bar background as a drag target before menus and caption buttons; blank space to the left of the title now participates.
+- On native monitor-scale changes in normal windowed mode, retain the previous physical window dimensions, bounded to 90% of the destination monitor, and avoid persisting intermediate geometry while the change settles.
+- Validation: 145 tests passed, one ignored; dev build completed. Actual laptop-to-external-monitor movement remains to be verified on the user setup.
