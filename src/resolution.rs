@@ -88,3 +88,59 @@ mod tests {
         assert!(recommend("Z-Image", None, 1024, 1024).caution);
     }
 }
+
+/// Public preset IDs are stable so old projects keep Standard / Large / Extra Large.
+pub fn preset_dimensions(rw: u32, rh: u32, preset: usize, step: u32) -> (u32, u32) {
+    let long = match preset {
+        0 => 768.0,
+        1 => 1344.0,
+        2 => 2048.0,
+        3 => 4096.0,
+        4 => 1024.0,
+        _ => 768.0,
+    };
+    let divisor = rw.max(rh).max(1) as f32;
+    (
+        snap(long * rw as f32 / divisor, step),
+        snap(long * rh as f32 / divisor, step),
+    )
+}
+pub fn valid_step(step: u32) -> u32 {
+    if [16, 32, 64].contains(&step) {
+        step
+    } else {
+        32
+    }
+}
+pub fn snap(value: f32, step: u32) -> u32 {
+    let step = valid_step(step);
+    ((value / step as f32).round() as u32 * step).clamp(256, 4096)
+}
+#[cfg(test)]
+mod preset_tests {
+    use super::*;
+    #[test]
+    fn medium_uses_1024_long_side_and_requested_rounding() {
+        assert_eq!(preset_dimensions(1, 1, 4, 32), (1024, 1024));
+        assert_eq!(preset_dimensions(16, 9, 4, 32), (1024, 576));
+        assert_eq!(preset_dimensions(9, 16, 4, 16), (576, 1024));
+        assert_eq!(preset_dimensions(3, 2, 4, 32), (1024, 672));
+        assert_eq!(preset_dimensions(32, 9, 4, 32), (1024, 288));
+        assert_eq!(preset_dimensions(32, 9, 4, 64), (1024, 320));
+        for step in [16, 32, 64] {
+            for (rw, rh) in [(1, 1), (4, 3), (3, 4), (21, 9), (9, 32)] {
+                let (w, h) = preset_dimensions(rw, rh, 4, step);
+                assert_eq!(w.max(h), 1024);
+                assert_eq!(w % step, 0);
+                assert_eq!(h % step, 0);
+            }
+        }
+    }
+    #[test]
+    fn original_preset_ids_are_unchanged() {
+        for (id, side) in [(0, 768), (1, 1344), (2, 2048), (3, 4096)] {
+            assert_eq!(preset_dimensions(1, 1, id, 64), (side, side));
+        }
+        assert_eq!(valid_step(48), 32);
+    }
+}

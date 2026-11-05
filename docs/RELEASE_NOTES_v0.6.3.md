@@ -83,3 +83,41 @@ Validation: 117 Rust tests passed, one optional dependency test ignored. Simulat
 native drop events cover multiple images, corrupt images, editor projects and
 Generation Studio project opening with an unsaved-work guard. Manually test by
 dragging an image and .pxf from Explorer onto the dev window, including fullscreen.
+
+## Crop, resolution and workspace refinements
+
+- Edit > Crop Image opens crop controls in the existing workspace. Drag any corner
+  or edge to resize, drag inside the frame to reposition it, middle-drag to move the
+  image beneath the frame, and scroll to zoom. Fit / + / minus also control the crop
+  preview. The image remains large enough to cover the crop; no blank edges are added.
+- Lock the current aspect ratio or select any of the same landscape / portrait presets
+  offered by Generate. Unlocking allows a free shape. Apply Crop creates a new version
+  at individual-pixel precision; Cancel Crop leaves the source unchanged. Adjustments,
+  active selection and named selection masks are preserved and cropped consistently.
+  Switching to another image cancels the transient crop preview.
+- Resolution options are now Small, Medium, Standard, Large and Extra Large. Medium
+  has a 1024-pixel long side. Dimension rounding offers 16, 32 and 64 pixels, defaulting
+  to 32 for new sessions. The app retains its 256–4096 generation size limits.
+- Medium at 32-pixel rounding: square 1024×1024, 4:3 1024×768, 3:2 1024×672,
+  16:9 1024×576, 32:9 1024×288; portrait presets swap width / height.
+- Original preset IDs are retained in saved projects. Projects without a rounding
+  field continue using 64 pixels; newly saved files retain the chosen rounding.
+  ComfyUI generation validation now accepts multiples of 16. The official FLUX.2
+  and SD3 latent nodes expose 16-pixel dimension steps:
+  https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_flux.py
+  https://github.com/Comfy-Org/ComfyUI/blob/master/comfy_extras/nodes_sd3.py
+- Thumbnail images grow from a 68-pixel to a 92-pixel maximum side, with consistent
+  116×96 clickable cells and tighter caption / scrollbar spacing. Save New Version
+  is now beside Remove Version in the workspace toolbar.
+
+Validation: 127 tests passed, zero failures, one optional dependency test ignored.
+Includes free / locked crop geometry, real pointer-event resizing / panning / zoom,
+cropped pixel and mask preservation, project save / reopen, old preset compatibility,
+Medium dimensions and fine-grid validation. The thumbnail / toolbar layout was also
+visually checked in a temporary profile. Actual ComfyUI generation at the new sizes
+is still a manual laptop check; no model generation or package installation was run.
+
+Try: open an image, select Edit > Crop Image, drag a corner with lock off, choose
+16:9 with lock on, then pan and zoom beneath the frame. Apply and compare with the
+original version. Save and reopen a test .pxf. Under Generate > Generation settings,
+choose Medium and verify output dimensions while changing ratio and rounding.

@@ -22,6 +22,7 @@ mod dependencies;
 mod project;
 mod generation_project;
 mod studio;
+mod crop;
 mod spelling;
 
 use eframe::egui;
@@ -222,6 +223,7 @@ struct GenerationSettings {
     custom_size: bool,
     unlock_dimensions: bool,
     resolution: usize,
+    dimension_step: u32,
     width: u32,
     height: u32,
     steps: u32,
@@ -245,8 +247,8 @@ fn conversation_context(settings: &GenerationSettings) -> String {
     }
 }
 
-fn settings_json(s:&GenerationSettings)->serde_json::Value {serde_json::json!({"prompt":s.prompt,"negative":s.negative,"auto_negative":s.auto_negative,"checkpoint":s.checkpoint,"style":s.style,"ratio":s.ratio,"custom_size":s.custom_size,"unlock_dimensions":s.unlock_dimensions,"resolution":s.resolution,"width":s.width,"height":s.height,"steps":s.steps,"cfg":s.cfg,"seed":s.seed,"refine_parent":s.refine_parent,"refine_strength":s.refine_strength,"refine_prompt":s.refine_prompt,"refine_masked":s.refine_masked})}
-fn settings_from_json(v:&serde_json::Value)->GenerationSettings {GenerationSettings {prompt:v["prompt"].as_str().unwrap_or("").into(),negative:v["negative"].as_str().unwrap_or("").into(),auto_negative:v["auto_negative"].as_bool().unwrap_or(false),checkpoint:v["checkpoint"].as_str().unwrap_or("").into(),style:v["style"].as_u64().unwrap_or(0) as usize,ratio:v["ratio"].as_u64().unwrap_or(0) as usize,custom_size:v["custom_size"].as_bool().unwrap_or(false),unlock_dimensions:v["unlock_dimensions"].as_bool().unwrap_or(false),resolution:v["resolution"].as_u64().unwrap_or(0) as usize,width:v["width"].as_u64().unwrap_or(1024) as u32,height:v["height"].as_u64().unwrap_or(1024) as u32,steps:v["steps"].as_u64().unwrap_or(30) as u32,cfg:v["cfg"].as_f64().unwrap_or(7.0) as f32,seed:v["seed"].as_u64().unwrap_or(0),refine_parent:v["refine_parent"].as_u64().map(|n|n as usize),refine_strength:v["refine_strength"].as_f64().map(|n|n as f32),refine_prompt:v["refine_prompt"].as_str().map(str::to_owned),refine_masked:v["refine_masked"].as_bool().unwrap_or(false)}}
+fn settings_json(s:&GenerationSettings)->serde_json::Value {serde_json::json!({"prompt":s.prompt,"negative":s.negative,"auto_negative":s.auto_negative,"checkpoint":s.checkpoint,"style":s.style,"ratio":s.ratio,"custom_size":s.custom_size,"unlock_dimensions":s.unlock_dimensions,"resolution":s.resolution,"dimension_step":s.dimension_step,"width":s.width,"height":s.height,"steps":s.steps,"cfg":s.cfg,"seed":s.seed,"refine_parent":s.refine_parent,"refine_strength":s.refine_strength,"refine_prompt":s.refine_prompt,"refine_masked":s.refine_masked})}
+fn settings_from_json(v:&serde_json::Value)->GenerationSettings {GenerationSettings {prompt:v["prompt"].as_str().unwrap_or("").into(),negative:v["negative"].as_str().unwrap_or("").into(),auto_negative:v["auto_negative"].as_bool().unwrap_or(false),checkpoint:v["checkpoint"].as_str().unwrap_or("").into(),style:v["style"].as_u64().unwrap_or(0) as usize,ratio:v["ratio"].as_u64().unwrap_or(0) as usize,custom_size:v["custom_size"].as_bool().unwrap_or(false),unlock_dimensions:v["unlock_dimensions"].as_bool().unwrap_or(false),resolution:v["resolution"].as_u64().unwrap_or(0) as usize,dimension_step:resolution::valid_step(v["dimension_step"].as_u64().unwrap_or(64) as u32),width:v["width"].as_u64().unwrap_or(1024) as u32,height:v["height"].as_u64().unwrap_or(1024) as u32,steps:v["steps"].as_u64().unwrap_or(30) as u32,cfg:v["cfg"].as_f64().unwrap_or(7.0) as f32,seed:v["seed"].as_u64().unwrap_or(0),refine_parent:v["refine_parent"].as_u64().map(|n|n as usize),refine_strength:v["refine_strength"].as_f64().map(|n|n as f32),refine_prompt:v["refine_prompt"].as_str().map(str::to_owned),refine_masked:v["refine_masked"].as_bool().unwrap_or(false)}}
 
 struct GeneratedItem {
     editor: studio::EditorState,
@@ -467,20 +469,9 @@ const GENERATION_SIZES: &[(&str, u32, u32)] = &[
     ("Portrait 9:32", 9, 32),
 ];
 
-fn generation_dimensions(ratio: usize, resolution: usize) -> (u32, u32) {
+fn generation_dimensions(ratio: usize, resolution: usize, step: u32) -> (u32, u32) {
     let (_, rw, rh) = GENERATION_SIZES[ratio.min(GENERATION_SIZES.len() - 1)];
-    let long_side = match resolution {
-        0 => 768.0_f32,
-        1 => 1344.0,
-        2 => 2048.0,
-        _ => 4096.0,
-    };
-    let divisor = rw.max(rh) as f32;
-    let snap = |value: f32| ((value / 64.0).round() as u32 * 64).clamp(256, 4096);
-    (
-        snap(long_side * rw as f32 / divisor),
-        snap(long_side * rh as f32 / divisor),
-    )
+    resolution::preset_dimensions(rw, rh, resolution, step)
 }
 
 #[derive(Clone)]
@@ -520,6 +511,7 @@ struct PixelForge {
     generation_unlock_dimensions: bool,
     generation_custom_size: bool,
     generation_resolution: usize,
+    generation_dimension_step: u32,
     generation_zoom: f32,
     generation_pan: Vec2,
     generation_batch_count: usize,
@@ -532,6 +524,7 @@ struct PixelForge {
     conversation_draft: String,
     workspace_ai_parent: Option<usize>,
     workspace_editor: Option<usize>,
+    crop: Option<crop::Crop>,
     generation_gallery: Vec<GeneratedItem>,
     generation_project_path: Option<PathBuf>,
     refinement_source: Option<usize>,
@@ -729,6 +722,7 @@ impl Default for PixelForge {
             generation_unlock_dimensions: false,
             generation_custom_size: false,
             generation_resolution: 1,
+            generation_dimension_step: 32,
             generation_zoom: 1.0,
             generation_pan: Vec2::ZERO,
             generation_batch_count: 1,
@@ -741,6 +735,7 @@ impl Default for PixelForge {
             conversation_draft: String::new(),
             workspace_ai_parent: None,
             workspace_editor: None,
+            crop: None,
             generation_gallery: Vec::new(),
             generation_project_path: None,
             refinement_source: None,
@@ -1214,6 +1209,7 @@ impl PixelForge {
             custom_size: self.generation_custom_size,
             unlock_dimensions: self.generation_unlock_dimensions,
             resolution: self.generation_resolution,
+            dimension_step: self.generation_dimension_step,
             width: self.generation_width,
             height: self.generation_height,
             steps,
@@ -1452,6 +1448,7 @@ impl PixelForge {
 
     fn bind_workspace_editor(&mut self, ctx: &egui::Context) {
         if self.workspace_editor == Some(self.generation_selected) {return;}
+        self.crop=None;
         self.capture_workspace_editor();
         let Some(item) = self.generation_gallery.get(self.generation_selected) else {return};
         let pixels = item.pixels.clone();
@@ -1498,6 +1495,81 @@ impl PixelForge {
             }
         }
         if !self.generation_gallery.is_empty() {self.generation_workspace=true;self.bind_workspace_editor(ctx);}
+    }
+
+    fn show_crop_controls(&mut self,ui:&mut egui::Ui,ctx:&egui::Context) {
+        theme::section(ui,"Crop");
+        let available=!self.generation_running && !self.ai_running && !self.exporting && !self.ai_saving;
+        if self.crop.is_none() {
+            if ui.add_enabled(available && !self.generation_gallery.is_empty(),egui::Button::new("Crop Image")).clicked() {
+                self.capture_workspace_editor();
+                self.generation_compare=false;
+                self.selection_brush_enabled=false;
+                self.crop=Some(crop::Crop::new(self.generation_selected,[self.image_size[0] as u32,self.image_size[1] as u32]));
+            }
+            return;
+        }
+        let size=[self.image_size[0] as u32,self.image_size[1] as u32];
+        let crop=self.crop.as_mut().unwrap();
+        if ui.checkbox(&mut crop.locked,"Lock aspect ratio").changed() && crop.locked {crop.lock_current();}
+        let mut selected=None;
+        egui::ComboBox::from_id_salt("crop_ratio").width(ui.available_width()).truncate()
+            .selected_text(if !crop.locked {"Free aspect ratio"} else {
+                let (_,w,h)=GENERATION_SIZES[crop.preset];
+                if (crop.rect.aspect_ratio()-w as f32/h as f32).abs()<0.001 {GENERATION_SIZES[crop.preset].0}else{"Custom locked ratio"}
+            }).show_ui(ui,|ui| {
+                for (index,&(label,_,_)) in GENERATION_SIZES.iter().enumerate() {
+                    if ui.selectable_label(crop.preset==index,label).clicked() {selected=Some(index);}
+                }
+            });
+        if let Some(index)=selected {
+            crop.preset=index;
+            let (_,w,h)=GENERATION_SIZES[index];
+            crop.set_aspect(w as f32/h as f32,size);
+        }
+        let [_,_,width,height]=crop.pixels(size);
+        ui.label(format!("Crop: {width} × {height} pixels"));
+        ui.small("Drag corners or edges to resize; drag inside to move the crop. Middle-drag moves the image beneath it; scroll to zoom.");
+        let mut apply=false;let mut cancel=false;
+        ui.horizontal(|ui| {
+            apply=ui.add_enabled(available,theme::primary("Apply Crop")).clicked();
+            cancel=ui.button("Cancel Crop").clicked();
+        });
+        if apply {self.apply_workspace_crop(ctx);} else if cancel {self.crop=None;}
+    }
+    fn apply_workspace_crop(&mut self,ctx:&egui::Context) {
+        if self.generation_running || self.ai_running || self.exporting || self.ai_saving {return;}
+        let Some(crop)=self.crop.take() else {return};
+        if crop.source!=self.generation_selected {return;}
+        self.capture_workspace_editor();
+        let parent=self.generation_selected;
+        let Some(item)=self.generation_gallery.get(parent) else {return};
+        let [x,y,w,h]=crop.pixels([item.pixels.width(),item.pixels.height()]);
+        let pixels=image::imageops::crop_imm(&item.pixels,x,y,w,h).to_image();
+        let crop_mask=|mask:&masking::SelectionMask| {
+            let (mw,mh)=mask.dimensions();
+            let gray=image::GrayImage::from_raw(mw,mh,mask.pixels().to_vec()).expect("valid selection mask");
+            let gray=image::imageops::crop_imm(&gray,x,y,w,h).to_image();
+            masking::SelectionMask::from_pixels(w,h,gray.into_raw()).expect("matching cropped mask")
+        };
+        let mut editor=item.editor.clone();
+        editor.name=format!("Crop {w} × {h}");
+        editor.mask=editor.mask.as_ref().map(&crop_mask);
+        for (_,mask) in &mut editor.saved_selections {*mask=crop_mask(mask);}
+        let rendered=editor.render(&pixels);
+        let texture=ctx.load_texture(format!("studio_crop_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([w as usize,h as usize],rendered.as_raw()),TextureOptions::LINEAR);
+        let mut settings=item.settings.clone();
+        settings.width=w;settings.height=h;settings.custom_size=true;
+        settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("Crop at {x}, {y}: {w} × {h}"));
+        let seed=item.seed;
+        self.generation_gallery.push(GeneratedItem {editor,settings,pixels,texture,seed});
+        self.generation_selected=self.generation_gallery.len()-1;
+        self.project_dirty=true;
+        self.refinement_source=None;
+        self.refinement_mask.clear();self.refinement_mask_texture=None;
+        self.generation_zoom=1.0;self.generation_pan=Vec2::ZERO;
+        self.bind_workspace_editor(ctx);
+        self.generation_status=format!("Created cropped version: {w} × {h}. Original retained.");
     }
 
     fn keep_workspace_version(&mut self, ctx: &egui::Context, label: &str) {
@@ -1770,23 +1842,22 @@ impl PixelForge {
                 }
             });
 
-        let resolution_names = ["Small", "Standard", "Large", "Extra Large"];
-        let resolution_labels: Vec<String> = resolution_names
-            .iter()
-            .enumerate()
-            .map(|(i, name)| {
-                let (w, h) = generation_dimensions(self.generation_size, i);
-                format!("{name} — {w} × {h}")
-            })
-            .collect();
-
+        ui.label("Dimension rounding");
+        let previous_step=self.generation_dimension_step;
+        egui::ComboBox::from_id_salt("dimension_rounding").width(ui.available_width()).selected_text(format!("{} pixels",self.generation_dimension_step)).show_ui(ui,|ui| {
+            for step in [16,32,64] {ui.selectable_value(&mut self.generation_dimension_step,step,format!("{step} pixels"));}
+        });
+        // IDs 0–3 retain their old serialized meanings; Medium is ID 4.
+        let presets = [(0,"Small"),(4,"Medium"),(1,"Standard"),(2,"Large"),(3,"Extra Large")];
+        let resolution_labels: Vec<(usize,String)> = presets.iter().map(|&(id,name)| {
+            let (w,h)=generation_dimensions(self.generation_size,id,self.generation_dimension_step);
+            (id,format!("{name} — {w} × {h}"))
+        }).collect();
         ui.label("Resolution");
         egui::ComboBox::from_id_salt("sidebar_Resolution").width(ui.available_width()).truncate()
-            .selected_text(&resolution_labels[self.generation_resolution.min(3)])
+            .selected_text(&resolution_labels.iter().find(|(id,_)|*id==self.generation_resolution).unwrap_or(&resolution_labels[0]).1)
             .show_ui(ui, |ui| {
-                for (i, label) in resolution_labels.iter().enumerate() {
-                    ui.selectable_value(&mut self.generation_resolution, i, label);
-                }
+                for (id,label) in &resolution_labels {ui.selectable_value(&mut self.generation_resolution,*id,label);}
             });
 
         let custom_changed = ui
@@ -1794,7 +1865,7 @@ impl PixelForge {
             .changed();
 
         let (preset_w, preset_h) =
-            generation_dimensions(self.generation_size, self.generation_resolution);
+            generation_dimensions(self.generation_size, self.generation_resolution, self.generation_dimension_step);
 
         if !self.generation_custom_size {
             self.generation_width = preset_w;
@@ -1816,7 +1887,11 @@ impl PixelForge {
             let (_, rw, rh) =
                 GENERATION_SIZES[self.generation_size.min(GENERATION_SIZES.len() - 1)];
 
-            let snap = |n: f32| ((n / 64.0).round() as u32 * 64).clamp(256, 4096);
+            let snap = |n: f32| resolution::snap(n,self.generation_dimension_step);
+            if previous_step!=self.generation_dimension_step {
+                self.generation_width=snap(self.generation_width as f32);
+                self.generation_height=snap(self.generation_height as f32);
+            }
 
             if previous_ratio != self.generation_size {
                 let long_side = self.generation_width.max(self.generation_height);
@@ -1840,7 +1915,7 @@ impl PixelForge {
                     .add(
                         egui::DragValue::new(&mut self.generation_width)
                             .range(256..=4096)
-                            .speed(64),
+                            .speed(self.generation_dimension_step),
                     )
                     .changed();
 
@@ -1849,7 +1924,7 @@ impl PixelForge {
                     .add(
                         egui::DragValue::new(&mut self.generation_height)
                             .range(256..=4096)
-                            .speed(64),
+                            .speed(self.generation_dimension_step),
                     )
                     .changed();
 
@@ -1874,8 +1949,8 @@ impl PixelForge {
         }
 
         ui.label(format!(
-            "Output: {} × {} (multiples of 64)",
-            self.generation_width, self.generation_height
+            "Output: {} × {} ({}-pixel increments)",
+            self.generation_width, self.generation_height, self.generation_dimension_step
         ));
         let vram = self.dependency_manager.diagnostics.as_ref().and_then(compatibility::vram_gib);
         let guidance = resolution::recommend(&self.generation_checkpoint, vram, self.generation_width, self.generation_height);
@@ -1910,7 +1985,7 @@ impl PixelForge {
         self.capture_workspace_editor();
         let Some(mut path)=(!save_as).then(||self.generation_project_path.clone()).flatten().or_else(||rfd::FileDialog::new().add_filter("PixelForge Project",&["pxf"]).set_file_name("Generation.pxf").save_file()) else {return};
         path.set_extension("pxf");
-        let current=GenerationSettings {prompt:self.generation_prompt.clone(),negative:self.generation_negative.clone(),auto_negative:self.generation_auto_negative,checkpoint:self.generation_checkpoint.clone(),style:self.generation_style,ratio:self.generation_size,custom_size:self.generation_custom_size,unlock_dimensions:self.generation_unlock_dimensions,resolution:self.generation_resolution,width:self.generation_width,height:self.generation_height,steps:self.generation_steps,cfg:self.generation_cfg,seed:self.generation_seed,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};
+        let current=GenerationSettings {prompt:self.generation_prompt.clone(),negative:self.generation_negative.clone(),auto_negative:self.generation_auto_negative,checkpoint:self.generation_checkpoint.clone(),style:self.generation_style,ratio:self.generation_size,custom_size:self.generation_custom_size,unlock_dimensions:self.generation_unlock_dimensions,resolution:self.generation_resolution,dimension_step:self.generation_dimension_step,width:self.generation_width,height:self.generation_height,steps:self.generation_steps,cfg:self.generation_cfg,seed:self.generation_seed,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};
         let mut current_json = settings_json(&current);
         current_json["edit_checkpoint"] = serde_json::json!(self.edit_checkpoint);
         current_json["qwen_steps"] = serde_json::json!(self.qwen_steps);
@@ -1935,7 +2010,7 @@ impl PixelForge {
         self.qwen_steps = project.current["qwen_steps"].as_u64().filter(|steps|(1..=100).contains(steps)).unwrap_or(20) as u32;
         self.flux_steps = project.current["flux_steps"].as_u64().filter(|steps|(1..=100).contains(steps)).unwrap_or(4) as u32;
         let current=settings_from_json(&project.current);
-        self.generation_prompt=current.prompt;self.generation_negative=current.negative;self.generation_auto_negative=current.auto_negative;self.generation_checkpoint=current.checkpoint;self.generation_style=current.style;self.generation_size=current.ratio;self.generation_custom_size=current.custom_size;self.generation_unlock_dimensions=current.unlock_dimensions;self.generation_resolution=current.resolution;self.generation_width=current.width;self.generation_height=current.height;self.generation_steps=current.steps;self.generation_cfg=current.cfg;self.generation_seed=current.seed;
+        self.generation_prompt=current.prompt;self.generation_negative=current.negative;self.generation_auto_negative=current.auto_negative;self.generation_checkpoint=current.checkpoint;self.generation_style=current.style;self.generation_size=current.ratio;self.generation_custom_size=current.custom_size;self.generation_unlock_dimensions=current.unlock_dimensions;self.generation_resolution=current.resolution;self.generation_dimension_step=current.dimension_step;self.generation_width=current.width;self.generation_height=current.height;self.generation_steps=current.steps;self.generation_cfg=current.cfg;self.generation_seed=current.seed;
         self.refinement_source=None;
         self.refinement_mask.clear();
         self.refinement_mask_texture=None;
@@ -1946,7 +2021,7 @@ impl PixelForge {
         if let Some(paths)=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","webp"]).pick_files() {
             let mut count=0;
             for path in paths {match image::open(&path) {
-                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};self.generation_gallery.push(GeneratedItem {editor: studio::EditorState::default(),settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
+                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,dimension_step:32,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};self.generation_gallery.push(GeneratedItem {editor: studio::EditorState::default(),settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
                 Err(e)=>self.generation_status=format!("Import failed: {e}"),
             }}
             if count>0 {self.generation_status=format!("Imported {count} image(s)");}
@@ -2141,7 +2216,7 @@ impl PixelForge {
                 .show_ui(ui, |ui| {
                     for index in 0..count { ui.selectable_value(&mut self.generation_compare_index, index, self.generation_gallery[index].version_label(index)); }
                 });
-            ui.add_enabled(count > 1, egui::Checkbox::new(&mut self.generation_compare, "Compare"));
+            ui.add_enabled(count > 1 && self.crop.is_none(), egui::Checkbox::new(&mut self.generation_compare, "Compare"));
             egui::ComboBox::from_id_salt("compare_right_version")
                 .selected_text(format!("Right: {}", self.generation_gallery[self.generation_selected].version_label(self.generation_selected)))
                 .show_ui(ui, |ui| {
@@ -2152,32 +2227,34 @@ impl PixelForge {
                 ui.checkbox(&mut self.selection_show_mask,"Show selection");
             }
             if ui.button("Select Area").clicked() {
+                self.crop=None;
                 self.generation_compare=false;
                 self.selection_tools_tab=true;self.ai_tools_tab=false;self.generation_tools_tab=false;
                 self.selection_brush_enabled=true;
             }
             if ui.button("Fit").clicked() {
+                if let Some(crop)=&mut self.crop {crop.reset_view();}
                 self.generation_zoom = 1.0;
                 self.generation_pan = Vec2::ZERO;
             }
             if ui.button("−").clicked() {
-                self.generation_zoom = (self.generation_zoom / 1.25).max(0.1);
+                if let Some(crop)=&mut self.crop {crop.zoom_by(1.0/1.25);} else {self.generation_zoom = (self.generation_zoom / 1.25).max(0.1);}
             }
             if ui.button("+").clicked() {
-                self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);
+                if let Some(crop)=&mut self.crop {crop.zoom_by(1.25);} else {self.generation_zoom = (self.generation_zoom * 1.25).min(16.0);}
             }
-            let can_rotate = !self.generation_running && !self.ai_running && !self.ai_saving && !self.exporting;
+            let can_rotate = !self.generation_running && !self.ai_running && !self.ai_saving && !self.exporting && self.crop.is_none();
             if ui.add_enabled(can_rotate, egui::Button::new("Rotate Left")).on_hover_text("Rotate this version 90° counterclockwise. Later edits use this orientation.").clicked() {
                 self.rotate_workspace_version(ui.ctx(), false);
             }
             if ui.add_enabled(can_rotate, egui::Button::new("Rotate Right")).on_hover_text("Rotate this version 90° clockwise. Later edits use this orientation.").clicked() {
                 self.rotate_workspace_version(ui.ctx(), true);
             }
-            if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("+ Save New Version"))
+            if ui.add_enabled(!self.generation_running && !self.ai_running && self.crop.is_none(),egui::Button::new("+ Save New Version"))
                 .on_hover_text("Save the current edits as a new version. Use File > Save Project to save the whole history to disk.").clicked() {
                 self.keep_workspace_version(ui.ctx(),"Manual edits");
             }
-            if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Version")).clicked() {
+            if ui.add_enabled(!self.generation_running && !self.ai_running && self.crop.is_none(),egui::Button::new("Remove Version")).clicked() {
                 self.remove_workspace_version(self.generation_selected);
             }
 
@@ -2185,6 +2262,18 @@ impl PixelForge {
         if self.generation_gallery.is_empty() { return; }
         self.bind_workspace_editor(ui.ctx());
         let available = ui.available_size();
+        if self.crop.is_some() {
+            let size=egui::vec2(available.x,(available.y-Self::workspace_filmstrip_height(ui)).max(1.0));
+            if let Some(texture)=self.processed_texture.as_ref().or(self.texture.as_ref()) {
+                let texture=texture.id();
+                let dimensions=[self.image_size[0] as u32,self.image_size[1] as u32];
+                ui.allocate_ui_with_layout(size,egui::Layout::top_down(egui::Align::Min),|ui| {
+                    self.crop.as_mut().unwrap().show(ui,texture,dimensions);
+                });
+            }
+            self.show_workspace_filmstrip(ui);
+            return;
+        }
         if !self.generation_compare {
             // The shared viewer also supports legacy comparison modes. The Studio
             // checkbox is authoritative, including after loading an image/project.
@@ -2412,6 +2501,8 @@ impl PixelForge {
         std::mem::swap(&mut self.flux_steps, &mut other.flux_steps);
         std::mem::swap(&mut self.edit_checkpoint, &mut other.edit_checkpoint);
         std::mem::swap(&mut self.conversation_draft, &mut other.conversation_draft);
+        std::mem::swap(&mut self.generation_dimension_step, &mut other.generation_dimension_step);
+        std::mem::swap(&mut self.crop, &mut other.crop);
         std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
         std::mem::swap(&mut self.generation_project_path, &mut other.generation_project_path);
         std::mem::swap(&mut self.refinement_source, &mut other.refinement_source);
@@ -6674,6 +6765,8 @@ impl eframe::App for PixelForge {
                             self.show_selection_sidebar(ui);
                         } else if !self.ai_tools_tab {
                             if self.texture.is_some() {
+                                self.show_crop_controls(ui,ctx);
+                                ui.add_space(10.0);
                                 theme::section(ui, "Auto Enhance");
 
                                 if ui
@@ -7079,6 +7172,51 @@ mod workspace_tests {
         let mut input=egui::RawInput::default();
         input.dropped_files=paths.iter().map(|path|egui::DroppedFile {path:Some(path.clone()),..Default::default()}).collect();
         let _=ctx.run(input,|ctx|app.handle_file_drops(ctx));
+    }
+    #[test]
+    fn crop_creates_a_version_and_preserves_edits_masks_and_original_on_save() {
+        let ctx=egui::Context::default();
+        let mut app=PixelForge::default();
+        let pixels=image::RgbaImage::from_fn(8,6,|x,y|image::Rgba([x as u8*20,y as u8*20,40,255]));
+        let mask=masking::SelectionMask::from_pixels(8,6,(0..48).map(|n|if n%2==0 {255}else{0}).collect()).unwrap();
+        let mut editor=studio::EditorState::default();
+        editor.global.exposure=0.5;editor.local.brightness=10.0;
+        editor.mask=Some(mask.clone());editor.saved_selections.push(("Subject".into(),mask));
+        let rendered=editor.render(&pixels);
+        let texture=ctx.load_texture("crop_original",ColorImage::from_rgba_unmultiplied([8,6],rendered.as_raw()),TextureOptions::LINEAR);
+        app.generation_gallery.push(GeneratedItem {editor,settings:settings_from_json(&serde_json::json!({"prompt":"Original","dimension_step":16,"resolution":4})),pixels:pixels.clone(),texture,seed:42});
+        app.generation_workspace=true;app.bind_workspace_editor(&ctx);
+        let mut crop=crop::Crop::new(0,[8,6]);
+        crop.rect=Rect::from_min_max(egui::pos2(1.0,1.0),egui::pos2(6.0,5.0));
+        app.crop=Some(crop);app.apply_workspace_crop(&ctx);
+        assert_eq!(app.generation_gallery.len(),2);
+        assert_eq!(app.generation_gallery[0].pixels,pixels);
+        let cropped=&app.generation_gallery[1];
+        assert_eq!(cropped.pixels.dimensions(),(5,4));
+        assert_eq!(cropped.pixels.get_pixel(0,0),pixels.get_pixel(1,1));
+        assert_eq!(cropped.editor.global.exposure,0.5);
+        assert_eq!(cropped.editor.mask.as_ref().unwrap().dimensions(),(5,4));
+        assert_eq!(cropped.editor.mask.as_ref().unwrap().pixels()[0],0);
+        assert_eq!(cropped.editor.saved_selections[0].1.dimensions(),(5,4));
+        assert_eq!(cropped.settings.refine_parent,Some(0));
+        assert_eq!(cropped.settings.dimension_step,16);
+        let path=std::env::temp_dir().join(format!("pixelforge-crop-roundtrip-{}.pxf",std::process::id()));
+        app.generation_project_path=Some(path.clone());app.save_generation_project(false);
+        let mut loaded=PixelForge::default();loaded.open_generation_project(&path,&ctx);loaded.ensure_workspace(&ctx);
+        assert_eq!(loaded.generation_gallery.len(),2);
+        assert_eq!(loaded.original_pixels.as_ref().unwrap().dimensions(),(5,4));
+        assert_eq!(loaded.selection_mask.as_ref().unwrap().dimensions(),(5,4));
+        assert_eq!(loaded.generation_gallery[1].settings.dimension_step,16);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn old_resolution_settings_retain_ids_and_64_pixel_rounding() {
+        let old=settings_from_json(&serde_json::json!({"resolution":1,"width":1344,"height":768}));
+        assert_eq!(old.resolution,1);assert_eq!(old.dimension_step,64);
+        assert_eq!(generation_dimensions(5,old.resolution,old.dimension_step),(1344,768));
+        let fresh=settings_from_json(&serde_json::json!({"resolution":4,"dimension_step":32}));
+        let restored=settings_from_json(&settings_json(&fresh));
+        assert_eq!(restored.resolution,4);assert_eq!(restored.dimension_step,32);
     }
     #[test]
     fn dropped_images_and_editor_projects_open_without_losing_existing_work() {

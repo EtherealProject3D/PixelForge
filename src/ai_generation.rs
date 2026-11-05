@@ -294,13 +294,22 @@ impl Drop for ProgressStop {
     fn drop(&mut self) { self.0.store(true, Ordering::Relaxed); }
 }
 
+fn valid_dimensions(width:u32,height:u32)->bool {
+    (256..=4096).contains(&width) && (256..=4096).contains(&height) && width%16==0 && height%16==0
+}
+#[cfg(test)]
+mod dimension_tests {
+    #[test] fn generator_accepts_finer_grid_and_rejects_invalid_dimensions() {
+        for (w,h) in [(1024,576),(1024,672),(1024,688),(288,1024)] {assert!(super::valid_dimensions(w,h));}
+        for (w,h) in [(1023,576),(1024,250),(4097,1024)] {assert!(!super::valid_dimensions(w,h));}
+    }
+}
 pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sync::atomic::AtomicU32>) -> Result<image::RgbaImage, String> {
     ensure_server()?;
     if request.prompt.trim().is_empty() { return Err("Enter a generation prompt".into()); }
     if request.checkpoint.trim().is_empty() { return Err("Select a local checkpoint".into()); }
-    if !(256..=4096).contains(&request.width) || !(256..=4096).contains(&request.height)
-        || request.width % 64 != 0 || request.height % 64 != 0 {
-        return Err("Dimensions must be multiples of 64, between 256 and 4096".into());
+    if !valid_dimensions(request.width,request.height) {
+        return Err("Dimensions must be multiples of 16, between 256 and 4096".into());
     }
     if cancel.load(Ordering::Relaxed) { return Err("Generation cancelled".into()); }
     if !(1..=100).contains(&request.steps) {return Err("Steps must be between 1 and 100".into());}
