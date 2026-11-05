@@ -2,6 +2,8 @@
 
 ### Create. Restore. Refine. Locally.
 
+[![Developed with ChatGPT](https://img.shields.io/badge/Developed%20with-ChatGPT-10a37f?logo=openai&logoColor=white)](CONTRIBUTORS.md)
+
 PixelForge is a Windows desktop image studio that brings local AI generation, conversational editing, photo restoration, and traditional adjustments into one workspace. Generate an image or import a photograph, make changes, and compare every result without switching between separate viewers.
 
 **Version 0.6.3 · Windows x64 · Rust + egui · Local ComfyUI**
