@@ -2173,6 +2173,10 @@ impl PixelForge {
             if ui.add_enabled(can_rotate, egui::Button::new("Rotate Right")).on_hover_text("Rotate this version 90° clockwise. Later edits use this orientation.").clicked() {
                 self.rotate_workspace_version(ui.ctx(), true);
             }
+            if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("+ Save New Version"))
+                .on_hover_text("Save the current edits as a new version. Use File > Save Project to save the whole history to disk.").clicked() {
+                self.keep_workspace_version(ui.ctx(),"Manual edits");
+            }
             if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Version")).clicked() {
                 self.remove_workspace_version(self.generation_selected);
             }
@@ -2301,8 +2305,8 @@ impl PixelForge {
     }
 
     fn workspace_filmstrip_height(ui:&egui::Ui) -> f32 {
-        // Thumbnail, button padding, caption, spacing, separator and scrollbar.
-        68.0+ui.spacing().button_padding.y*2.0+ui.text_style_height(&egui::TextStyle::Small)+ui.spacing().item_spacing.y*3.0+24.0
+        // Fixed thumbnail cells and captions, with only the scrollbar gutter below.
+        96.0+ui.text_style_height(&egui::TextStyle::Small)+ui.spacing().item_spacing.y*2.0+ui.spacing().scroll.bar_width+8.0
     }
 
     fn show_workspace_details(&self,ui:&mut egui::Ui) {
@@ -2318,25 +2322,16 @@ impl PixelForge {
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
         self.capture_workspace_editor();
         ui.separator();
-        let mut save_version=false;
         let mut remove_version=None;
         let mut rename_version=None;
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.strong("Versions");
-                save_version=ui.add_enabled(!self.generation_running && !self.ai_running,
-                    egui::Button::new("+ Save New Version"))
-                    .on_hover_text("Create a new thumbnail with the current adjustments. Earlier versions stay available for comparison or reverting. Use File > Save Project to save the whole history to disk.")
-                    .clicked();
-            });
-            ui.separator();
+        ui.spacing_mut().scroll.floating=false;
         egui::ScrollArea::horizontal().id_salt("studio_filmstrip").max_height(Self::workspace_filmstrip_height(ui)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 for (index, item) in self.generation_gallery.iter().enumerate() {
                     ui.vertical(|ui| {
                         let size = item.texture.size_vec2();
-                        let thumb = size * (68.0 / size.x.max(size.y));
-                        let response=ui.add(egui::Button::image(egui::Image::new((item.texture.id(), thumb))).selected(index == self.generation_selected))
+                        let thumb = size * (92.0 / size.x.max(size.y));
+                        let response=ui.add_sized([116.0,96.0],egui::Button::image(egui::Image::new((item.texture.id(), thumb))).selected(index == self.generation_selected))
                             .on_hover_text(item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt));
                         if response.clicked() {
                             self.generation_selected=index;
@@ -2353,15 +2348,13 @@ impl PixelForge {
                                 ui.close();
                             }
                         });
-                        ui.add_sized([100.0,ui.text_style_height(&egui::TextStyle::Small)],egui::Label::new(egui::RichText::new(item.version_label(index)).small()).truncate()).on_hover_text(item.version_label(index));
+                        ui.add_sized([116.0,ui.text_style_height(&egui::TextStyle::Small)],egui::Label::new(egui::RichText::new(item.version_label(index)).small()).truncate()).on_hover_text(item.version_label(index));
                     });
                 }
             });
         });
 
-        });
         if let Some(index)=remove_version {self.remove_workspace_version(index);}
-        if save_version {self.keep_workspace_version(ui.ctx(),"Manual edits");}
         if let Some(rename)=rename_version {self.rename_version=Some(rename);}
         if let Some((index, mut name))=self.rename_version.take() {
             let mut open=true;
