@@ -266,3 +266,10 @@ build since Dev intentionally does not use the release updater.
 
 - Replace the collapsed paragraph reference with visible, grouped action/control rows for text editing, default aliases, sliders, numeric fields, and workspace/window controls. Reference controls remain read-only; customizable shortcuts remain above.
 - Validation: cargo check and release dev build completed.
+
+### Loading feedback and duplicate-instance warning
+
+- A centered native loading indicator appears before graphics initialization and closes at the first UI frame. Each running copy retains a hidden per-profile coordinator.
+- Concurrent launches during loading bring forward that indicator instead of creating a second copy. Once ready, another launch asks whether to open another instance (Yes) or show the existing one (No). Dev and release coordinate separately; closing or crashing releases the coordinator automatically.
+- The Dev launcher opens current builds directly. Source/assets/build-input changes trigger a build with a centered loading prompt; duplicate build-launch requests are serialized. Both launcher entry points share this behavior.
+- Validation: 146 tests passed, one ignored; build completed; immediate double-launch produced one main window, and ready-state warning paths were exercised. One local direct launch measured 0.174 seconds to first UI frame; this excludes launcher/process startup overhead and is not a cold-start guarantee.

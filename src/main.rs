@@ -6,6 +6,7 @@ mod interaction;
 mod numeric;
 mod profile;
 mod display;
+mod startup;
 mod compatibility;
 mod resolution;
 mod backend;
@@ -6548,6 +6549,7 @@ impl eframe::App for PixelForge {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        startup::ready(_frame);
         for action in self.interaction.begin_frame(ctx) {self.edit_command(ctx,action);}
         self.updater.poll(ctx,self.interaction.automatic_updates);
         self.display.update(ctx);
@@ -7099,6 +7101,7 @@ impl eframe::App for PixelForge {
 }
 
 fn main() -> eframe::Result {
+    let Some(_startup) = startup::begin() else { return Ok(()); };
     let icon_image = image::load_from_memory(include_bytes!("../assets/pixelforge_window.png"))
         .expect("Failed to load PixelForge window icon")
         .into_rgba8();
