@@ -41,8 +41,7 @@ publisher signatures when available. Existing in-app updates already verify
 published checksums before staging the executable or setup.
 
 Tag-triggered CI now creates a DRAFT release. It does not mark a development build
-as latest or publish it. No v0.6.3 release or tag was created during this work.
-A maintainer must review artifacts and obtain user approval before publishing final.
+as latest or publish it. The user approved final v0.6.3 publication on 2026-11-04. Draft artifacts must still be verified before publishing.
 
 ## Signing evaluation and proposed adoption
 
