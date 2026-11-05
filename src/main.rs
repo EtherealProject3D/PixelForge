@@ -6303,7 +6303,6 @@ impl eframe::App for PixelForge {
             }
         }
 
-        self.show_project_tabs(ctx);
         self.poll_export(ctx);
         self.poll_preview(ctx);
         self.poll_ai_upscale(ctx);
@@ -6480,6 +6479,7 @@ impl eframe::App for PixelForge {
                 });
             });
         });
+        self.show_project_tabs(ctx);
         egui::SidePanel::right("tools")
             .exact_width(360.0)
             .resizable(false)
