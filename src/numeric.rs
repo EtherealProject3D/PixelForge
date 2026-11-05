@@ -159,6 +159,7 @@ impl Widget for Slider<'_> {
                 .text(&self.text)
                 .step_by(if integral { 1.0 } else { 0.1 })
                 .max_decimals(if integral { 0 } else { 1 })
+                .min_decimals(if integral { 0 } else { 1 })
                 .drag_value_speed(1.0)
                 .suffix(if self.percent { "%" } else { &self.suffix });
             if let Some(format) = self.format.as_ref().filter(|_| !self.percent) {
@@ -287,6 +288,7 @@ impl Widget for DragValue<'_> {
                     .range(self.range.clone())
                     .speed(self.speed)
                     .max_decimals(if self.integral { 0 } else { 1 })
+                    .min_decimals(if self.integral { 0 } else { 1 })
                     .suffix(&self.suffix)
                     .update_while_editing(self.editing),
             )

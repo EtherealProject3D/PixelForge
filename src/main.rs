@@ -2726,9 +2726,16 @@ impl PixelForge {
                         ui.separator();
                     }
                     ui.scope(|ui| {
-                        ui.spacing_mut().button_padding = egui::vec2(8.0, 3.0);
-                        ui.spacing_mut().interact_size.y = 26.0;
-                        ui.menu_button("+", |ui| {
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(24.0, 24.0), egui::Sense::click());
+                        let response = response.on_hover_text("New or open project");
+                        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, "New or open project"));
+                        let visuals = ui.style().interact(&response);
+                        ui.painter().rect(rect, 4.0, visuals.bg_fill, visuals.bg_stroke, egui::StrokeKind::Inside);
+                        let center = rect.center();
+                        let stroke = egui::Stroke::new(1.2_f32, visuals.fg_stroke.color);
+                        ui.painter().line_segment([center-egui::vec2(4.0,0.0), center+egui::vec2(4.0,0.0)], stroke);
+                        ui.painter().line_segment([center-egui::vec2(0.0,4.0), center+egui::vec2(0.0,4.0)], stroke);
+                        egui::Popup::menu(&response).show(|ui| {
                             if ui.button("New Blank Project").clicked() {
                                 self.create_project_tab();
                                 ui.close();
@@ -2741,7 +2748,7 @@ impl PixelForge {
                                 ui.close();
                                 self.open_project(ctx);
                             }
-                        }).response.on_hover_text("New or open project");
+                        });
                     });
                 });
             });
