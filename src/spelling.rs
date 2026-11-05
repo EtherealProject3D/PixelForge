@@ -84,9 +84,10 @@ impl PromptSpelling {
         }
         let mut correction:Option<(Issue,String)>=None;
         let mut ignore=None;
-        if let Some(issue)=field.menu_issue.clone().filter(|_|field.checked==*text && self.enabled) {
-            output.response.context_menu(|ui|suggestions(ui,&issue,&mut correction,&mut ignore));
-        }
+        let issue=field.menu_issue.clone().filter(|_|field.checked==*text && self.enabled);
+        crate::interaction::text_menu(ui,&output.response,text,&output.state,|ui| {
+            if let Some(issue)=&issue {ui.separator();suggestions(ui,issue,&mut correction,&mut ignore);}
+        });
         if let Some((issue,replacement))=correction {apply_correction(text,&field.checked,&issue,&replacement);}
         if let Some(word)=ignore {self.ignored.insert(word.to_lowercase());}
         if field.observed!=*text {

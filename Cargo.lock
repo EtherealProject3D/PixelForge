@@ -2939,6 +2939,7 @@ dependencies = [
 name = "pixelforge"
 version = "0.6.3"
 dependencies = [
+ "arboard",
  "ash",
  "eframe",
  "egui",

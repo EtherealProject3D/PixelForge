@@ -96,6 +96,7 @@ fn stage(release:Release, progress:Arc<AtomicU64>, total:Arc<AtomicU64>) -> Resu
 }
 pub struct Manager {
     pub open: bool,
+    startup_checked: bool,
     message: String,
     release: Option<Release>,
     staged: Option<PathBuf>,
@@ -105,23 +106,37 @@ pub struct Manager {
     total: Arc<AtomicU64>,
 }
 impl Default for Manager {
-    fn default()->Self {Self {open:false,message:"Check for a newer published release.".into(),release:None,staged:None,check_rx:None,download_rx:None,bytes:Arc::new(AtomicU64::new(0)),total:Arc::new(AtomicU64::new(0))}}
+    fn default()->Self {Self {open:false,startup_checked:false,message:"Check for a newer published release.".into(),release:None,staged:None,check_rx:None,download_rx:None,bytes:Arc::new(AtomicU64::new(0)),total:Arc::new(AtomicU64::new(0))}}
 }
 impl Manager {
     pub fn busy(&self)->bool {self.check_rx.is_some()||self.download_rx.is_some()}
+    pub fn available(&self)->bool {self.release.is_some()}
+    pub fn start_check(&mut self) {
+        if self.busy() || crate::profile::is_dev() {return;}
+        self.message="Checking GitHub Releases…".into();
+        let (tx,rx)=mpsc::channel();self.check_rx=Some(rx);
+        std::thread::spawn(move|| {
+            let result=(|| {let value:Value=client()?.get(API).timeout(Duration::from_secs(20)).send().map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json().map_err(|e|e.to_string())?;parse_release(&value)})();
+            let _=tx.send(result);
+        });
+    }
+    pub fn poll(&mut self,ctx:&egui::Context,automatic:bool) {
+        if !self.startup_checked {self.startup_checked=true;if automatic {self.start_check();}}
+        if let Some(result)=self.check_rx.as_ref().and_then(|r|r.try_recv().ok()) {
+            self.check_rx=None;
+            match result {Ok(release)=>{self.message=if release.is_some(){"A new version is available."}else{"You have the latest published version."}.into();self.release=release;},Err(e)=>self.message=format!("Could not check for updates: {e}")}
+        }
+        if self.check_rx.is_some() {ctx.request_repaint_after(Duration::from_millis(100));}
+    }
     pub fn show(&mut self,ctx:&egui::Context,can_restart:bool)->bool {
         if crate::profile::is_dev() {
             if self.open {
                 egui::Window::new("PixelForge Dev").collapsible(false).open(&mut self.open).show(ctx,|ui| {
-                    ui.label("This development copy uses the source checkout. Close it and reopen PixelForge Dev to rebuild the latest local code.");
-                    ui.label("Use the installed PixelForge app for published releases and in-app updates.");
+                    crate::interaction::label(ui,"This development copy uses the source checkout. Close it and reopen PixelForge Dev to rebuild the latest local code.");
+                    crate::interaction::label(ui,"Use the installed PixelForge app for published releases and in-app updates.");
                 });
             }
             return false;
-        }
-        if let Some(result)=self.check_rx.as_ref().and_then(|r|r.try_recv().ok()) {
-            self.check_rx=None;
-            match result {Ok(release)=>{self.message=if release.is_some(){"A new version is available."}else{"You have the latest published version."}.into();self.release=release;},Err(e)=>self.message=format!("Could not check for updates: {e}")}
         }
         if let Some(result)=self.download_rx.as_ref().and_then(|r|r.try_recv().ok()) {
             self.download_rx=None;
@@ -134,17 +149,15 @@ impl Manager {
         egui::Window::new("PixelForge Updates").collapsible(false).open(&mut open).default_width(520.0).min_width(440.0)
             .default_pos(ctx.screen_rect().center()-egui::vec2(260.0,160.0)).resizable(true).show(ctx,|ui| {
             ui.heading(format!("PixelForge v{}",env!("CARGO_PKG_VERSION")));
-            ui.label("Updates come from published PixelForge GitHub releases.");
+            crate::interaction::label(ui,"Updates come from published PixelForge GitHub releases.");
             if ui.add_enabled(!self.busy(),egui::Button::new("Check for Updates")).clicked() {
-                self.release=None;self.staged=None;self.message="Checking GitHub Releases…".into();
-                let (tx,rx)=mpsc::channel();self.check_rx=Some(rx);
-                std::thread::spawn(move|| {let result=(|| {let value:Value=client()?.get(API).send().map_err(|e|e.to_string())?.error_for_status().map_err(|e|e.to_string())?.json().map_err(|e|e.to_string())?;parse_release(&value)})();let _=tx.send(result);});
+                self.staged=None;self.start_check();
             }
-            ui.label(&self.message);
+            crate::interaction::label(ui,&self.message);
             if self.busy() {ui.spinner();}
             if let Some(release)=self.release.clone() {
-                ui.strong(format!("Available: {}",release.tag));
-                egui::ScrollArea::vertical().max_height(220.0).show(ui,|ui| {ui.label(&release.notes);});
+                crate::interaction::strong(ui,format!("Available: {}",release.tag));
+                egui::ScrollArea::vertical().max_height(220.0).show(ui,|ui| {crate::interaction::label(ui,&release.notes);});
                 if self.staged.is_none() && ui.add_enabled(!self.busy(),crate::theme::primary("Download Update")).clicked() {
                     self.bytes.store(0,Ordering::Relaxed);self.total.store(0,Ordering::Relaxed);
                     let (tx,rx)=mpsc::channel();self.download_rx=Some(rx);self.message="Downloading and verifying update…".into();
@@ -158,8 +171,8 @@ impl Manager {
                 ui.add(egui::ProgressBar::new(if total>0{bytes as f32/total as f32}else{0.0}).text(format!("{:.1} / {:.1} MB",bytes as f64/1e6,total as f64/1e6)));
             }
             if self.staged.is_some() {
-                if installed_copy() {ui.label("The setup wizard will ask Windows for administrator permission. Finish setup to reopen PixelForge.");}
-                if !can_restart {ui.label("Save all open projects and finish running operations before installing.");}
+                if installed_copy() {crate::interaction::label(ui,"The setup wizard will ask Windows for administrator permission. Finish setup to reopen PixelForge.");}
+                if !can_restart {crate::interaction::label(ui,"Save all open projects and finish running operations before installing.");}
                 if ui.add_enabled(can_restart,crate::theme::primary("Install & Restart")).clicked() {
                     match self.install() {Ok(())=>restart=true,Err(e)=>self.message=e}
                 }
@@ -202,6 +215,18 @@ impl Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn background_result_badges_without_opening_downloading_or_installing() {
+        let value=serde_json::json!({"tag_name":"v9.2.1","draft":false,"prerelease":false,"assets":[
+            {"name":"PixelForge-v9.2.1-windows-x64.zip","browser_download_url":format!("{DOWNLOADS}v9.2.1/PixelForge-v9.2.1-windows-x64.zip")},
+            {"name":"SHA256SUMS.txt","browser_download_url":format!("{DOWNLOADS}v9.2.1/SHA256SUMS.txt")} ]});
+        let (tx,rx)=mpsc::channel();let mut manager=Manager::default();manager.check_rx=Some(rx);
+        tx.send(parse_release(&value)).unwrap();
+        manager.poll(&egui::Context::default(),true);
+        assert!(manager.available());assert!(!manager.open);assert!(manager.download_rx.is_none());assert!(manager.staged.is_none());
+        let mut disabled=Manager::default();disabled.poll(&egui::Context::default(),false);
+        disabled.poll(&egui::Context::default(),true);assert!(disabled.check_rx.is_none()); // Setting applies next startup.
+    }
     #[test]
     fn only_newer_stable_official_complete_releases_are_offered() {
         let mut release=serde_json::json!({"tag_name":"v9.2.1","draft":false,"prerelease":false,"body":"Notes","assets":[

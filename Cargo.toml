@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 eframe = { version = "0.32", features = ["persistence"] }
 egui = "0.32"
+arboard = { version = "3.7", default-features = false }
 image = "0.25"
 rfd = "0.15"
 ash = "0.38"

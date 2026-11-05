@@ -57,8 +57,8 @@ impl Display {
             true,
             "Fullscreen (hide title bar and taskbar)",
         );
-        ui.label("F11 toggles fullscreen.");
-        ui.label("Uses the entire current monitor, including ultrawide displays.");
+        crate::interaction::label(ui,"The fullscreen shortcut can be changed under Hotkeys.");
+        crate::interaction::label(ui,"Uses the entire current monitor, including ultrawide displays.");
         if !self.error.is_empty() {
             ui.colored_label(egui::Color32::YELLOW, &self.error);
         }
@@ -81,6 +81,7 @@ impl Display {
             ui.ctx().send_viewport_cmd(Cmd::Minimized(true));
         }
     }
+    pub fn toggle(&mut self) {self.fullscreen=!self.fullscreen;}
     pub fn update(&mut self, ctx: &Context) {
         if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F11)) {
             self.fullscreen = !self.fullscreen;

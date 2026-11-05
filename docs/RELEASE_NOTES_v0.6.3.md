@@ -164,3 +164,53 @@ analysis groups are plain subheadings, without separate collapse controls.
 The existing 130 regression tests pass (one optional dependency test ignored).
 Check the four section headings in Edit, collapse and reopen Image Adjustments, and
 confirm Auto Enhance and all slider groups reappear together.
+
+## Startup updates, menus, shortcuts and input controls
+
+- On launch, installed / portable release builds check for a newer stable published
+  GitHub release in the background. Updates becomes yellow when one is available.
+  Nothing opens, downloads or installs automatically. Settings has the saved checkbox
+  Check for updates automatically at startup (default on); manual checking remains.
+  PixelForge Dev keeps automatic checks and release installation disabled.
+- Settings is a separate top-bar button. Edit now has Undo, Redo, Copy, Cut and Paste
+  with their assigned shortcuts and enabled states. The old reset commands were
+  removed from that menu; adjustment-panel reset controls remain.
+- Settings > Hotkeys includes Undo, Redo, Copy, Cut, Paste, Select All and Fullscreen.
+  Click a binding to capture a combination or choose modifiers / key explicitly.
+  Duplicate bindings and reserved navigation keys are rejected. Reset Hotkeys to
+  Defaults restores Ctrl+Z/Y/C/X/V/A and F11. Assignments and the startup setting are
+  stored separately from existing display / mouse settings in interaction.json in
+  the active profile, preserving stable / Dev separation.
+- Undo / Redo operate on the text editor or the existing selection-mask history.
+  This does not add a general image-edit undo stack. Text selections survive opening
+  the Edit or context menu so commands affect the field the user was editing.
+- Editable text has Cut / Copy / Paste on right-click, with assigned shortcuts.
+  Read-only selectable labels offer Copy and disable Cut / Paste. Spelling suggestions
+  remain below those actions. No image-pixel clipboard support was added.
+- Ctrl+A remains. Shift+arrow / Home / End no longer extends text selections, and
+  Ctrl+H/W/U/K default text deletions are disabled. Ordinary navigation and deletion
+  remain; the Settings reference documents text and mouse controls. Native Windows
+  file dialogs keep Windows behavior.
+- Numeric controls retain typing and dragging. Wheel changes the displayed value by
+  1, Ctrl+wheel by 0.1 for decimal values, and Shift+wheel by 5. Percent controls use
+  percentage points. Numeric fields use Ctrl+drag for fine control, replacing Shift.
+  The wheel is consumed over the numeric control, avoiding simultaneous sidebar scroll.
+  Generator dimensions move in their selected valid grid increments. Limits, locks,
+  exact whole-number seed increments and crop pixel sizing are retained.
+- PixelForge is centered across the top bar. Unsaved changes sits immediately after
+  the divider following Updates. On narrower windows the left menu region can scroll
+  horizontally rather than overlap the fixed title or fullscreen window controls.
+
+Validation: 138 tests passed, zero failures, one optional dependency-download test
+ignored. New tests cover text selection / Copy / Cut / Paste / Undo / Redo routing,
+readonly selection preservation and disabled edits, custom bindings and conflicts,
+removed keyboard selection / deletion behavior, percent and integer wheel increments,
+large seed precision, generator grid increments, and background update notification
+without opening a window or downloading. Startup notification uses mock release data;
+no final release was published or installed.
+
+Try the Dev build: Settings > Hotkeys (change and reset a binding); Edit commands while
+a prompt field has selected text; right-click selected read-only text; wheel over AI
+strength with no modifier / Ctrl / Shift; Ctrl-drag an editable number; check the
+centered top-bar title and unsaved indicator. Release startup checks need a release
+build since Dev intentionally does not use the release updater.
