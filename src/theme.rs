@@ -18,6 +18,8 @@ pub fn apply(ctx: &egui::Context) {
     visuals.weak_text_color = Some(Color32::from_rgb(166, 180, 199));
     visuals.selection.bg_fill = ACCENT;
     visuals.selection.stroke = Stroke::new(1.0_f32, Color32::WHITE);
+    visuals.text_cursor.stroke = Stroke::new(2.0_f32, Color32::WHITE);
+    visuals.text_cursor.blink = false;
     visuals.hyperlink_color = Color32::from_rgb(116, 183, 255);
     visuals.window_corner_radius = CornerRadius::same(10);
     visuals.menu_corner_radius = CornerRadius::same(7);
@@ -80,18 +82,19 @@ pub fn collapsible_section<R>(
     title: &str,
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
-    collapsible_section_reveal(ui, title, false, body)
+    collapsible_section_reveal(ui, title, true, false, body)
 }
 
 pub fn collapsible_section_reveal<R>(
     ui: &mut egui::Ui,
     title: &str,
+    default_open: bool,
     reveal: bool,
     body: impl FnOnce(&mut egui::Ui) -> R,
 ) -> Option<R> {
     let id = ui.make_persistent_id(("edit_section", title));
     let mut state =
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true);
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open);
     if reveal { state.set_open(true); }
     let text = ui.painter().layout_no_wrap(
         title.into(),
@@ -154,7 +157,11 @@ pub fn collapsible_section_reveal<R>(
 }
 
 pub fn primary(label: &str) -> egui::Button<'_> {
-    egui::Button::new(egui::RichText::new(label).color(Color32::WHITE).strong())
+    primary_text(egui::RichText::new(label))
+}
+
+pub fn primary_text<'a>(label: egui::RichText) -> egui::Button<'a> {
+    egui::Button::new(label.color(Color32::WHITE).strong())
         .fill(ACCENT)
         .stroke(Stroke::new(1.0_f32, Color32::from_rgb(87, 149, 218)))
 }

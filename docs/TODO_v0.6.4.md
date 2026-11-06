@@ -1,8 +1,8 @@
-# Pixel Forge v0.6.4 to-do list
+# Pixel Forge theme backlog
 
 ## Themes
 
-User-requested scope, deferred from v0.6.3. Planning only; do not implement as part of v0.6.3.
+User-requested scope, deferred beyond v0.6.4. A release version has yet to be assigned.
 
 - Offer Dark, Light, Windows, and Custom theme choices in Settings > Appearance.
 - Preserve the current palette as the default Dark theme.

@@ -13,6 +13,7 @@ mod backend;
 mod updater;
 mod ai_denoise;
 mod ai_generation;
+mod prompt_guide;
 mod ai_restoration;
 mod ai_upscale;
 mod analysis;
@@ -547,6 +548,7 @@ struct PixelForge {
     generation_prompt: String,
     generation_negative: String,
     generation_auto_negative: bool,
+    prompt_guide: prompt_guide::PromptGuide,
     generation_checkpoint: String,
     generation_checkpoints: Vec<String>,
     generation_width: u32,
@@ -717,6 +719,8 @@ struct PixelForge {
 
 impl Default for PixelForge {
     fn default() -> Self {
+        let (recommended_steps, recommended_cfg, _) = Self::recommended_generation_settings("");
+        let (generation_width, generation_height) = generation_dimensions(0, 4, 32);
         Self {
             inactive_tabs: Vec::new(),
             active_tab: 0,
@@ -726,7 +730,7 @@ impl Default for PixelForge {
             generation_size: 0,
             generation_unlock_dimensions: false,
             generation_custom_size: false,
-            generation_resolution: 1,
+            generation_resolution: 4,
             generation_dimension_step: 32,
             generation_zoom: 1.0,
             generation_pan: Vec2::ZERO,
@@ -759,13 +763,14 @@ impl Default for PixelForge {
             generation_workspace: true,
             generation_prompt: String::new(),
             generation_negative: String::new(),
-            generation_auto_negative: true,
+            generation_auto_negative: false,
+            prompt_guide: prompt_guide::PromptGuide::load(),
             generation_checkpoint: String::new(),
             generation_checkpoints: Vec::new(),
-            generation_width: 512,
-            generation_height: 512,
-            generation_steps: 25,
-            generation_cfg: 7.0,
+            generation_width,
+            generation_height,
+            generation_steps: recommended_steps,
+            generation_cfg: recommended_cfg,
             generation_seed: 42,
             generation_rx: None,
             generation_running: false,
@@ -1320,6 +1325,7 @@ impl PixelForge {
                         if !models.contains(&self.generation_checkpoint) && self.generation_checkpoint!=ai_generation::FLUX_KLEIN && self.generation_checkpoint!=ai_generation::Z_IMAGE {
                             self.generation_checkpoint =
                                 models.first().cloned().unwrap_or_default();
+                            self.reset_generation_sampling();
                         }
                         self.generation_status =
                             format!("Found {} local checkpoints", models.len());
@@ -1439,6 +1445,12 @@ impl PixelForge {
         } else {
             (30, 6.0, "Unknown checkpoint: conservative SDXL starting point, 30 steps and CFG 6.")
         }
+    }
+
+    fn reset_generation_sampling(&mut self) {
+        let (steps, cfg, _) = Self::recommended_generation_settings(&self.generation_checkpoint);
+        self.generation_steps = steps;
+        self.generation_cfg = cfg;
     }
 
     fn capture_workspace_editor(&mut self) {
@@ -1718,7 +1730,7 @@ impl PixelForge {
     }
 
     fn show_model_library(&mut self,ui:&mut egui::Ui) {
-        theme::collapsible_section_reveal(ui,"Model Library",self.model_library_reveal,|ui| {
+        theme::collapsible_section_reveal(ui,"Model Library",false,self.model_library_reveal,|ui| {
             crate::interaction::label(ui,"Generation and editing models");
             if self.install_folder.is_none() && !self.install_folder_manual {
                 self.install_folder=model_installer::detect_models_folder(&self.generation_checkpoints);
@@ -1749,8 +1761,7 @@ impl PixelForge {
                     if installed {
                         if model.generation && ui.button("Use for Generation").clicked() {
                             self.generation_checkpoint=if model.bundle() {model.name.into()} else {backend_model.clone().unwrap_or_else(||model.files[0].file.to_owned())};
-                            let (steps,cfg,_)=Self::recommended_generation_settings(&self.generation_checkpoint);
-                            self.generation_steps=steps;self.generation_cfg=cfg;
+                            self.reset_generation_sampling();
                         }
                         if model.editing && ui.button("Use for Edits").clicked() {
                             self.edit_checkpoint=model.name.into();
@@ -1824,9 +1835,9 @@ impl PixelForge {
                 Ok(bytes)=>{
                     if model.bundle() {
                         if self.edit_checkpoint==model.name {self.edit_checkpoint=String::new();}
-                        if self.generation_checkpoint==model.name {self.generation_checkpoint=self.generation_checkpoints.first().cloned().unwrap_or_default();}
+                        if self.generation_checkpoint==model.name {self.generation_checkpoint=self.generation_checkpoints.first().cloned().unwrap_or_default(); self.reset_generation_sampling();}
                     }
-                    else if let Some(name)=&backend {self.generation_checkpoints.retain(|s|s!=name);if self.generation_checkpoint==*name {self.generation_checkpoint=self.generation_checkpoints.first().cloned().unwrap_or_default();}}
+                    else if let Some(name)=&backend {self.generation_checkpoints.retain(|s|s!=name);if self.generation_checkpoint==*name {self.generation_checkpoint=self.generation_checkpoints.first().cloned().unwrap_or_default(); self.reset_generation_sampling();}}
                     self.dependency_manager.refresh(self.install_folder.clone(),self.generation_checkpoints.clone());
                     format!("Removed model files; freed {:.2} GB. Restart ComfyUI to release any loaded model memory.",bytes as f64/1e9)
                 }
@@ -1843,13 +1854,9 @@ impl PixelForge {
         if ui.button("Connect / Refresh Models").clicked() {
             self.refresh_generation_models(&ctx);
         }
-        let (recommended_steps, recommended_cfg, recommendation) =
+        let (_, _, recommendation) =
             Self::recommended_generation_settings(&self.generation_checkpoint);
         crate::interaction::small(ui,recommendation);
-        if ui.small_button("Apply recommended Steps / CFG").clicked() {
-            self.generation_steps = recommended_steps;
-            self.generation_cfg = recommended_cfg;
-        }
         let selected = self.generation_checkpoint.to_ascii_lowercase();
         let best_for = if self.generation_checkpoint==ai_generation::Z_IMAGE {
             "Best for: Fast photographic generation, people, natural lighting, and texture."
@@ -1879,6 +1886,9 @@ impl PixelForge {
                     ui.selectable_value(&mut self.generation_style, i, *name);
                 }
             });
+        if selected.contains("cyberrealisticpony") {
+            crate::interaction::small(ui, "Style presets add prompt text. CyberRealistic Pony can still favor a photographic look, even with an illustration preset.");
+        }
 
         crate::interaction::label(ui,"Aspect ratio");
         egui::ComboBox::from_id_salt("sidebar_Aspect_ratio").width(ui.available_width()).truncate()
@@ -2022,6 +2032,9 @@ impl PixelForge {
             crate::interaction::label(ui,"CFG");
             ui.add(numeric::Slider::new(&mut self.generation_cfg, 1.0..=20.0));
         }
+        if ui.small_button("Reset to recommended").clicked() {
+            self.reset_generation_sampling();
+        }
         ui.horizontal(|ui| {
             crate::interaction::label(ui,"Seed");
             ui.add(numeric::DragValue::new(&mut self.generation_seed));
@@ -2133,8 +2146,13 @@ impl PixelForge {
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
         theme::section(ui, "Initial prompt");
-        ui.collapsing("Generation settings", |ui| self.show_generation_settings(ui));
-        crate::interaction::label(ui,"Select Model");
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            egui::CollapsingHeader::new(egui::RichText::new("Generation Settings").heading().strong())
+                .show(ui, |ui| self.show_generation_settings(ui));
+            crate::interaction::small(ui, "Style, size, steps, and CFG");
+        });
+        theme::section(ui, "Select Model");
         let checkpoint_before_selection = self.generation_checkpoint.clone();
         let model_row_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button)) + ui.spacing().item_spacing.y;
         let generation_menu_height = model_row_height * (self.generation_checkpoints.len() + 2) as f32 + 16.0;
@@ -2169,13 +2187,38 @@ impl PixelForge {
             });
         if self.generation_checkpoint != checkpoint_before_selection {
             let (steps, cfg, _) = Self::recommended_generation_settings(&self.generation_checkpoint);
-            self.generation_steps = steps;
-            self.generation_cfg = cfg;
+            self.reset_generation_sampling();
             self.generation_status = format!("Applied recommended settings: {steps} steps, CFG {cfg:.1}. You can still adjust them manually.");
         }
         self.prompt_spelling.edit(ui,&mut self.generation_prompt,0,"Describe a new image…",4);
-        if ui.add_enabled(!self.generation_running && !self.ai_running && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty(), theme::primary("Create New Image")).clicked() {
+        let width = ui.available_width();
+        let button_height = ui.spacing().interact_size.y.max(
+            ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
+        );
+        let can_generate = !self.generation_running && !self.ai_running
+            && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty();
+        let create = egui::RichText::new("Create New Image").size(ui.text_style_height(&egui::TextStyle::Button) * 1.25);
+        let create_clicked = ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+            ui.add_enabled(can_generate, theme::primary_text(create).min_size(egui::vec2(width, button_height * 2.0))).clicked()
+        }).inner;
+        if create_clicked {
             self.submit_conversation(ui.ctx(), false);
+        }
+        ui.horizontal(|ui| {
+            let size = egui::vec2(((width - ui.spacing().item_spacing.x) * 0.5).max(0.0), button_height);
+            if ui.add_enabled(!self.generation_prompt.is_empty(), egui::Button::new("Clear Prompt").min_size(size)).clicked() {
+                self.generation_prompt.clear();
+            }
+            if ui.add(egui::Button::new("Prompt Guide").min_size(size)).clicked() {
+                self.prompt_guide.open = !self.prompt_guide.open;
+            }
+        });
+        if self.prompt_guide.open {
+            self.prompt_guide.show(
+                ui.ctx(),
+                &self.generation_checkpoint,
+                &mut self.generation_prompt,
+            );
         }
         ui.separator();
         theme::section(ui, "Negative prompt");
@@ -2521,6 +2564,7 @@ impl PixelForge {
 
     // Keep Generation Studio alive across document changes; editor state belongs to each tab.
     fn swap_generation_state(&mut self, other: &mut PixelForge) {
+        std::mem::swap(&mut self.prompt_guide, &mut other.prompt_guide);
         std::mem::swap(&mut self.rename_version, &mut other.rename_version);
         std::mem::swap(&mut self.generation_style, &mut other.generation_style);
         std::mem::swap(&mut self.generation_size, &mut other.generation_size);
@@ -6557,6 +6601,10 @@ impl PixelForge {
 }
 
 impl eframe::App for PixelForge {
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.prompt_guide.save_layout(storage);
+    }
+
     fn auto_save_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(1)
     }
@@ -7162,7 +7210,11 @@ fn main() -> eframe::Result {
 
             cc.egui_ctx
                 .set_pixels_per_point(native_scale * controls.ui_scale);
-            Ok(Box::new(PixelForge::default()))
+            let mut app = PixelForge::default();
+            if let Some(storage) = cc.storage {
+                app.prompt_guide.restore_layout(storage);
+            }
+            Ok(Box::new(app))
         }),
     )
 }

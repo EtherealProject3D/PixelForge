@@ -271,6 +271,17 @@ impl Display {
         }
         if self.applied != Some(self.fullscreen) {
             let startup = self.applied.is_none();
+            if self.fullscreen {
+                // A pending windowed restore must not resize or maximize fullscreen.
+                self.restore_frames = 0;
+                // Winit retains WS_MAXIMIZE when applying the fullscreen style.
+                // Clear it first so Windows can size the client area to the monitor.
+                // Keep self.maximized as the windowed state to restore on exit.
+                #[cfg(windows)]
+                if viewport.maximized == Some(true) {
+                    ctx.send_viewport_cmd(Cmd::Maximized(false));
+                }
+            }
             ctx.send_viewport_cmd(Cmd::Fullscreen(self.fullscreen));
             if startup && !self.fullscreen {ctx.send_viewport_cmd(Cmd::Maximized(self.maximized));}
             if !self.fullscreen {
@@ -465,6 +476,48 @@ mod tests {
         assert!(commands.contains(&Cmd::InnerSize(egui::vec2(3200.0, 800.0))));
         assert!(commands.contains(&Cmd::OuterPosition(egui::pos2(-5120.0 / 1.5, 80.0))));
     }
+    #[test]
+    #[cfg(windows)]
+    fn fullscreen_clears_native_maximize_and_restores_it_on_exit() {
+        let ctx = Context::default();
+        ctx.set_pixels_per_point(1.5);
+        let placement = Some([-5100.0, 120.0, 4800.0, 1200.0]);
+        let mut display = Display {
+            applied: Some(false),
+            placement,
+            ..Default::default()
+        };
+        let mut input = egui::RawInput::default();
+        let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+        viewport.fullscreen = Some(false);
+        viewport.maximized = Some(true);
+        display.toggle();
+        let output = ctx.run(input, |ctx| display.update(ctx));
+        assert_eq!(
+            output.viewport_output[&egui::ViewportId::ROOT].commands,
+            [Cmd::Maximized(false), Cmd::Fullscreen(true)],
+        );
+        assert!(display.maximized);
+        assert_eq!(display.placement, placement);
+
+        display.toggle();
+        let output = ctx.run(Default::default(), |ctx| display.update(ctx));
+        assert!(output.viewport_output[&egui::ViewportId::ROOT]
+            .commands
+            .contains(&Cmd::Fullscreen(false)));
+        let _ = ctx.run(Default::default(), |ctx| display.update(ctx));
+        let output = ctx.run(Default::default(), |ctx| display.update(ctx));
+        assert_eq!(
+            output.viewport_output[&egui::ViewportId::ROOT].commands,
+            [
+                Cmd::Maximized(false),
+                Cmd::InnerSize(egui::vec2(3200.0, 800.0)),
+                Cmd::OuterPosition(egui::pos2(-3400.0, 80.0)),
+                Cmd::Maximized(true),
+            ],
+        );
+    }
+
     #[test]
     fn only_f11_toggles_fullscreen_without_changing_geometry() {
         let ctx = Context::default();
