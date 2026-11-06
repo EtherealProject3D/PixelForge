@@ -580,4 +580,3 @@ mod tests {
         assert_eq!(display.placement, Some([100.0, 80.0, 1400.0, 900.0]));
     }
 }
-
