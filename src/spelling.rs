@@ -83,16 +83,19 @@ impl PromptSpelling {
             job.append(&value[offset..],0.0,normal);
             ui.fonts(|fonts|fonts.layout_job(job))
         };
+        let id = Self::editor_id(ui, field_id);
+        let selection = crate::interaction::secondary_selection(ui, id);
         let editor = egui::TextEdit::multiline(text)
-            .id(Self::editor_id(ui, field_id))
+            .id(id)
             .hint_text(hint)
             .desired_width(f32::INFINITY)
             .desired_rows(rows);
-        let output = if issues.is_empty() {
+        let mut output = if issues.is_empty() {
             editor.show(ui)
         } else {
             editor.layouter(&mut layouter).show(ui)
         };
+        crate::interaction::restore_secondary_selection(ui, &mut output, selection);
         if field_id == SCRATCHPAD_FIELD {
             if output.response.clicked() {
                 output.response.request_focus();
@@ -289,6 +292,58 @@ mod tests {
             )), "missing caret for {input:?}");
         }
     }
+    #[test]
+    fn right_click_preserves_highlight_for_prompt_cut_and_copy() {
+        let ctx = egui::Context::default();
+        let mut spelling = PromptSpelling::default();
+        spelling.enabled = false;
+        let mut prompt = "red fox and blue sky".to_owned();
+        let mut id = None;
+        let mut pointer = egui::Pos2::ZERO;
+        let mut frame = |events| {
+            let _ = ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        id = Some(PromptSpelling::editor_id(ui, 0));
+                        pointer = ui.next_widget_position() + egui::vec2(30.0, 12.0);
+                        spelling.edit(ui, &mut prompt, 0, "", 3);
+                    });
+                },
+            );
+            (id.unwrap(), pointer)
+        };
+        let (id, pointer) = frame(Vec::new());
+        let selection =
+            egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(7));
+        let mut state = egui::text_edit::TextEditState::load(&ctx, id).unwrap();
+        state.cursor.set_char_range(Some(selection));
+        state.store(&ctx, id);
+        ctx.memory_mut(|memory| memory.request_focus(id));
+
+        let click = |pressed| egui::Event::PointerButton {
+            pos: pointer,
+            button: egui::PointerButton::Secondary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(pointer), click(true)]);
+        frame(vec![click(false)]);
+        let state = egui::text_edit::TextEditState::load(&ctx, id).unwrap();
+        assert_eq!(state.cursor.char_range(), Some(selection));
+        assert!(crate::interaction::enabled(
+            &ctx,
+            crate::interaction::Action::Copy
+        ));
+        assert!(crate::interaction::enabled(
+            &ctx,
+            crate::interaction::Action::Cut
+        ));
+    }
+
     #[test]
     fn utf16_offsets_handle_emoji_and_accents() {
         let text="🦊 café teh";

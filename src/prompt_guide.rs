@@ -826,7 +826,7 @@ fn show_assist(
         local.show_status(ui);
         if local.models.is_empty() && local.pending.is_none() {
             ui.small(
-                "Set up Ollama in Setup and Maintenance, then download a local text model in Model Library.",
+                "Set up Ollama in Setup > Dependencies, then download a local text model in Model Library.",
             );
         }
     }

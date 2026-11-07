@@ -48,7 +48,7 @@ impl Config {
             "modern"=>self.modern.clone(),
             "legacy"=>self.legacy.clone(),
             _=>crate::dependencies::active_path(crate::dependencies::Component::Comfy).or_else(crate::dependencies::desktop_backend),
-        }.ok_or("No backend configured. Open Setup and Maintenance: keep Auto for the existing installation, or register a separate Modern / Legacy ComfyUI folder.")?;
+        }.ok_or("No backend configured. Open Setup > Setup & Diagnostics: keep Auto for the existing installation, or register a separate Modern / Legacy ComfyUI folder.")?;
         if !path.join("ComfyUI/main.py").is_file() || crate::compatibility::python(&path).is_none()
         {
             return Err("Selected backend is incomplete. Choose its portable root (containing ComfyUI and python_embeded), or the Desktop instance root. No fallback was silently selected.".into());

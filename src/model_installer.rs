@@ -202,13 +202,37 @@ pub fn remove_model_files(index:usize,root:&Path,backend_name:Option<&str>,inclu
     Ok(removed)
 }
 
-pub fn detect_models_folder(known:&[String]) -> Option<PathBuf> {
-    detect_checkpoint_folder(known).and_then(|p|p.parent().map(Path::to_path_buf)).or_else(|| {
-        crate::dependencies::active_path(crate::dependencies::Component::Comfy)?;
-        let root=crate::dependencies::root().join("models");
-        fs::create_dir_all(root.join("checkpoints")).ok()?;
-        Some(root)
-    })
+pub fn recommended_models_folder() -> PathBuf {
+    crate::dependencies::root().join("models")
+}
+
+pub fn chosen_models_folder() -> Option<PathBuf> {
+    let root = crate::profile::settings_root()?;
+    read_models_folder(&root)
+}
+
+pub fn save_models_folder(folder: &Path) -> Result<(), String> {
+    let root = crate::profile::settings_root().ok_or("APPDATA unavailable")?;
+    write_models_folder(&root, folder)
+}
+
+fn read_models_folder(root: &Path) -> Option<PathBuf> {
+    let bytes = fs::read(root.join("model-folder.json")).ok()?;
+    serde_json::from_slice::<PathBuf>(&bytes)
+        .ok()
+        .filter(|path| path.is_absolute())
+}
+
+fn write_models_folder(root: &Path, folder: &Path) -> Result<(), String> {
+    fs::create_dir_all(root).map_err(|error| error.to_string())?;
+    let temp = root.join("model-folder.json.new");
+    let bytes = serde_json::to_vec(folder).map_err(|error| error.to_string())?;
+    fs::write(&temp, bytes).map_err(|error| error.to_string())?;
+    fs::rename(temp, root.join("model-folder.json")).map_err(|error| error.to_string())
+}
+
+pub fn detect_models_folder(known: &[String]) -> Option<PathBuf> {
+    detect_checkpoint_folder(known).and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
 /// Resolve ComfyUI Desktop's extra-model-paths YAML, then verify the folder
@@ -278,6 +302,24 @@ mod tests {
         let path=std::env::temp_dir().join(format!("pixelforge-installer-{}-{}",std::process::id(),std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
         fs::create_dir_all(&path).unwrap();path
     }
+    #[test]
+    fn recommended_folder_matches_managed_backend_and_custom_choice_roundtrips() {
+        assert_eq!(
+            recommended_models_folder(),
+            crate::dependencies::root().join("models")
+        );
+        let root = fixture();
+        assert!(read_models_folder(&root).is_none());
+        let first = root.join("First Models");
+        let second = root.join("Second Models");
+        write_models_folder(&root, &first).unwrap();
+        assert_eq!(read_models_folder(&root), Some(first));
+        write_models_folder(&root, &second).unwrap();
+        assert_eq!(read_models_folder(&root), Some(second));
+        fs::remove_file(root.join("model-folder.json")).unwrap();
+        fs::remove_dir(root).unwrap();
+    }
+
     #[test]
     fn bundle_download_skips_existing_files_and_reports_aggregate_progress() {
         let root=fixture();fs::create_dir(root.join("vae")).unwrap();fs::write(root.join("vae/existing.safetensors"),b"keep").unwrap();

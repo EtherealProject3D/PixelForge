@@ -256,12 +256,38 @@ fn conversation_context(settings: &GenerationSettings) -> String {
 fn settings_json(s:&GenerationSettings)->serde_json::Value {serde_json::json!({"prompt":s.prompt,"negative":s.negative,"auto_negative":s.auto_negative,"checkpoint":s.checkpoint,"style":s.style,"ratio":s.ratio,"custom_size":s.custom_size,"unlock_dimensions":s.unlock_dimensions,"resolution":s.resolution,"dimension_step":s.dimension_step,"width":s.width,"height":s.height,"steps":s.steps,"cfg":s.cfg,"seed":s.seed,"refine_parent":s.refine_parent,"refine_strength":s.refine_strength,"refine_prompt":s.refine_prompt,"refine_masked":s.refine_masked})}
 fn settings_from_json(v:&serde_json::Value)->GenerationSettings {GenerationSettings {prompt:v["prompt"].as_str().unwrap_or("").into(),negative:v["negative"].as_str().unwrap_or("").into(),auto_negative:v["auto_negative"].as_bool().unwrap_or(false),checkpoint:v["checkpoint"].as_str().unwrap_or("").into(),style:v["style"].as_u64().unwrap_or(0) as usize,ratio:v["ratio"].as_u64().unwrap_or(0) as usize,custom_size:v["custom_size"].as_bool().unwrap_or(false),unlock_dimensions:v["unlock_dimensions"].as_bool().unwrap_or(false),resolution:v["resolution"].as_u64().unwrap_or(0) as usize,dimension_step:resolution::valid_step(v["dimension_step"].as_u64().unwrap_or(64) as u32),width:v["width"].as_u64().unwrap_or(1024) as u32,height:v["height"].as_u64().unwrap_or(1024) as u32,steps:v["steps"].as_u64().unwrap_or(30) as u32,cfg:v["cfg"].as_f64().unwrap_or(7.0) as f32,seed:v["seed"].as_u64().unwrap_or(0),refine_parent:v["refine_parent"].as_u64().map(|n|n as usize),refine_strength:v["refine_strength"].as_f64().map(|n|n as f32),refine_prompt:v["refine_prompt"].as_str().map(str::to_owned),refine_masked:v["refine_masked"].as_bool().unwrap_or(false)}}
 
+#[derive(Clone)]
 struct GeneratedItem {
+    group: Option<usize>,
     editor: studio::EditorState,
     settings: GenerationSettings,
     pixels: image::RgbaImage,
     texture: TextureHandle,
     seed: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ThumbnailGroup {
+    name: String,
+    collapsed: bool,
+}
+
+enum GroupDialog {
+    Name { group: Option<usize>, name: String },
+    Delete(usize),
+}
+
+#[derive(Clone, Copy)]
+struct ThumbnailDrag {
+    project: usize,
+    index: usize,
+}
+
+#[derive(Clone, Copy)]
+struct ThumbnailDrop {
+    index: usize,
+    group: Option<usize>,
+    before: usize,
 }
 
 impl GeneratedItem {
@@ -532,6 +558,8 @@ struct PixelForge {
     workspace_editor: Option<usize>,
     crop: Option<crop::Crop>,
     generation_gallery: Vec<GeneratedItem>,
+    thumbnail_groups: Vec<ThumbnailGroup>,
+    group_dialog: Option<GroupDialog>,
     generation_project_path: Option<PathBuf>,
     refinement_source: Option<usize>,
     refinement_strength: f32,
@@ -721,6 +749,8 @@ struct PixelForge {
 
 impl Default for PixelForge {
     fn default() -> Self {
+        let model_folder = model_installer::chosen_models_folder();
+        let install_folder_manual = model_folder.is_some();
         let (recommended_steps, recommended_cfg, _) = Self::recommended_generation_settings("");
         let (generation_width, generation_height) = generation_dimensions(0, 4, 32);
         Self {
@@ -748,6 +778,8 @@ impl Default for PixelForge {
             workspace_editor: None,
             crop: None,
             generation_gallery: Vec::new(),
+            thumbnail_groups: Vec::new(),
+            group_dialog: None,
             generation_project_path: None,
             refinement_source: None,
             refinement_strength: 0.35,
@@ -793,8 +825,8 @@ impl Default for PixelForge {
             updater: updater::Manager::default(),
             remove_model: None,
             model_library_open: false,
-            install_folder: None,
-            install_folder_manual: false,
+            install_folder: Some(model_folder.unwrap_or_else(model_installer::recommended_models_folder)),
+            install_folder_manual,
             ai_rx: None,
             ai_running: false,
             ai_denoise_level: 1,
@@ -1035,11 +1067,7 @@ impl PixelForge {
             else { self.status = "Drop a local image or .pxf project file".into(); }
         }
         while let Some(path) = queue.front().cloned() {
-            if self.generation_running || self.ai_running || self.exporting || self.ai_saving
-                || self.install_rx.is_some() || self.dependency_manager.busy()
-                || self.inactive_tabs.iter().any(|(_,tab)|tab.ai_running || tab.exporting || tab.ai_saving)
-                || self.pending_open.is_some() || self.closing_tab.is_some() || self.exit_confirmation {
-                self.status = "Dropped files queued until the current operation finishes".into();
+            if self.pending_open.is_some() || self.closing_tab.is_some() || self.exit_confirmation {
                 break;
             }
             let extension = path.extension().and_then(|s|s.to_str()).unwrap_or("").to_ascii_lowercase();
@@ -1049,40 +1077,12 @@ impl PixelForge {
                 queue.pop_front();
                 continue;
             }
-            // Studio projects replace the shared workspace, so protect every dirty tab.
-            let replaces_workspace = extension == "pxf" && generation_project::is_generation(&path).unwrap_or(false);
-            if replaces_workspace && (self.project_dirty || self.inactive_tabs.iter().any(|(_,tab)|tab.project_dirty)) {
-                let mut open = false;
-                let mut cancel = false;
-                egui::Window::new("Open dropped project?").collapsible(false).resizable(false)
-                    .pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.screen_rect().center()).show(ctx,|ui| {
-                        crate::interaction::label(ui,format!("Open {}?",path.file_name().unwrap_or_default().to_string_lossy()));
-                        crate::interaction::label(ui,"This project replaces the current workspace. Save your work first, or discard it to continue.");
-                        ui.horizontal(|ui| {
-                            if ui.button("Save Workspace & Open").clicked() {
-                                self.generation_status.clear();
-                                self.capture_workspace_editor();
-                                self.save_generation_project(false);
-                                open = self.generation_status.starts_with("Saved ");
-                            }
-                            open |= ui.button("Discard & Open").clicked();
-                            cancel = ui.button("Cancel").clicked();
-                        });
-                    });
-                if cancel {queue.pop_front();continue;}
-                if !open {break;}
-            }
             queue.pop_front();
             if extension == "pxf" {
-                if replaces_workspace {self.generation_status.clear();}
-                self.open_project_path(ctx,path);
-                if replaces_workspace && self.generation_status.starts_with("Opened ") {
-                    self.inactive_tabs.clear();
-                    self.project_path=None;
-                    self.image_path=None;
-                    self.project_dirty=false;
-                }
-            } else {self.load_image_path(ctx,path);}
+                self.open_project_path(ctx, path);
+            } else {
+                self.load_image_path(ctx, path);
+            }
             self.ensure_workspace(ctx);
         }
         self.file_drops = queue;
@@ -1333,9 +1333,11 @@ impl PixelForge {
                             format!("Found {} local checkpoints", models.len());
                         self.generation_checkpoints = models;
                         if !self.install_folder_manual {
-                            self.install_folder = model_installer::detect_models_folder(
-                                &self.generation_checkpoints,
-                            );
+                            if let Some(folder) =
+                                model_installer::detect_models_folder(&self.generation_checkpoints)
+                            {
+                                self.install_folder = Some(folder);
+                            }
                         }
                     }
                     Err(error) => self.generation_status = error,
@@ -1365,7 +1367,10 @@ impl PixelForge {
                 settings.seed = seed;
                 settings.width = image.width();
                 settings.height = image.height();
-                self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor: studio::EditorState::default(),
+                self.blank_project = false;
+                self.generation_gallery.push(GeneratedItem {
+                    group: None,
+                    editor: studio::EditorState::default(),
                     settings,
                     pixels: image,
                     texture,
@@ -1475,12 +1480,11 @@ impl PixelForge {
         let Some(item) = self.generation_gallery.get(self.generation_selected) else {return};
         let pixels = item.pixels.clone();
         let editor = item.editor.clone();
+        self.processed_texture = Some(item.texture.clone());
         self.texture = Some(ctx.load_texture("studio_original",ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR));
         self.image_size = [pixels.width() as usize,pixels.height() as usize];
         self.original_pixels = Some(pixels);
         self.workspace_editor = Some(self.generation_selected);
-        self.image_path = None;
-        self.project_path = None;
         self.set_current_adjustments(editor.global);
         self.selection_adjustments = editor.local;
         self.selection_adjustment_target = false;
@@ -1511,7 +1515,7 @@ impl PixelForge {
                 let mut settings = settings_from_json(&serde_json::json!({"checkpoint":"Imported image","width":pixels.width(),"height":pixels.height()}));
                 settings.custom_size=true;
                 let texture=self.texture.as_ref().expect("loaded editor has texture").clone();
-                self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
+                self.blank_project=false;self.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
                 self.generation_selected=self.generation_gallery.len()-1;
                 self.workspace_editor=Some(self.generation_selected);
                 self.capture_workspace_editor();
@@ -1625,7 +1629,7 @@ impl PixelForge {
         settings.width=w;settings.height=h;settings.custom_size=true;
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("Crop at {x}, {y}: {w} × {h}"));
         let seed=item.seed;
-        self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor,settings,pixels,texture,seed});
+        self.blank_project=false;self.generation_gallery.push(GeneratedItem {group:None, editor,settings,pixels,texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.refinement_source=None;
@@ -1644,7 +1648,7 @@ impl PixelForge {
         settings.refine_prompt=Some(label.into());
         let texture=ctx.load_texture(format!("studio_snapshot_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
         let seed=item.seed;
-        self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed});
+        self.blank_project=false;self.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings,pixels,texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -1699,7 +1703,7 @@ impl PixelForge {
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("{label} · strength {:.0}%",self.ai_strength*100.0));
         settings.checkpoint=format!("AI Tools: {label}");settings.width=pixels.width();settings.height=pixels.height();settings.steps=0;settings.cfg=0.0;
         let texture=ctx.load_texture(format!("studio_ai_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
-        self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
+        self.blank_project=false;self.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -1726,12 +1730,21 @@ impl PixelForge {
             crate::interaction::label(ui,"Connect a local model to begin.");
             if ui.button("Connect Models").clicked() { self.refresh_generation_models(ui.ctx()); }
         }
-        if self.generation_status.contains(ai_generation::CPU_FALLBACK_HINT)
-            && ui.add_enabled(
-                self.generation_models_rx.is_none() && !self.dependency_manager.busy()
-                    && !self.generation_running && !self.ai_running,
-                egui::Button::new("Try with CPU"),
-            ).clicked()
+        if self
+            .generation_status
+            .contains(ai_generation::CPU_FALLBACK_HINT)
+            && ui
+                .add_enabled(
+                    self.generation_models_rx.is_none()
+                        && !self.dependency_manager.busy()
+                        && !self.backend_jobs_running()
+                        && !self
+                            .inactive_tabs
+                            .iter()
+                            .any(|(_, tab)| tab.backend_jobs_running()),
+                    egui::Button::new("Try with CPU"),
+                )
+                .clicked()
         {
             match self.dependency_manager.try_cpu() {
                 Ok(()) => self.refresh_generation_models(ui.ctx()),
@@ -1759,9 +1772,6 @@ impl PixelForge {
             }
             ui.separator();
             crate::interaction::label(ui,"ComfyUI models");
-            if self.install_folder.is_none() && !self.install_folder_manual {
-                self.install_folder=model_installer::detect_models_folder(&self.generation_checkpoints);
-            }
             if let Some(folder)=&self.install_folder {
                 crate::interaction::label(ui,format!("Models folder: {}",folder.display()));
             } else {
@@ -1770,8 +1780,20 @@ impl PixelForge {
             if ui.add_enabled(self.install_rx.is_none(),egui::Button::new("Choose Models Folder…")).clicked() {
                 if let Some(folder)=rfd::FileDialog::new().set_title("Select the ComfyUI models folder (contains checkpoints, diffusion_models, text_encoders, vae)").pick_folder() {
                     // Also accept the old checkpoints-folder choice.
-                    self.install_folder=Some(if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder});
-                    self.install_folder_manual=true;
+                    let folder = if folder.file_name().is_some_and(|name| name == "checkpoints") {
+                        folder.parent().unwrap_or(&folder).to_path_buf()
+                    } else {
+                        folder
+                    };
+                    match model_installer::save_models_folder(&folder) {
+                        Ok(()) => {
+                            self.install_folder = Some(folder);
+                            self.install_folder_manual = true;
+                            self.dependency_manager.invalidate();
+                            self.install_status = "Models folder saved. Reconnect the managed backend to use it.".into();
+                        }
+                        Err(error) => self.install_status = format!("Cannot save models folder: {error}"),
+                    }
                 }
             }
             for (heading, generation, editing) in [
@@ -1808,7 +1830,7 @@ impl PixelForge {
                             let folder=self.install_folder.clone().or_else(||rfd::FileDialog::new().set_title("Select the ComfyUI models folder").pick_folder());
                             if let Some(folder)=folder {
                                 let folder=if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder};
-                                self.install_folder=Some(folder.clone());self.install_folder_manual=true;
+                                self.install_folder=Some(folder.clone());
                                 self.install_cancel.store(false,std::sync::atomic::Ordering::Relaxed);
                                 self.install_progress.store(0,std::sync::atomic::Ordering::Relaxed);
                                 self.install_total.store(0,std::sync::atomic::Ordering::Relaxed);
@@ -2107,29 +2129,122 @@ impl PixelForge {
         current_json["edit_checkpoint"] = serde_json::json!(self.edit_checkpoint);
         current_json["qwen_steps"] = serde_json::json!(self.qwen_steps);
         current_json["flux_steps"] = serde_json::json!(self.flux_steps);
-        let project=generation_project::GalleryProject {items:self.generation_gallery.iter().map(|i|generation_project::GalleryImage {settings:{let mut value=settings_json(&i.settings);value["editor"]=i.editor.to_json();value},pixels:i.pixels.clone(),seed:i.seed}).collect(),selected:self.generation_selected,compare_index:self.generation_compare_index,compare:self.generation_compare,current:current_json};
-        match generation_project::save(&path,&project) {Ok(())=>{self.generation_project_path=Some(path.clone());self.project_dirty=false;self.generation_status=format!("Saved {}",path.display());},Err(e)=>self.generation_status=format!("Save failed: {e}")}
+        current_json["thumbnail_groups"] =
+            serde_json::json!(self.thumbnail_groups.iter()
+            .map(|group| serde_json::json!({"name": group.name, "collapsed": group.collapsed}))
+            .collect::<Vec<_>>());
+        let project = generation_project::GalleryProject {
+            items: self
+                .generation_gallery
+                .iter()
+                .map(|i| generation_project::GalleryImage {
+                    settings: {
+                        let mut value = settings_json(&i.settings);
+                        value["editor"] = i.editor.to_json();
+                        value["thumbnail_group"] = serde_json::json!(i.group);
+                        value
+                    },
+                    pixels: i.pixels.clone(),
+                    seed: i.seed,
+                })
+                .collect(),
+            selected: self.generation_selected,
+            compare_index: self.generation_compare_index,
+            compare: self.generation_compare,
+            current: current_json,
+        };
+        match generation_project::save(&path, &project) {
+            Ok(()) => {
+                self.generation_project_path = Some(path.clone());
+                self.project_dirty = false;
+                self.generation_status = format!("Saved {}", path.display());
+            }
+            Err(e) => self.generation_status = format!("Save failed: {e}"),
+        }
     }
     fn open_generation_project(&mut self,path:&std::path::Path,ctx:&egui::Context) {
         let project=match generation_project::load(path) {Ok(p)=>p,Err(e)=>{self.generation_status=format!("Open failed: {e}");return}};
         for item in &project.items {
             if let Err(error)=studio::EditorState::from_json(&item.settings["editor"],item.pixels.width(),item.pixels.height()) {self.generation_status=format!("Open failed: {error}");return;}
         }
+        self.create_project_tab();
         self.blank_project = false;
-        self.workspace_editor=None;
-        let gallery:Vec<GeneratedItem>=project.items.into_iter().enumerate().map(|(n,i)|{
-            let editor=studio::EditorState::from_json(&i.settings["editor"],i.pixels.width(),i.pixels.height()).expect("validated Studio state");
-            let display=editor.render(&i.pixels);
-            let size=[i.pixels.width() as usize,i.pixels.height() as usize];
-            let texture=ctx.load_texture(format!("loaded_generation_{n}"),ColorImage::from_rgba_unmultiplied(size,display.as_raw()),TextureOptions::LINEAR);
-            GeneratedItem {editor,settings:settings_from_json(&i.settings),pixels:i.pixels,texture,seed:i.seed}
-        }).collect();
-        self.edit_checkpoint = project.current["edit_checkpoint"].as_str().unwrap_or("").to_owned();
-        self.qwen_steps = project.current["qwen_steps"].as_u64().filter(|steps|(1..=100).contains(steps)).unwrap_or(20) as u32;
-        self.flux_steps = project.current["flux_steps"].as_u64().filter(|steps|(1..=100).contains(steps)).unwrap_or(4) as u32;
-        let current=settings_from_json(&project.current);
-        self.generation_prompt=current.prompt;self.generation_negative=current.negative;self.generation_auto_negative=current.auto_negative;self.generation_checkpoint=current.checkpoint;self.generation_style=current.style;self.generation_size=current.ratio;self.generation_custom_size=current.custom_size;self.generation_unlock_dimensions=current.unlock_dimensions;self.generation_resolution=current.resolution;self.generation_dimension_step=current.dimension_step;self.generation_width=current.width;self.generation_height=current.height;self.generation_steps=current.steps;self.generation_cfg=current.cfg;self.generation_seed=current.seed;
-        self.refinement_source=None;
+        self.workspace_editor = None;
+        self.thumbnail_groups = project.current["thumbnail_groups"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|group| ThumbnailGroup {
+                name: group["name"]
+                    .as_str()
+                    .unwrap_or("Group")
+                    .chars()
+                    .take(100)
+                    .collect(),
+                collapsed: group["collapsed"].as_bool().unwrap_or(false),
+            })
+            .collect();
+        let gallery: Vec<GeneratedItem> = project
+            .items
+            .into_iter()
+            .enumerate()
+            .map(|(n, i)| {
+                let editor = studio::EditorState::from_json(
+                    &i.settings["editor"],
+                    i.pixels.width(),
+                    i.pixels.height(),
+                )
+                .expect("validated Studio state");
+                let display = editor.render(&i.pixels);
+                let size = [i.pixels.width() as usize, i.pixels.height() as usize];
+                let texture = ctx.load_texture(
+                    format!("loaded_generation_{n}"),
+                    ColorImage::from_rgba_unmultiplied(size, display.as_raw()),
+                    TextureOptions::LINEAR,
+                );
+                let group = i.settings["thumbnail_group"]
+                    .as_u64()
+                    .and_then(|index| usize::try_from(index).ok())
+                    .filter(|&index| index < self.thumbnail_groups.len());
+                GeneratedItem {
+                    group,
+                    editor,
+                    settings: settings_from_json(&i.settings),
+                    pixels: i.pixels,
+                    texture,
+                    seed: i.seed,
+                }
+            })
+            .collect();
+        self.edit_checkpoint = project.current["edit_checkpoint"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        self.qwen_steps = project.current["qwen_steps"]
+            .as_u64()
+            .filter(|steps| (1..=100).contains(steps))
+            .unwrap_or(20) as u32;
+        self.flux_steps = project.current["flux_steps"]
+            .as_u64()
+            .filter(|steps| (1..=100).contains(steps))
+            .unwrap_or(4) as u32;
+        let current = settings_from_json(&project.current);
+        self.generation_prompt = current.prompt;
+        self.generation_negative = current.negative;
+        self.generation_auto_negative = current.auto_negative;
+        self.generation_checkpoint = current.checkpoint;
+        self.generation_style = current.style;
+        self.generation_size = current.ratio;
+        self.generation_custom_size = current.custom_size;
+        self.generation_unlock_dimensions = current.unlock_dimensions;
+        self.generation_resolution = current.resolution;
+        self.generation_dimension_step = current.dimension_step;
+        self.generation_width = current.width;
+        self.generation_height = current.height;
+        self.generation_steps = current.steps;
+        self.generation_cfg = current.cfg;
+        self.generation_seed = current.seed;
+        self.refinement_source = None;
         self.refinement_mask.clear();
         self.refinement_mask_texture=None;
         self.conversation_draft.clear();
@@ -2139,10 +2254,10 @@ impl PixelForge {
         if let Some(paths)=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","webp"]).pick_files() {
             let mut count=0;
             for path in paths {match image::open(&path) {
-                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,dimension_step:32,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};self.blank_project=false;self.generation_gallery.push(GeneratedItem {editor: studio::EditorState::default(),settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
+                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,dimension_step:32,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};self.blank_project=false;self.generation_gallery.push(GeneratedItem {group:None, editor: studio::EditorState::default(),settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
                 Err(e)=>self.generation_status=format!("Import failed: {e}"),
             }}
-            if count>0 {self.generation_status=format!("Imported {count} image(s)");}
+            if count>0 {self.project_dirty=true;self.generation_status=format!("Imported {count} image(s)");}
         }
     }
     fn export_generation_selected(&mut self,format:image::ImageFormat,ext:&str) {
@@ -2349,13 +2464,15 @@ impl PixelForge {
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
         if self.blank_project {
-            ui.centered_and_justified(|ui| { crate::interaction::label(ui,"Import an image, or choose Generate to create one."); });
+            crate::interaction::label(ui, "Import an image, or choose Generate to create one.");
+            self.show_workspace_filmstrip(ui);
             return;
         }
         self.bind_workspace_editor(ui.ctx());
         if self.generation_gallery.is_empty() {
-            crate::interaction::strong(ui,"Image Studio");
-            ui.centered_and_justified(|ui| { crate::interaction::label(ui,"Import an image, or choose Generate to create one."); });
+            crate::interaction::strong(ui, "Image Studio");
+            crate::interaction::label(ui, "Import an image, or choose Generate to create one.");
+            self.show_workspace_filmstrip(ui);
             return;
         }
         let count = self.generation_gallery.len();
@@ -2418,12 +2535,15 @@ impl PixelForge {
         self.bind_workspace_editor(ui.ctx());
         let available = ui.available_size();
         if self.crop.is_some() {
-            let size=egui::vec2(available.x,(available.y-Self::workspace_filmstrip_height(ui)).max(1.0));
-            if let Some(texture)=self.processed_texture.as_ref().or(self.texture.as_ref()) {
-                let texture=texture.id();
-                let dimensions=[self.image_size[0] as u32,self.image_size[1] as u32];
-                ui.allocate_ui_with_layout(size,egui::Layout::top_down(egui::Align::Min),|ui| {
-                    self.crop.as_mut().unwrap().show(ui,texture,dimensions);
+            let size = egui::vec2(
+                available.x,
+                (available.y - self.workspace_filmstrip_height(ui)).max(1.0),
+            );
+            if let Some(texture) = self.processed_texture.as_ref().or(self.texture.as_ref()) {
+                let texture = texture.id();
+                let dimensions = [self.image_size[0] as u32, self.image_size[1] as u32];
+                ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+                    self.crop.as_mut().unwrap().show(ui, texture, dimensions);
                 });
             }
             self.show_workspace_filmstrip(ui);
@@ -2435,20 +2555,27 @@ impl PixelForge {
             self.comparison_enabled = false;
             self.version_comparison = false;
             self.divider_dragging = false;
-            let size=egui::vec2(available.x,(available.y-Self::workspace_filmstrip_height(ui)).max(1.0));
-            let fit=(size.x/self.image_size[0].max(1) as f32).min(size.y/self.image_size[1].max(1) as f32);
-            self.zoom=fit*self.generation_zoom;
-            self.offset=self.generation_pan;
-            self.fit_pending=false;
-            self.selection_brush_enabled=self.selection_tools_tab && !self.generation_running && !self.ai_running;
-            ui.allocate_ui_with_layout(size,egui::Layout::top_down(egui::Align::Min),|ui|self.show_viewer(ui));
-            self.generation_zoom=self.zoom/fit.max(0.000001);
-            self.generation_pan=self.offset;
+            let size = egui::vec2(
+                available.x,
+                (available.y - self.workspace_filmstrip_height(ui)).max(1.0),
+            );
+            let fit = (size.x / self.image_size[0].max(1) as f32)
+                .min(size.y / self.image_size[1].max(1) as f32);
+            self.zoom = fit * self.generation_zoom;
+            self.offset = self.generation_pan;
+            self.fit_pending = false;
+            self.selection_brush_enabled =
+                self.selection_tools_tab && !self.generation_running && !self.ai_running;
+            ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
+                self.show_viewer(ui)
+            });
+            self.generation_zoom = self.zoom / fit.max(0.000001);
+            self.generation_pan = self.offset;
             self.show_workspace_filmstrip(ui);
             return;
         }
         // Reserve only the filmstrip; image uses all remaining canvas space.
-        let viewer_height = (available.y - Self::workspace_filmstrip_height(ui)).max(1.0);
+        let viewer_height = (available.y - self.workspace_filmstrip_height(ui)).max(1.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::click_and_drag(),
@@ -2531,7 +2658,6 @@ impl PixelForge {
         self.original_pixels=None;
         self.generation_gallery.remove(removed);
         let remap=|index:Option<usize>|match index {Some(i) if i==removed=>None,Some(i) if i>removed=>Some(i-1),other=>other};
-        for (_,tab) in &mut self.inactive_tabs {tab.workspace_editor=remap(tab.workspace_editor);}
         if self.refinement_source==Some(removed) {self.refinement_mask.clear();self.refinement_mask_texture=None;}
         self.refinement_source=remap(self.refinement_source);
         self.workspace_ai_parent=remap(self.workspace_ai_parent);
@@ -2548,9 +2674,21 @@ impl PixelForge {
         self.generation_status="Removed image version (original files were not deleted)".into();
     }
 
-    fn workspace_filmstrip_height(ui:&egui::Ui) -> f32 {
+    fn workspace_filmstrip_height(&self, ui: &egui::Ui) -> f32 {
         // Fixed thumbnail cells and captions, with only the scrollbar gutter below.
-        96.0+ui.text_style_height(&egui::TextStyle::Small)+ui.spacing().item_spacing.y*2.0+ui.spacing().scroll.bar_width+8.0
+        let group_header = if self.thumbnail_groups.is_empty() {
+            0.0
+        } else {
+            ui.spacing().interact_size.y + ui.spacing().item_spacing.y
+        };
+        group_header
+            + ui.spacing().interact_size.y
+            + ui.spacing().item_spacing.y
+            + 96.0
+            + ui.text_style_height(&egui::TextStyle::Small)
+            + ui.spacing().item_spacing.y * 2.0
+            + ui.spacing().scroll.bar_width
+            + 8.0
     }
 
     fn show_workspace_details(&self,ui:&mut egui::Ui) {
@@ -2563,189 +2701,512 @@ impl PixelForge {
         crate::interaction::label_widget(ui,egui::Label::new(&prompts).truncate()).on_hover_text(&prompts);
     }
 
-    fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
-        self.capture_workspace_editor();
-        ui.separator();
-        let mut remove_version=None;
-        let mut rename_version=None;
-        ui.spacing_mut().scroll.floating=false;
-        egui::ScrollArea::horizontal().id_salt("studio_filmstrip").max_height(Self::workspace_filmstrip_height(ui)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                for (index, item) in self.generation_gallery.iter().enumerate() {
-                    ui.vertical(|ui| {
-                        let size = item.texture.size_vec2();
-                        let thumb = size * (92.0 / size.x.max(size.y));
-                        let response=ui.add_sized([116.0,96.0],egui::Button::image(egui::Image::new((item.texture.id(), thumb))).selected(index == self.generation_selected))
-                            .on_hover_text(item.settings.refine_prompt.as_deref().unwrap_or(&item.settings.prompt));
-                        if response.clicked() {
-                            self.generation_selected=index;
-                            self.refinement_source=None;
-                            self.refinement_mask_texture=None;
-                        }
-                        response.context_menu(|ui| {
-                            if ui.button("Rename Version…").clicked() {
-                                rename_version=Some((index,item.editor.name.clone()));
-                                ui.close();
-                            }
-                            if ui.add_enabled(!self.generation_running && !self.ai_running,egui::Button::new("Remove Image Version")).clicked() {
-                                remove_version=Some(index);
-                                ui.close();
-                            }
-                        });
-                        ui.add_sized([116.0,ui.text_style_height(&egui::TextStyle::Small)],egui::Label::new(egui::RichText::new(item.version_label(index)).small()).truncate()).on_hover_text(item.version_label(index));
-                    });
-                }
-            });
-        });
+    fn move_thumbnail(&mut self, drop: ThumbnailDrop) {
+        let ThumbnailDrop {
+            index,
+            group,
+            before,
+        } = drop;
+        let len = self.generation_gallery.len();
+        if self.generation_running || self.ai_running || index >= len || before > len {
+            return;
+        }
+        let destination = before - usize::from(index < before);
+        if index == destination && self.generation_gallery[index].group == group {
+            return;
+        }
+        let mut item = self.generation_gallery.remove(index);
+        item.group = group;
+        self.generation_gallery.insert(destination, item);
+        let remap = |old| {
+            if old == index {
+                destination
+            } else {
+                let shifted = old - usize::from(old > index);
+                shifted + usize::from(shifted >= destination)
+            }
+        };
+        self.generation_selected = remap(self.generation_selected);
+        self.generation_compare_index = remap(self.generation_compare_index);
+        self.workspace_editor = self.workspace_editor.map(remap);
+        self.workspace_ai_parent = self.workspace_ai_parent.map(remap);
+        self.refinement_source = self.refinement_source.map(remap);
+        if let Some((index, _)) = &mut self.rename_version {
+            *index = remap(*index);
+        }
+        for item in &mut self.generation_gallery {
+            item.settings.refine_parent = item
+                .settings
+                .refine_parent
+                .filter(|&parent| parent < len)
+                .map(remap);
+        }
+        self.project_dirty = true;
+    }
 
-        if let Some(index)=remove_version {self.remove_workspace_version(index);}
-        if let Some(rename)=rename_version {self.rename_version=Some(rename);}
-        if let Some((index, mut name))=self.rename_version.take() {
-            let mut open=true;
-            let mut save=false;
-            let mut cancel=false;
-            egui::Window::new("Rename Version").collapsible(false).resizable(false).open(&mut open).show(ui.ctx(),|ui| {
-                crate::interaction::label(ui,"Version name (leave empty to use the version number)");
-                let response=interaction::singleline(ui,&mut name);
-                if response.lost_focus() && ui.input(|i|i.key_pressed(egui::Key::Enter)) {save=true;}
-                ui.horizontal(|ui| {
-                    save |= ui.button("Save Name").clicked();
-                    cancel = ui.button("Cancel").clicked();
-                });
-                cancel |= ui.input(|i|i.key_pressed(egui::Key::Escape));
-            });
-            if save {
-                if let Some(item)=self.generation_gallery.get_mut(index) {item.editor.name=name.trim().chars().take(100).collect();self.project_dirty=true;}
-            } else if open && !cancel {self.rename_version=Some((index,name));}
+    fn delete_thumbnail_group(&mut self, group: usize, keep_images: bool) {
+        if self.generation_running || self.ai_running || group >= self.thumbnail_groups.len() {
+            return;
+        }
+        if !keep_images {
+            for index in (0..self.generation_gallery.len()).rev() {
+                if self.generation_gallery[index].group == Some(group) {
+                    self.remove_workspace_version(index);
+                }
+            }
+        }
+        self.thumbnail_groups.remove(group);
+        for item in &mut self.generation_gallery {
+            item.group = match item.group {
+                Some(index) if index == group => None,
+                Some(index) if index > group => Some(index - 1),
+                other => other,
+            };
+        }
+        self.project_dirty = true;
+    }
+
+    fn open_thumbnails_as_project(
+        &mut self,
+        ctx: &egui::Context,
+        indices: &[usize],
+        group: Option<usize>,
+    ) {
+        if indices.is_empty() {
+            return;
+        }
+        self.capture_workspace_editor();
+        let named_group = group
+            .and_then(|index| self.thumbnail_groups.get(index))
+            .cloned();
+        let items = indices
+            .iter()
+            .map(|&index| {
+                let mut item = self.generation_gallery[index].clone();
+                item.settings.refine_parent = item
+                    .settings
+                    .refine_parent
+                    .and_then(|parent| indices.iter().position(|&source| source == parent));
+                item.group = named_group.as_ref().map(|_| 0);
+                let preview = item.editor.render(&item.pixels);
+                item.texture = ctx.load_texture(
+                    format!("copied_thumbnail_{index}"),
+                    ColorImage::from_rgba_unmultiplied(
+                        [preview.width() as usize, preview.height() as usize],
+                        preview.as_raw(),
+                    ),
+                    TextureOptions::LINEAR,
+                );
+                item
+            })
+            .collect();
+        self.create_blank_project_tab();
+        self.generation_gallery = items;
+        if let Some(mut group) = named_group {
+            group.collapsed = false;
+            self.thumbnail_groups.push(group);
+        }
+        self.blank_project = false;
+        self.generation_workspace = true;
+        self.project_dirty = true;
+        self.bind_workspace_editor(ctx);
+    }
+
+    fn show_group_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut dialog) = self.group_dialog.take() else {
+            return;
+        };
+        let mut open = true;
+        let mut done = false;
+        match &mut dialog {
+            GroupDialog::Name { group, name } => {
+                let title = if group.is_some() {
+                    "Rename Thumbnail Group"
+                } else {
+                    "New Thumbnail Group"
+                };
+                egui::Window::new(title)
+                    .id(egui::Id::new(("thumbnail_group_name", self.active_tab)))
+                    .collapsible(false)
+                    .resizable(false)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        let edit = interaction::singleline(ui, name);
+                        let clean: String = name.trim().chars().take(100).collect();
+                        ui.horizontal(|ui| {
+                            let save = ui
+                                .add_enabled(!clean.is_empty(), egui::Button::new("Save Group"))
+                                .clicked()
+                                || (!clean.is_empty()
+                                    && edit.lost_focus()
+                                    && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                            if save {
+                                if let Some(index) = *group {
+                                    self.thumbnail_groups[index].name = clean;
+                                } else {
+                                    self.thumbnail_groups.push(ThumbnailGroup {
+                                        name: clean,
+                                        collapsed: false,
+                                    });
+                                }
+                                self.project_dirty = true;
+                                done = true;
+                            }
+                            done |= ui.button("Cancel").clicked();
+                        });
+                    });
+            }
+            GroupDialog::Delete(group) => {
+                egui::Window::new("Delete Thumbnail Group")
+                    .id(egui::Id::new(("thumbnail_group_delete", self.active_tab)))
+                    .collapsible(false)
+                    .resizable(false)
+                    .open(&mut open)
+                    .show(ctx, |ui| {
+                        ui.label(format!(
+                            "Delete the group ‘{}’?",
+                            self.thumbnail_groups[*group].name
+                        ));
+                        ui.horizontal(|ui| {
+                            let idle = !self.generation_running && !self.ai_running;
+                            if ui
+                                .add_enabled(idle, egui::Button::new("Keep Images"))
+                                .clicked()
+                            {
+                                self.delete_thumbnail_group(*group, true);
+                                done = true;
+                            }
+                            if ui
+                                .add_enabled(idle, egui::Button::new("Remove Images"))
+                                .clicked()
+                            {
+                                self.delete_thumbnail_group(*group, false);
+                                done = true;
+                            }
+                            done |= ui.button("Cancel").clicked();
+                        });
+                    });
+            }
+        }
+        if open && !done {
+            self.group_dialog = Some(dialog);
         }
     }
 
-    // Keep Generation Studio alive across document changes; editor state belongs to each tab.
-    fn swap_generation_state(&mut self, other: &mut PixelForge) {
-        std::mem::swap(&mut self.prompt_guide, &mut other.prompt_guide);
-        std::mem::swap(&mut self.rename_version, &mut other.rename_version);
-        std::mem::swap(&mut self.generation_style, &mut other.generation_style);
-        std::mem::swap(&mut self.generation_size, &mut other.generation_size);
-        std::mem::swap(
-            &mut self.generation_unlock_dimensions,
-            &mut other.generation_unlock_dimensions,
-        );
-        std::mem::swap(
-            &mut self.generation_custom_size,
-            &mut other.generation_custom_size,
-        );
-        std::mem::swap(
-            &mut self.generation_resolution,
-            &mut other.generation_resolution,
-        );
-        std::mem::swap(&mut self.generation_zoom, &mut other.generation_zoom);
-        std::mem::swap(&mut self.generation_pan, &mut other.generation_pan);
-        std::mem::swap(
-            &mut self.generation_batch_count,
-            &mut other.generation_batch_count,
-        );
-        std::mem::swap(
-            &mut self.generation_batch_done,
-            &mut other.generation_batch_done,
-        );
-        std::mem::swap(
-            &mut self.generation_random_seeds,
-            &mut other.generation_random_seeds,
-        );
-        std::mem::swap(&mut self.prompt_spelling, &mut other.prompt_spelling);
-        std::mem::swap(&mut self.qwen_steps, &mut other.qwen_steps);
-        std::mem::swap(&mut self.flux_steps, &mut other.flux_steps);
-        std::mem::swap(&mut self.edit_checkpoint, &mut other.edit_checkpoint);
-        std::mem::swap(&mut self.conversation_draft, &mut other.conversation_draft);
-        std::mem::swap(&mut self.interaction, &mut other.interaction);
-        std::mem::swap(&mut self.updater, &mut other.updater);
-        std::mem::swap(&mut self.generation_dimension_step, &mut other.generation_dimension_step);
-        std::mem::swap(&mut self.crop, &mut other.crop);
-        std::mem::swap(&mut self.generation_gallery, &mut other.generation_gallery);
-        std::mem::swap(&mut self.generation_project_path, &mut other.generation_project_path);
-        std::mem::swap(&mut self.refinement_source, &mut other.refinement_source);
-        std::mem::swap(&mut self.refinement_strength, &mut other.refinement_strength);
-        std::mem::swap(&mut self.refinement_prompt, &mut other.refinement_prompt);
-        std::mem::swap(&mut self.refinement_masked, &mut other.refinement_masked);
-        std::mem::swap(&mut self.refinement_brush, &mut other.refinement_brush);
-        std::mem::swap(&mut self.refinement_mask, &mut other.refinement_mask);
-        std::mem::swap(&mut self.refinement_mask_texture, &mut other.refinement_mask_texture);
-        std::mem::swap(&mut self.generation_batch_settings, &mut other.generation_batch_settings);
-        std::mem::swap(
-            &mut self.generation_selected,
-            &mut other.generation_selected,
-        );
-        std::mem::swap(&mut self.generation_compare, &mut other.generation_compare);
-        std::mem::swap(&mut self.generation_compare_position, &mut other.generation_compare_position);
-        std::mem::swap(
-            &mut self.generation_compare_index,
-            &mut other.generation_compare_index,
-        );
-        std::mem::swap(
-            &mut self.generation_workspace,
-            &mut other.generation_workspace,
-        );
-        std::mem::swap(&mut self.generation_prompt, &mut other.generation_prompt);
-        std::mem::swap(
-            &mut self.generation_negative,
-            &mut other.generation_negative,
-        );
-        std::mem::swap(
-            &mut self.generation_auto_negative,
-            &mut other.generation_auto_negative,
-        );
-        std::mem::swap(
-            &mut self.generation_checkpoint,
-            &mut other.generation_checkpoint,
-        );
-        std::mem::swap(
-            &mut self.generation_checkpoints,
-            &mut other.generation_checkpoints,
-        );
-        std::mem::swap(&mut self.generation_width, &mut other.generation_width);
-        std::mem::swap(&mut self.generation_height, &mut other.generation_height);
-        std::mem::swap(&mut self.generation_steps, &mut other.generation_steps);
-        std::mem::swap(&mut self.generation_cfg, &mut other.generation_cfg);
-        std::mem::swap(&mut self.generation_seed, &mut other.generation_seed);
-        std::mem::swap(&mut self.generation_rx, &mut other.generation_rx);
-        std::mem::swap(&mut self.generation_running, &mut other.generation_running);
-        std::mem::swap(&mut self.generation_started, &mut other.generation_started);
-        std::mem::swap(
-            &mut self.generation_progress,
-            &mut other.generation_progress,
-        );
-        std::mem::swap(
-            &mut self.generation_models_rx,
-            &mut other.generation_models_rx,
-        );
-        std::mem::swap(&mut self.generation_cancel, &mut other.generation_cancel);
-        std::mem::swap(&mut self.generation_image, &mut other.generation_image);
-        std::mem::swap(&mut self.generation_texture, &mut other.generation_texture);
-        std::mem::swap(&mut self.generation_status, &mut other.generation_status);
-        std::mem::swap(&mut self.install_rx, &mut other.install_rx);
-        std::mem::swap(&mut self.install_model_index, &mut other.install_model_index);
-        std::mem::swap(&mut self.install_progress, &mut other.install_progress);
-        std::mem::swap(&mut self.install_total, &mut other.install_total);
-        std::mem::swap(&mut self.install_cancel, &mut other.install_cancel);
-        std::mem::swap(&mut self.install_status, &mut other.install_status);
+    fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
+        self.capture_workspace_editor();
+        ui.separator();
+        if ui.small_button("+ New Group").clicked() {
+            self.group_dialog = Some(GroupDialog::Name {
+                group: None,
+                name: String::new(),
+            });
+        }
+        let mut remove_version = None;
+        let mut rename_version = None;
+        let mut open_project = None;
+        let mut moved = None;
+        let busy = self.generation_running || self.ai_running;
+        let project = self.active_tab;
+        let drop_target = |response: &egui::Response, group, before, after| {
+            if busy {
+                return None;
+            }
+            let drag = response.dnd_hover_payload::<ThumbnailDrag>()?;
+            if drag.project != project {
+                return None;
+            }
+            let pointer = response.ctx.input(|input| input.pointer.hover_pos())?;
+            let insert_after = pointer.x >= response.rect.center().x;
+            response.ctx.layer_painter(response.layer_id).rect_stroke(
+                response.interact_rect,
+                3.0,
+                egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                egui::StrokeKind::Inside,
+            );
+            response
+                .dnd_release_payload::<ThumbnailDrag>()
+                .map(|_| ThumbnailDrop {
+                    index: drag.index,
+                    group,
+                    before: if insert_after { after } else { before },
+                })
+        };
+
+        ui.spacing_mut().scroll.floating = false;
+        ui.style_mut().always_scroll_the_only_direction = true;
+        egui::ScrollArea::horizontal()
+            .id_salt(("studio_filmstrip", project))
+            .scroll_source(egui::scroll_area::ScrollSource {
+                drag: false,
+                ..Default::default()
+            })
+            .max_height(self.workspace_filmstrip_height(ui))
+            .show(ui, |ui| {
+                ui.horizontal_top(|ui| {
+                    let grouped = !self.thumbnail_groups.is_empty();
+                    for group in
+                        std::iter::once(None).chain((0..self.thumbnail_groups.len()).map(Some))
+                    {
+                        let indices: Vec<_> = self
+                            .generation_gallery
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, item)| (item.group == group).then_some(index))
+                            .collect();
+                        ui.vertical(|ui| {
+                            if grouped {
+                                let label = group.map_or_else(
+                                    || "Ungrouped".to_owned(),
+                                    |index| {
+                                        let group = &self.thumbnail_groups[index];
+                                        format!(
+                                            "{} {} ({})",
+                                            if group.collapsed { "▸" } else { "▾" },
+                                            group.name,
+                                            indices.len()
+                                        )
+                                    },
+                                );
+                                let header = ui.button(label).on_hover_text(
+                                    "Drop a thumbnail here to move it to this section",
+                                );
+                                let end = indices
+                                    .last()
+                                    .map_or(self.generation_gallery.len(), |index| index + 1);
+                                moved = drop_target(&header, group, end, end).or(moved);
+                                if let Some(index) = group {
+                                    if header.clicked() {
+                                        self.thumbnail_groups[index].collapsed =
+                                            !self.thumbnail_groups[index].collapsed;
+                                        self.project_dirty = true;
+                                    }
+                                    header.context_menu(|ui| {
+                                        if ui.button("Rename Group…").clicked() {
+                                            self.group_dialog = Some(GroupDialog::Name {
+                                                group,
+                                                name: self.thumbnail_groups[index].name.clone(),
+                                            });
+                                            ui.close();
+                                        }
+                                        if ui
+                                            .add_enabled(!busy, egui::Button::new("Delete Group…"))
+                                            .clicked()
+                                        {
+                                            self.group_dialog = Some(GroupDialog::Delete(index));
+                                            ui.close();
+                                        }
+                                        ui.add_enabled_ui(!indices.is_empty(), |ui| {
+                                            ui.menu_button("Open Group as New Project", |ui| {
+                                                if ui
+                                                    .button("Open as Individual Thumbnails")
+                                                    .clicked()
+                                                {
+                                                    open_project = Some((indices.clone(), None));
+                                                    ui.close();
+                                                }
+                                                if ui.button("Keep Named Group").clicked() {
+                                                    open_project = Some((indices.clone(), group));
+                                                    ui.close();
+                                                }
+                                            });
+                                        });
+                                    });
+                                    if self.thumbnail_groups[index].collapsed {
+                                        return;
+                                    }
+                                }
+                            }
+
+                            ui.horizontal(|ui| {
+                                for &index in &indices {
+                                    let item = &self.generation_gallery[index];
+                                    ui.vertical(|ui| {
+                                        let size = item.texture.size_vec2();
+                                        let thumb = size * (92.0 / size.x.max(size.y));
+                                        let sense = if busy {
+                                            egui::Sense::click()
+                                        } else {
+                                            egui::Sense::click_and_drag()
+                                        };
+                                        let response = ui
+                                            .add_sized(
+                                                [116.0, 96.0],
+                                                egui::Button::image(egui::Image::new((
+                                                    item.texture.id(),
+                                                    thumb,
+                                                )))
+                                                .sense(sense)
+                                                .selected(index == self.generation_selected),
+                                            )
+                                            .on_hover_text(
+                                                item.settings
+                                                    .refine_prompt
+                                                    .as_deref()
+                                                    .unwrap_or(&item.settings.prompt),
+                                            );
+                                        if !busy {
+                                            response.dnd_set_drag_payload(ThumbnailDrag {
+                                                project,
+                                                index,
+                                            });
+                                            moved = drop_target(&response, group, index, index + 1)
+                                                .or(moved);
+                                        }
+                                        if response.clicked() {
+                                            self.generation_selected = index;
+                                            self.refinement_source = None;
+                                            self.refinement_mask_texture = None;
+                                        }
+                                        response.context_menu(|ui| {
+                                            if ui.button("Open as New Project").clicked() {
+                                                open_project = Some((vec![index], None));
+                                                ui.close();
+                                            }
+                                            if ui.button("Rename Version…").clicked() {
+                                                rename_version =
+                                                    Some((index, item.editor.name.clone()));
+                                                ui.close();
+                                            }
+                                            if ui
+                                                .add_enabled(
+                                                    !busy,
+                                                    egui::Button::new("Remove Image Version"),
+                                                )
+                                                .clicked()
+                                            {
+                                                remove_version = Some(index);
+                                                ui.close();
+                                            }
+                                        });
+                                        let caption = item.version_label(index);
+                                        ui.add_sized(
+                                            [116.0, ui.text_style_height(&egui::TextStyle::Small)],
+                                            egui::Label::new(egui::RichText::new(&caption).small())
+                                                .truncate(),
+                                        )
+                                        .on_hover_text(caption);
+                                    });
+                                }
+                            });
+                        });
+                        if grouped {
+                            ui.separator();
+                        }
+                    }
+                });
+            });
+
+        if let Some(drop) = moved {
+            self.move_thumbnail(drop);
+        }
+        if let Some((indices, group)) = open_project {
+            self.open_thumbnails_as_project(ui.ctx(), &indices, group);
+            return;
+        }
+        self.show_group_dialog(ui.ctx());
+
+        if let Some(index) = remove_version {
+            self.remove_workspace_version(index);
+        }
+        if let Some(rename) = rename_version {
+            self.rename_version = Some(rename);
+        }
+        if let Some((index, mut name)) = self.rename_version.take() {
+            let mut open = true;
+            let mut save = false;
+            let mut cancel = false;
+            egui::Window::new("Rename Version")
+                .id(egui::Id::new(("rename_thumbnail", self.active_tab)))
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    crate::interaction::label(
+                        ui,
+                        "Version name (leave empty to use the version number)",
+                    );
+                    let response = interaction::singleline(ui, &mut name);
+                    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        save = true;
+                    }
+                    ui.horizontal(|ui| {
+                        save |= ui.button("Save Name").clicked();
+                        cancel = ui.button("Cancel").clicked();
+                    });
+                    cancel |= ui.input(|i| i.key_pressed(egui::Key::Escape));
+                });
+            if save {
+                if let Some(item) = self.generation_gallery.get_mut(index) {
+                    item.editor.name = name.trim().chars().take(100).collect();
+                    self.project_dirty = true;
+                }
+            } else if open && !cancel {
+                self.rename_version = Some((index, name));
+            }
+        }
+    }
+
+    // A tab owns its editor, gallery and worker receivers. Only application services
+    // and window state stay with the active shell when the tab changes.
+    fn swap_app_state(&mut self, other: &mut PixelForge) {
         std::mem::swap(&mut self.dependency_manager, &mut other.dependency_manager);
-        std::mem::swap(&mut self.remove_model, &mut other.remove_model);
-        std::mem::swap(&mut self.model_library_open, &mut other.model_library_open);
+        std::mem::swap(&mut self.controls, &mut other.controls);
+        std::mem::swap(&mut self.show_settings, &mut other.show_settings);
+        std::mem::swap(&mut self.display, &mut other.display);
+        std::mem::swap(&mut self.exit_allowed, &mut other.exit_allowed);
+        std::mem::swap(&mut self.exit_confirmation, &mut other.exit_confirmation);
+        std::mem::swap(&mut self.file_drops, &mut other.file_drops);
+        std::mem::swap(&mut self.install_cancel, &mut other.install_cancel);
         std::mem::swap(&mut self.install_folder, &mut other.install_folder);
         std::mem::swap(
             &mut self.install_folder_manual,
             &mut other.install_folder_manual,
         );
         std::mem::swap(
-            &mut self.generation_tools_tab,
-            &mut other.generation_tools_tab,
+            &mut self.install_model_index,
+            &mut other.install_model_index,
         );
+        std::mem::swap(&mut self.install_progress, &mut other.install_progress);
+        std::mem::swap(&mut self.install_rx, &mut other.install_rx);
+        std::mem::swap(&mut self.install_status, &mut other.install_status);
+        std::mem::swap(&mut self.install_total, &mut other.install_total);
+        std::mem::swap(&mut self.interaction, &mut other.interaction);
+        std::mem::swap(&mut self.model_library_open, &mut other.model_library_open);
+        std::mem::swap(&mut self.prompt_guide, &mut other.prompt_guide);
+        std::mem::swap(&mut self.remove_model, &mut other.remove_model);
+        std::mem::swap(&mut self.updater, &mut other.updater);
+    }
+
+    fn poll_project_jobs(&mut self, ctx: &egui::Context) {
+        self.poll_export(ctx);
+        self.poll_preview(ctx);
+        self.poll_ai_upscale(ctx);
+        self.poll_generation(ctx);
+        self.poll_ai_save(ctx);
+    }
+
+    fn poll_open_projects(&mut self, ctx: &egui::Context) {
+        self.poll_project_jobs(ctx);
+        for (_, project) in &mut self.inactive_tabs {
+            project.poll_project_jobs(ctx);
+        }
+    }
+
+    fn backend_jobs_running(&self) -> bool {
+        self.generation_running || self.ai_running || self.generation_models_rx.is_some()
+    }
+
+    fn cancel_project_jobs(&self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.generation_cancel.store(true, Relaxed);
+        self.ai_cancel.store(true, Relaxed);
     }
 
     fn project_tab_title(&self) -> String {
-        if let Some(index)=self.workspace_editor {return format!("Version {}",index+1);}
-        self.project_path
+        self.generation_project_path
             .as_ref()
+            .or(self.project_path.as_ref())
             .or(self.image_path.as_ref())
             .and_then(|p| p.file_name())
             .map(|n| n.to_string_lossy().into_owned())
@@ -2766,18 +3227,25 @@ impl PixelForge {
         let next_id = self.next_tab;
         let closing = self.closing_tab;
         std::mem::swap(self, tabs[position].1.as_mut());
-        self.swap_generation_state(tabs[position].1.as_mut());
+        self.swap_app_state(tabs[position].1.as_mut());
         tabs[position].0 = previous;
         self.inactive_tabs = tabs;
         self.active_tab = target;
         self.next_tab = next_id;
         self.closing_tab = closing;
-        if let Some(index)=self.workspace_editor.filter(|&i|i<self.generation_gallery.len()) {self.generation_selected=index;}
     }
 
     fn create_project_tab(&mut self) {
         self.capture_workspace_editor();
-        if self.original_pixels.is_none() && self.inactive_tabs.is_empty() {
+        if self.original_pixels.is_none()
+            && self.generation_gallery.is_empty()
+            && self.generation_project_path.is_none()
+            && !self.project_dirty
+            && !self.generation_running
+            && !self.ai_running
+            && !self.exporting
+            && !self.ai_saving
+        {
             return;
         }
         self.create_blank_project_tab();
@@ -2790,7 +3258,7 @@ impl PixelForge {
         let previous = self.active_tab;
         let id = self.next_tab;
         let mut old = std::mem::replace(self, PixelForge::default());
-        self.swap_generation_state(&mut old);
+        self.swap_app_state(&mut old);
         tabs.push((previous, Box::new(old)));
         self.inactive_tabs = tabs;
         self.active_tab = id;
@@ -2803,12 +3271,14 @@ impl PixelForge {
             if let Some((next, _)) = self.inactive_tabs.last() {
                 let next = *next;
                 self.switch_project_tab(next);
-                self.inactive_tabs.retain(|(id, _)| *id != target);
+                self.close_project_tab(target);
             } else {
                 self.close_image();
             }
         } else {
-            self.inactive_tabs.retain(|(id, _)| *id != target);
+            if let Some(position) = self.inactive_tabs.iter().position(|(id, _)| *id == target) {
+                self.inactive_tabs.remove(position).1.cancel_project_jobs();
+            }
         }
         self.closing_tab = None;
     }
@@ -2943,87 +3413,15 @@ impl PixelForge {
     }
 
     fn close_image(&mut self) {
-        self.capture_workspace_editor();
-        self.workspace_editor=None;
-        if self.inactive_tabs.is_empty() {
-            self.generation_gallery.clear();
-            self.generation_project_path=None;
-            self.generation_workspace=true;
-        }
-        self.ai_result = None;
-        self.ai_show_result = false;
-        self.ai_result_texture = None;
-        self.ai_baseline_texture = None;
-        self.ai_inspect_texture = None;
-        self.ai_result_path = None;
-        // Release image textures and original image data.
-        self.texture = None;
-        self.processed_texture = None;
-        self.original_pixels = None;
-        self.edit_versions.clear();
-        self.active_raster_version = None;
-        self.histogram = histogram::Histogram::default();
-        self.preview_source = None;
-        self.preview_rx = None;
-        self.preview_generation
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-        // Clear image and project references.
-        self.image_path = None;
-        self.project_path = None;
-        self.saved_selections.clear();
-        self.selected_saved_selection = None;
-        self.active_saved_selection = None;
-        self.selection_name_input.clear();
-        self.selection_mask = None;
-        self.selection_texture = None;
-        self.selection_undo.clear();
-        self.selection_redo.clear();
-        self.project_dirty = false;
-        self.pending_open = None;
-
-        // Reset adjustments and comparison.
-        self.brightness = 0.0;
-        self.contrast = 0.0;
-        self.exposure = 0.0;
-        self.saturation = 0.0;
-        self.temperature = 0.0;
-        self.tint = 0.0;
-        self.highlights = 0.0;
-        self.shadows = 0.0;
-        self.whites = 0.0;
-        self.blacks = 0.0;
-        self.vibrance = 0.0;
-        self.gamma = 0.0;
-        self.selection_adjustments = adjustments::Adjustments::default();
-        self.selection_adjustment_target = false;
-        self.comparison_enabled = true;
-        self.comparison_position = 0.5;
-        self.divider_dragging = false;
-
-        // Reset viewer state.
-        self.selection_mask = None;
-        self.selection_texture = None;
-        self.selection_last_point = None;
-        self.selection_undo.clear();
-        self.selection_redo.clear();
-        self.selection_stroke_active = false;
-        self.image_size = [0, 0];
-        self.file_size = 0;
-        self.zoom = 1.0;
-        self.offset = Vec2::ZERO;
-        self.fit_pending = false;
-        self.panning = false;
-
-        // Clear completed export information.
-        self.export_rx = None;
-        self.export_progress = 0.0;
-        self.export_stage.clear();
-        self.export_encoding = false;
-        self.export_result = None;
-
-        self.status = "Ready - open an image or project".into();
+        self.cancel_project_jobs();
+        let id = self.next_tab;
+        let mut previous = std::mem::take(self);
+        self.swap_app_state(&mut previous);
+        self.active_tab = id;
+        self.next_tab = id + 1;
+        self.blank_project = true;
     }
+
     fn show_exit_confirmation(&mut self, ctx: &egui::Context) {
         if !self.exit_confirmation {
             return;
@@ -3068,9 +3466,28 @@ impl PixelForge {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                     if ui.add(theme::primary("Save & Exit")).clicked() {
-                        self.save_project(false);
-                        // Canceled or failed saves leave the app open.
-                        if !self.project_dirty {
+                        let mut dirty: Vec<_> = self
+                            .inactive_tabs
+                            .iter()
+                            .filter_map(|(id, tab)| tab.project_dirty.then_some(*id))
+                            .collect();
+                        if self.project_dirty {
+                            dirty.insert(0, self.active_tab);
+                        }
+                        let mut saved = true;
+                        for id in dirty {
+                            self.switch_project_tab(id);
+                            if self.generation_workspace {
+                                self.save_generation_project(false);
+                            } else {
+                                self.save_project(false);
+                            }
+                            if self.project_dirty {
+                                saved = false;
+                                break;
+                            }
+                        }
+                        if saved {
                             self.exit_confirmation = false;
                             self.exit_allowed = true;
                             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -4149,8 +4566,13 @@ impl PixelForge {
                 self.start_restoration_job(ctx, 1, false, Some(ai_restoration::Operation::Sharpen));
             }
         });
-        crate::interaction::label(ui,"Try one step, then compare with the original using Compare above the image. Enlarge last using Upscaling below.");
-        if ui.button("Open Setup and Maintenance").clicked() { self.dependency_manager.open = true; }
+        crate::interaction::label(
+            ui,
+            "Try one step, then compare with the original using Compare above the image. Enlarge last using Upscaling below.",
+        );
+        if ui.button("Open Dependencies").clicked() {
+            self.dependency_manager.open = true;
+        }
         ui.separator();
     }
 
@@ -6662,6 +7084,14 @@ impl PixelForge {
 }
 
 impl eframe::App for PixelForge {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.cancel_project_jobs();
+        for (_, project) in &self.inactive_tabs {
+            project.cancel_project_jobs();
+        }
+        ai_generation::stop_managed_backend();
+    }
+
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.prompt_guide.save_layout(storage);
     }
@@ -6683,22 +7113,20 @@ impl eframe::App for PixelForge {
             self.dependency_manager.open=true;
             self.dependency_manager.message="Finish or cancel dependency setup before closing PixelForge".into();
         }
+        self.poll_open_projects(ctx);
         // Intercept the native window X button before the
         // operating system closes the application.
         if ctx.input(|i| i.viewport().close_requested()) {
-            if self.project_dirty && !self.exit_allowed {
+            if (self.project_dirty || self.inactive_tabs.iter().any(|(_, tab)| tab.project_dirty))
+                && !self.exit_allowed
+            {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.exit_confirmation = true;
             }
         }
 
-        self.poll_export(ctx);
-        self.poll_preview(ctx);
-        self.poll_ai_upscale(ctx);
-        self.poll_generation(ctx);
         self.dependency_manager.poll(ctx,self.install_folder.clone(),self.generation_checkpoints.clone());
         self.ensure_workspace(ctx);
-        self.poll_ai_save(ctx);
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             let bar=ui.available_rect_before_wrap();
@@ -6761,7 +7189,6 @@ impl eframe::App for PixelForge {
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
-
                 ui.menu_button("Edit", |ui| {
                     interaction::keep_selection(ctx);
                     for action in [interaction::Action::Undo,interaction::Action::Redo,interaction::Action::Copy,interaction::Action::Cut,interaction::Action::Paste] {
@@ -6805,12 +7232,16 @@ impl eframe::App for PixelForge {
                 if ui.button("Settings").clicked() {self.show_settings=!self.show_settings;}
                 let missing=self.dependency_manager.missing();
                 let label = if missing > 0 {
-                    egui::RichText::new(format!("Dependencies ({missing})")).color(egui::Color32::YELLOW).strong()
+                    egui::RichText::new(format!("Setup ({missing})")).color(egui::Color32::YELLOW).strong()
                 } else {
-                    egui::RichText::new("Dependencies")
+                    egui::RichText::new("Setup")
                 };
                 ui.menu_button(label, |ui| {
-                    if ui.button("Setup and Maintenance").clicked() {
+                    if ui.button("Setup & Diagnostics").clicked() {
+                        self.dependency_manager.diagnostics_open = true;
+                        ui.close();
+                    }
+                    if ui.button("Dependencies").clicked() {
                         self.dependency_manager.open = true;
                         ui.close();
                     }
@@ -6847,7 +7278,7 @@ impl eframe::App for PixelForge {
             ui.painter().with_clip_rect(egui::Rect::from_min_max(egui::pos2(title_right+8.0,bar.top()),egui::pos2(controls_left,bar.top()+28.0))).text(egui::pos2(title_right+8.0,title_pos.y),egui::Align2::LEFT_TOP,version,egui::TextStyle::Small.resolve(ui.style()),ui.visuals().weak_text_color());
         });
         self.show_project_tabs(ctx);
-        egui::SidePanel::right("tools")
+        egui::SidePanel::right(egui::Id::new(("tools", self.active_tab)))
             .exact_width(360.0)
             .resizable(false)
             .show(ctx, |ui| {
@@ -7214,7 +7645,20 @@ impl eframe::App for PixelForge {
             }
         });
 
-        let workspace_busy=self.generation_running||self.ai_running||self.install_rx.is_some()||self.generation_models_rx.is_some();
+        let workspace_busy = self.install_rx.is_some()
+            || self.backend_jobs_running()
+            || self
+                .inactive_tabs
+                .iter()
+                .any(|(_, project)| project.backend_jobs_running());
+        if self.dependency_manager.show_diagnostics(
+            ctx,
+            workspace_busy,
+            &self.generation_status,
+            self.generation_models_rx.is_none(),
+        ) {
+            self.refresh_generation_models(ctx);
+        }
         if self.dependency_manager.show(
             ctx,
             self.install_folder.clone(),
@@ -7295,14 +7739,6 @@ fn main() -> eframe::Result {
     )
 }
 
-impl Drop for PixelForge {
-    fn drop(&mut self) {
-        self.generation_cancel
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        ai_generation::stop_managed_backend();
-    }
-}
-
 #[cfg(test)]
 mod conversation_tests {
     use super::*;
@@ -7365,7 +7801,7 @@ mod workspace_tests {
         editor.mask=Some(mask.clone());editor.saved_selections.push(("Subject".into(),mask));
         let rendered=editor.render(&pixels);
         let texture=ctx.load_texture("crop_original",ColorImage::from_rgba_unmultiplied([8,6],rendered.as_raw()),TextureOptions::LINEAR);
-        app.generation_gallery.push(GeneratedItem {editor,settings:settings_from_json(&serde_json::json!({"prompt":"Original","dimension_step":16,"resolution":4})),pixels:pixels.clone(),texture,seed:42});
+        app.generation_gallery.push(GeneratedItem {group:None, editor,settings:settings_from_json(&serde_json::json!({"prompt":"Original","dimension_step":16,"resolution":4})),pixels:pixels.clone(),texture,seed:42});
         app.generation_workspace=true;app.bind_workspace_editor(&ctx);
         let mut crop=crop::Crop::new(0,[8,6]);
         crop.rect=Rect::from_min_max(egui::pos2(1.0,1.0),egui::pos2(6.0,5.0));
@@ -7410,13 +7846,14 @@ mod workspace_tests {
         std::fs::write(&bad,b"not an image").unwrap();
         let ctx=egui::Context::default();let mut app=PixelForge::default();
         drop_test_files(&mut app,&ctx,&[first,second]);
-        assert_eq!(app.generation_gallery.len(),2);
+        assert_eq!(app.generation_gallery.len(),1);
         assert_eq!(app.inactive_tabs.len(),1);
+        assert_eq!(app.inactive_tabs[0].1.generation_gallery.len(), 1);
         assert!(app.inactive_tabs[0].1.project_dirty);
         let active=app.active_tab;
         drop_test_files(&mut app,&ctx,&[bad]);
         assert_eq!(app.active_tab,active);
-        assert_eq!(app.generation_gallery.len(),2);
+        assert_eq!(app.generation_gallery.len(),1);
         assert!(app.status.starts_with("Open failed:"));
         let project=root.join("editor.PXF");
         app.generation_workspace=false;app.project_path=Some(project.clone());app.save_project(false);
@@ -7427,7 +7864,7 @@ mod workspace_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn dropped_studio_project_waits_for_unsaved_workspace_and_opens_cleanly() {
+    fn dropped_studio_project_opens_beside_unsaved_project() {
         let path=std::env::temp_dir().join(format!("pixelforge-studio-drop-{}.pxf",std::process::id()));
         let pixels=image::RgbaImage::from_pixel(2,1,image::Rgba([100,100,100,255]));
         generation_project::save(&path,&generation_project::GalleryProject {
@@ -7437,11 +7874,11 @@ mod workspace_tests {
         let ctx=egui::Context::default();let mut app=PixelForge::default();
         app.project_dirty=true;
         drop_test_files(&mut app,&ctx,&[path.clone()]);
-        assert_eq!(app.file_drops.front(),Some(&path));
-        assert!(app.generation_gallery.is_empty());
-        app.project_dirty=false;
-        drop_test_files(&mut app,&ctx,&[]);
         assert!(app.file_drops.is_empty());
+        assert_eq!(app.inactive_tabs.len(), 1);
+        assert!(app.inactive_tabs[0].1.project_dirty);
+        assert!(app.inactive_tabs[0].1.generation_gallery.is_empty());
+        assert!(!app.project_dirty);
         assert_eq!(app.generation_project_path,Some(path.clone()));
         assert_eq!(app.generation_gallery[0].seed,42);
         assert_eq!(app.generation_gallery[0].settings.prompt,"Dropped project");
@@ -7471,7 +7908,7 @@ mod workspace_tests {
         app.generation_workspace = true;
         let pixels = image::RgbaImage::from_fn(3, 2, |x,y| image::Rgba([(x+y*3) as u8,20,30,127]));
         let texture = ctx.load_texture("rotate_test",ColorImage::from_rgba_unmultiplied([3,2],pixels.as_raw()),TextureOptions::LINEAR);
-        app.generation_gallery.push(GeneratedItem { editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:pixels.clone(),texture,seed:12 });
+        app.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:pixels.clone(),texture,seed:12 });
         app.ensure_workspace(&ctx);
         app.selection_mask = Some(masking::SelectionMask::from_pixels(3,2,vec![255,0,0,0,0,0]).unwrap());
         app.rotate_workspace_version(&ctx, true);
@@ -7496,7 +7933,7 @@ mod workspace_tests {
         for n in 0..2 {
             let pixels=image::RgbaImage::from_pixel(2,1,image::Rgba([40+n,40,40,255]));
             let texture=ctx.load_texture(format!("test_{n}"),ColorImage::from_rgba_unmultiplied([2,1],pixels.as_raw()),TextureOptions::LINEAR);
-            app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+            app.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
         }
         app.ensure_workspace(&ctx);
         app.exposure=1.0;
@@ -7527,7 +7964,7 @@ mod workspace_tests {
         for value in [40,80] {
             let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([value,value,value,255]));
             let texture=ctx.load_texture(format!("compare_visibility_{value}"),ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
-            app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+            app.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
         }
         app.generation_workspace=true;
         app.bind_workspace_editor(&ctx);
@@ -7556,7 +7993,7 @@ mod workspace_tests {
         for n in 0..2 {
             let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([n*100,40,40,255]));
             let texture=ctx.load_texture(format!("compare_test_{n}"),ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
-            app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+            app.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
         }
         app.generation_workspace=true;
         app.generation_compare=true;
@@ -7598,7 +8035,7 @@ mod workspace_tests {
             let texture=ctx.load_texture(format!("remove_{n}"),ColorImage::from_rgba_unmultiplied([2,1],pixels.as_raw()),TextureOptions::LINEAR);
             let mut settings=settings_from_json(&serde_json::json!({}));
             settings.refine_parent=if n>0 {Some(n as usize-1)} else {None};
-            app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings,pixels,texture,seed:n as u64});
+            app.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings,pixels,texture,seed:n as u64});
         }
         app.generation_selected=2;app.generation_compare_index=1;app.generation_compare=true;
         app.bind_workspace_editor(&ctx);
@@ -7627,7 +8064,7 @@ mod workspace_tests {
         app.generation_prompt="Fixture initial prompt".into();
         let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([40,40,40,255]));
         let texture=ctx.load_texture("caption_fixture",ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
-        app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+        app.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
         let input=||egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1000.0,700.0))),..Default::default()};
         let output=ctx.run(input(),|ctx| {egui::CentralPanel::default().show(ctx,|ui|app.show_generation_workspace(ui));});
         let captions:Vec<_>=output.shapes.iter().filter_map(|clipped|match &clipped.shape {
@@ -7653,7 +8090,7 @@ mod workspace_tests {
         let ctx=egui::Context::default();let mut app=PixelForge::default();
         let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([40,40,40,255]));
         let texture=ctx.load_texture("overlay_fixture",ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
-        app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+        app.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
         app.generation_workspace=true;app.bind_workspace_editor(&ctx);
         app.selection_mask=Some(masking::SelectionMask::from_pixels(32,32,vec![255;1024]).unwrap());
         app.refresh_selection_overlay(&ctx);
@@ -7701,7 +8138,7 @@ mod workspace_tests {
         let mut app=PixelForge::default();
         let pixels=image::RgbaImage::from_pixel(2,1,image::Rgba([40,40,40,255]));
         let texture=ctx.load_texture("saved_test",ColorImage::from_rgba_unmultiplied([2,1],pixels.as_raw()),TextureOptions::LINEAR);
-        app.generation_gallery.push(GeneratedItem {editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({"prompt":"Test"})),pixels,texture,seed:42});
+        app.generation_gallery.push(GeneratedItem {group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({"prompt":"Test"})),pixels,texture,seed:42});
         app.generation_workspace=true;app.bind_workspace_editor(&ctx);
         app.exposure=1.0;
         app.selection_mask=Some(masking::SelectionMask::from_pixels(2,1,vec![255,0]).unwrap());
@@ -7781,12 +8218,353 @@ mod workspace_tests {
         assert_eq!(app.exposure,1.0);
         let first=app.active_tab;
         app.create_project_tab();load(&mut app,&ctx,"document2",80);app.ensure_workspace(&ctx);
-        assert_eq!(app.generation_gallery.len(),2);
-        assert_eq!(app.workspace_editor,Some(1));
+        assert_eq!(app.generation_gallery.len(),1);
+        assert_eq!(app.workspace_editor,Some(0));
+        assert_eq!(app.exposure, 0.0);
         app.switch_project_tab(first);app.ensure_workspace(&ctx);
         assert_eq!(app.workspace_editor,Some(0));
         assert_eq!(app.generation_selected,0);
         assert_eq!(app.exposure,1.0);
     }
 
+    fn fixture_thumbnail(ctx: &egui::Context, seed: u8, parent: Option<usize>) -> GeneratedItem {
+        let pixels = image::RgbaImage::from_pixel(2, 1, image::Rgba([seed, 0, 0, 255]));
+        let texture = ctx.load_texture(
+            format!("fixture_{seed}"),
+            ColorImage::from_rgba_unmultiplied([2, 1], pixels.as_raw()),
+            TextureOptions::LINEAR,
+        );
+        GeneratedItem {
+            group: None,
+            editor: studio::EditorState::default(),
+            settings: settings_from_json(&serde_json::json!({
+                "prompt": format!("Prompt {seed}"),
+                "refine_parent": parent,
+                "seed": seed,
+            })),
+            pixels,
+            texture,
+            seed: seed.into(),
+        }
+    }
+
+    #[test]
+    fn async_generation_and_edit_stay_with_origin_across_switch_save_and_reopen() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let origin = app.active_tab;
+        let base = fixture_thumbnail(&ctx, 11, None);
+        app.generation_batch_settings = Some(base.settings.clone());
+        app.generation_gallery.push(base);
+        app.generation_batch_settings
+            .as_mut()
+            .unwrap()
+            .refine_parent = Some(0);
+        app.generation_running = true;
+        app.bind_workspace_editor(&ctx);
+        app.exposure = 0.5;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.generation_rx = Some(rx);
+
+        app.create_blank_project_tab();
+        let other = app.active_tab;
+        app.blank_project = false;
+        app.generation_gallery
+            .push(fixture_thumbnail(&ctx, 22, None));
+        app.bind_workspace_editor(&ctx);
+        app.exposure = 1.5;
+        tx.send(Ok((fixture_thumbnail(&ctx, 33, None).pixels, 33)))
+            .unwrap();
+        app.poll_open_projects(&ctx);
+        assert_eq!(app.active_tab, other);
+        assert_eq!(app.generation_gallery.len(), 1);
+        assert_eq!(app.generation_gallery[0].seed, 22);
+
+        let root =
+            std::env::temp_dir().join(format!("pixelforge-isolation-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let other_path = root.join("other.pxf");
+        app.generation_project_path = Some(other_path.clone());
+        app.save_generation_project(false);
+        app.switch_project_tab(origin);
+        assert_eq!(app.generation_selected, 1);
+        assert_eq!(app.generation_gallery[0].editor.global.exposure, 0.5);
+        assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(0));
+        assert_eq!(app.generation_gallery[1].settings.prompt, "Prompt 11");
+        let origin_path = root.join("origin.pxf");
+        app.generation_project_path = Some(origin_path.clone());
+        app.save_generation_project(false);
+
+        let mut reopened = PixelForge::default();
+        reopened.open_generation_project(&origin_path, &ctx);
+        let reopened_origin = reopened.active_tab;
+        reopened.open_generation_project(&other_path, &ctx);
+        assert_eq!(reopened.generation_gallery.len(), 1);
+        assert_eq!(reopened.generation_gallery[0].editor.global.exposure, 1.5);
+        reopened.switch_project_tab(reopened_origin);
+        assert_eq!(reopened.generation_gallery.len(), 2);
+        assert_eq!(reopened.generation_gallery[1].seed, 33);
+        assert_eq!(reopened.generation_gallery[1].pixels.get_pixel(0, 0)[0], 33);
+        assert_eq!(reopened.generation_gallery[0].editor.global.exposure, 0.5);
+        std::fs::remove_file(origin_path).unwrap();
+        std::fs::remove_file(other_path).unwrap();
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn photo_tool_result_joins_only_the_project_that_started_it() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let origin = app.active_tab;
+        app.generation_gallery
+            .push(fixture_thumbnail(&ctx, 12, None));
+        app.bind_workspace_editor(&ctx);
+        app.workspace_ai_parent = Some(0);
+        app.ai_running = true;
+        app.ai_strength = 1.0;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.ai_rx = Some(rx);
+        app.create_blank_project_tab();
+
+        let work_dir =
+            std::env::temp_dir().join(format!("pixelforge-photo-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&work_dir).unwrap();
+        let ai_path = work_dir.join("result.png");
+        let pixels = fixture_thumbnail(&ctx, 91, None).pixels;
+        pixels.save(&ai_path).unwrap();
+        tx.send(Ok(ai_upscale::UpscaleResult {
+            work_dir,
+            ai_path: ai_path.clone(),
+            baseline_path: ai_path,
+            preview: pixels.clone(),
+            baseline_preview: pixels,
+            dimensions: [2, 1],
+        }))
+        .unwrap();
+        app.poll_open_projects(&ctx);
+        assert!(app.generation_gallery.is_empty());
+        assert!(app.ai_variations.is_empty());
+        app.switch_project_tab(origin);
+        assert_eq!(app.generation_gallery.len(), 2);
+        assert_eq!(app.generation_gallery[1].pixels.get_pixel(0, 0)[0], 91);
+        assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(0));
+        assert_eq!(app.ai_variations.len(), 1);
+    }
+
+    #[test]
+    fn thumbnail_wheel_scrolls_filmstrip_without_zooming_canvas() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.generation_gallery = (1..=10)
+            .map(|seed| fixture_thumbnail(&ctx, seed, None))
+            .collect();
+        let mut scroll_id = None;
+        let mut frame = |app: &mut PixelForge, events| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(640.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    scroll_id = Some(
+                        ui.make_persistent_id(egui::Id::new(("studio_filmstrip", app.active_tab))),
+                    );
+                    app.show_generation_workspace(ui);
+                });
+            })
+        };
+        let output = frame(&mut app, vec![]);
+        let caption = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Version 3" => Some(text.pos),
+                _ => None,
+            })
+            .expect("visible thumbnail caption");
+        let zoom = app.generation_zoom;
+        frame(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(caption - egui::vec2(0.0, 40.0)),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(0.0, -100.0),
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        assert!(
+            egui::scroll_area::State::load(&ctx, scroll_id.unwrap())
+                .unwrap()
+                .offset
+                .x
+                > 0.0
+        );
+        assert_eq!(app.generation_zoom, zoom);
+    }
+
+    #[test]
+    fn dragging_thumbnail_to_group_header_moves_it_into_group() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.thumbnail_groups.push(ThumbnailGroup {
+            name: "Destinations".into(),
+            collapsed: true,
+        });
+        app.generation_gallery = vec![fixture_thumbnail(&ctx, 1, None)];
+        let mut frame = |events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 640.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.show_generation_workspace(ui));
+                },
+            )
+        };
+        let output = frame(vec![]);
+        let text_position = |label: &str| {
+            output
+                .shapes
+                .iter()
+                .rev()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text.contains(label) => {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let from = text_position("Version 1") - egui::vec2(0.0, 40.0);
+        let to = text_position("Destinations");
+        let click = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(from), click(from, true)]);
+        frame(vec![egui::Event::PointerMoved(to)]);
+        frame(vec![click(to, false)]);
+        assert_eq!(app.generation_gallery[0].group, Some(0));
+        assert!(app.project_dirty);
+    }
+
+    #[test]
+    fn closing_origin_drops_its_worker_without_touching_the_next_project() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let origin = app.active_tab;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.generation_rx = Some(rx);
+        app.generation_running = true;
+        let cancel = app.generation_cancel.clone();
+        app.close_project_tab(origin);
+        assert_ne!(app.active_tab, origin);
+        assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            tx.send(Ok((fixture_thumbnail(&ctx, 1, None).pixels, 1)))
+                .is_err()
+        );
+        app.poll_open_projects(&ctx);
+        assert!(app.generation_gallery.is_empty());
+    }
+
+    #[test]
+    fn groups_reorder_copy_delete_and_roundtrip_without_changing_the_source() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let source = app.active_tab;
+        app.thumbnail_groups = vec![
+            ThumbnailGroup {
+                name: "Drafts".into(),
+                collapsed: false,
+            },
+            ThumbnailGroup {
+                name: "Finals".into(),
+                collapsed: true,
+            },
+        ];
+        app.generation_gallery = vec![
+            fixture_thumbnail(&ctx, 1, None),
+            fixture_thumbnail(&ctx, 2, Some(0)),
+            fixture_thumbnail(&ctx, 3, Some(1)),
+        ];
+        app.generation_gallery[1].group = Some(0);
+        app.generation_gallery[2].group = Some(1);
+        app.generation_selected = 2;
+        app.generation_compare_index = 1;
+        app.bind_workspace_editor(&ctx);
+        app.move_thumbnail(ThumbnailDrop {
+            index: 2,
+            group: Some(0),
+            before: 1,
+        });
+        let seeds = |app: &PixelForge| {
+            app.generation_gallery
+                .iter()
+                .map(|item| item.seed)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(seeds(&app), [1, 3, 2]);
+        assert_eq!(app.generation_selected, 1);
+        assert_eq!(app.workspace_editor, Some(1));
+        assert_eq!(app.generation_compare_index, 2);
+        assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(2));
+
+        let path =
+            std::env::temp_dir().join(format!("pixelforge-groups-{}.pxf", std::process::id()));
+        app.generation_project_path = Some(path.clone());
+        app.save_generation_project(false);
+        let mut loaded = PixelForge::default();
+        loaded.open_generation_project(&path, &ctx);
+        assert_eq!(seeds(&loaded), [1, 3, 2]);
+        assert_eq!(loaded.thumbnail_groups, app.thumbnail_groups);
+        assert_eq!(loaded.generation_gallery[1].group, Some(0));
+        std::fs::remove_file(path).unwrap();
+
+        let source_texture = app.generation_gallery[1].texture.id();
+        app.open_thumbnails_as_project(&ctx, &[1, 2], Some(0));
+        assert!(app.project_dirty && app.generation_project_path.is_none());
+        assert_eq!(seeds(&app), [3, 2]);
+        assert_eq!(app.thumbnail_groups[0].name, "Drafts");
+        assert_ne!(app.generation_gallery[0].texture.id(), source_texture);
+        assert_eq!(app.generation_gallery[0].settings.refine_parent, Some(1));
+        assert_eq!(app.generation_gallery[1].settings.refine_parent, None);
+        assert_eq!(app.generation_gallery[0].settings.prompt, "Prompt 3");
+        app.delete_thumbnail_group(0, true);
+        assert_eq!(seeds(&app), [3, 2]);
+        assert!(
+            app.generation_gallery
+                .iter()
+                .all(|item| item.group.is_none())
+        );
+
+        app.switch_project_tab(source);
+        assert!(!app.project_dirty);
+        assert_eq!(seeds(&app), [1, 3, 2]);
+        app.open_thumbnails_as_project(&ctx, &[1, 2], None);
+        assert!(app.thumbnail_groups.is_empty());
+        assert_eq!(seeds(&app), [3, 2]);
+        assert!(
+            app.generation_gallery
+                .iter()
+                .all(|item| item.group.is_none())
+        );
+        app.switch_project_tab(source);
+        app.delete_thumbnail_group(0, false);
+        assert_eq!(seeds(&app), [1]);
+        assert_eq!(app.thumbnail_groups[0].name, "Finals");
+    }
 }

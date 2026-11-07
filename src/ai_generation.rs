@@ -51,7 +51,7 @@ fn z_image_workflow(prompt:&str,seed:u64,steps:u32,width:u32,height:u32)->Value 
 
 fn validate_z_image_nodes(info:&Value)->Result<(),String> {
     for node in ["UNETLoader","CLIPLoader","VAELoader","EmptySD3LatentImage","ModelSamplingAuraFlow","ConditioningZeroOut","CLIPTextEncode","KSampler","VAEDecode","SaveImage"] {
-        if info.get(node).is_none() {return Err(format!("Z-Image Turbo needs ComfyUI node {node}. Update ComfyUI from Setup and Maintenance."));}
+        if info.get(node).is_none() {return Err(format!("Z-Image Turbo needs ComfyUI node {node}. Update ComfyUI from Setup > Dependencies."));}
     }
     for (node,input,value) in [("UNETLoader","unet_name",Z_IMAGE_UNET),("CLIPLoader","clip_name",FLUX_CLIP),("VAELoader","vae_name","ae.safetensors"),("CLIPLoader","type","lumina2"),("KSampler","sampler_name","res_multistep"),("KSampler","scheduler","simple")] {
         if !info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|name.as_str()==Some(value))) {
@@ -173,7 +173,7 @@ fn flux_workflow(filename:Option<&str>,prompt:&str,seed:u64,steps:u32,width:u32,
 fn validate_flux_nodes(info:&Value,editing:bool)->Result<(),String> {
     let mut required=vec!["UNETLoader","CLIPLoader","VAELoader","EmptyFlux2LatentImage","Flux2Scheduler","KSamplerSelect","RandomNoise","CFGGuider","SamplerCustomAdvanced","ConditioningZeroOut"];
     if editing {required.extend(["ReferenceLatent","ImageScaleToTotalPixels","GetImageSize","VAEEncode","LoadImage"]);}
-    for node in required {if info.get(node).is_none() {return Err(format!("FLUX Klein needs ComfyUI node {node}. Update ComfyUI from Setup and Maintenance before using this model."));}}
+    for node in required {if info.get(node).is_none() {return Err(format!("FLUX Klein needs ComfyUI node {node}. Update ComfyUI from Setup > Dependencies before using this model."));}}
     for (node,input,file,folder) in [("UNETLoader","unet_name",FLUX_UNET,"diffusion_models"),("CLIPLoader","clip_name",FLUX_CLIP,"text_encoders"),("VAELoader","vae_name",FLUX_VAE,"vae")] {
         if !info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|name.as_str()==Some(file))) {
             return Err(format!("FLUX Klein file missing: models/{folder}/{file}. Install its bundle in Model Library and refresh ComfyUI."));
@@ -198,7 +198,7 @@ use std::sync::{Mutex, OnceLock};
 static MANAGED: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 fn managed() -> &'static Mutex<Option<Child>> { MANAGED.get_or_init(|| Mutex::new(None)) }
 
-pub const CPU_FALLBACK_HINT: &str = "Try with CPU in the Generate tab or select CPU in Setup and Maintenance.";
+pub const CPU_FALLBACK_HINT: &str = "Try with CPU in the Generate tab or select CPU in Setup > Setup & Diagnostics.";
 
 fn server_ready(processing: &str) -> Result<bool, String> {
     let stats = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()
@@ -241,7 +241,7 @@ fn ensure_server_for(config: &crate::backend::Config) -> Result<(), String> {
             if runtime["cuda"].is_string() {
                 crate::compatibility::preflight(&runtime, &config.mode)?;
             } else if config.mode == "legacy" || config.mode == "modern" {
-                return Err("Selected NVIDIA backend has no CUDA runtime. Choose a matching package in Setup and Maintenance.".into());
+                return Err("Selected NVIDIA backend has no CUDA runtime. Choose a matching package in Setup > Setup & Diagnostics.".into());
             }
             if config.processing == "gpu" {
                 crate::compatibility::gpu_preflight(&runtime)?;
@@ -255,7 +255,8 @@ fn ensure_server_for(config: &crate::backend::Config) -> Result<(), String> {
         let settings = crate::profile::settings_root().ok_or("APPDATA unavailable")?;
         std::fs::create_dir_all(&settings).map_err(|e|e.to_string())?;
         let mut model_configs = Vec::new();
-        let models = crate::dependencies::root().join("models");
+        let models = crate::model_installer::chosen_models_folder()
+            .unwrap_or_else(crate::model_installer::recommended_models_folder);
         if models.is_dir() {
             let config = settings.join("extra-model-paths.yaml");
             let yaml=serde_yaml::to_string(&serde_json::json!({"pixelforge":{"base_path":models,"checkpoints":"checkpoints","diffusion_models":"diffusion_models","text_encoders":"text_encoders","vae":"vae"}})).map_err(|e|e.to_string())?;
@@ -289,7 +290,7 @@ fn ensure_server_for(config: &crate::backend::Config) -> Result<(), String> {
             }
         }
     }
-    Err("ComfyUI did not become ready within 90 seconds. Inspect backend.log in the PixelForge profile and run GPU diagnostics in Setup and Maintenance.".into())
+    Err("ComfyUI did not become ready within 90 seconds. Inspect backend.log in the PixelForge profile and run GPU diagnostics in Setup > Setup & Diagnostics.".into())
 }
 
 pub fn stop_managed_backend() {

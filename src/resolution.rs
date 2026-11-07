@@ -49,7 +49,7 @@ pub fn recommend(model: &str, vram: Option<f64>, width: u32, height: u32) -> Gui
     let h = snap(base / ratio.sqrt());
     let memory = vram
         .map(|gb| format!("{gb:.1} GiB VRAM snapshot"))
-        .unwrap_or("VRAM unknown; refresh GPU diagnostics in Setup and Maintenance".into());
+        .unwrap_or("VRAM unknown; refresh GPU diagnostics in Setup > Setup & Diagnostics".into());
     let exceeds = width as u64 * height as u64 > w as u64 * h as u64;
     Guidance {
         width: w,

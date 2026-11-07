@@ -89,9 +89,9 @@ See the [v0.6.5 release notes](docs/RELEASE_NOTES_v0.6.5.md) for details.
 
 1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.5): **PixelForge-v0.6.5-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.5-windows-x64.zip** for portable use.
 2. The installer defaults to **Program Files\Pixel Forge**, adds a Start menu entry, and offers an optional desktop shortcut. Alternatively, extract the portable ZIP into a writable folder and open **PixelForge.exe**. Neither download requires Rust.
-3. Open **Dependencies → Setup and Maintenance** to check and install the components needed by your tools. Missing required components highlight that menu item.
+3. Open **Setup → Dependencies** to check and install the components needed by your tools. Missing required components highlight that menu item.
 4. For generation/editing, connect a compatible local ComfyUI Desktop installation or install PixelForge's managed portable backend.
-5. In **Generate → Model Library**, choose the models folder if prompted, install a model, and refresh installed models.
+5. In **Setup → Model Library**, use the recommended folder or choose a custom one, install a model, and refresh installed models.
 6. Generate or import an image. Use **AI Tools** for restoration, **Changes prompt** for edits, and **Compare** to evaluate results.
 7. Save a `.pxf` project to retain history, or export a finished image.
 
@@ -104,7 +104,7 @@ See the [v0.6.5 release notes](docs/RELEASE_NOTES_v0.6.5.md) for details.
 
 ### Dependency management
 
-The **Setup and Maintenance** window reports status and offers supported install, update, and rollback actions for managed ComfyUI, Waifu2x, Real-ESRGAN, the NAFNet model, and its Python runtime. Managed updates use separate versions and activate after validation. GPU drivers remain vendor-managed; existing external installations are not replaced.
+The **Dependencies** window reports status and offers supported install, update, and rollback actions for managed ComfyUI, Waifu2x, Real-ESRGAN, the NAFNet model, and its Python runtime. Managed updates use separate versions and activate after validation. GPU drivers remain vendor-managed; existing external installations are not replaced.
 
 ### App updates (v0.6.1 onward)
 
