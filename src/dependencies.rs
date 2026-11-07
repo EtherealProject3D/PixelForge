@@ -940,12 +940,22 @@ impl Manager {
             }
         }
     }
+    pub fn try_cpu(&mut self) -> Result<(), String> {
+        let mut config = crate::backend::Config::load();
+        config.processing = "cpu".into();
+        config.save()?;
+        self.backend = config;
+        crate::ai_generation::stop_managed_backend();
+        Ok(())
+    }
+
     pub fn show(
         &mut self,
         ctx: &egui::Context,
         models: Option<PathBuf>,
         known: Vec<String>,
         workspace_busy: bool,
+        show_optional_dependencies: impl FnOnce(&mut egui::Ui),
     ) -> bool {
         if !self.open {
             return false;
@@ -954,7 +964,9 @@ impl Manager {
         let mut library = false;
         let mut action = None;
         let mut refresh = false;
-        egui::Window::new("Dependencies").collapsible(false).open(&mut open).default_width(650.0).default_height(740.0).default_pos(ctx.screen_rect().center()-egui::vec2(325.0,370.0)).resizable(true).vscroll(true).show(ctx,|ui| {
+        egui::Window::new("Setup and Maintenance").collapsible(false).open(&mut open).default_width(650.0).default_height(740.0).default_pos(ctx.screen_rect().center()-egui::vec2(325.0,370.0)).resizable(true).vscroll(true)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .show(ctx,|ui| {
             ui.heading("PixelForge setup and maintenance");
             crate::interaction::label(ui,"Install missing components here. Updates use separate folders and keep the previous installation for rollback. Your existing ComfyUI Desktop setup is left untouched.");
             ui.horizontal_wrapped(|ui| {
@@ -970,15 +982,32 @@ impl Manager {
                 if ui.add_enabled(self.diagnostic_rx.is_none()&&!workspace_busy,egui::Button::new("Run GPU diagnostics")).clicked() {self.diagnose();}
                 if self.diagnostic_rx.is_some() {ui.spinner();crate::interaction::label(ui,"Reading GPU / Python / running server information…");}
                 if let Some(report)=&self.diagnostics {
-                    crate::interaction::label(ui,report["hardware_columns"].as_str().unwrap_or(""));
-                    crate::interaction::label(ui,report["hardware_csv"].as_str().unwrap_or("Unknown GPU"));
+                    if let Some(adapters) = report["display_adapters"].as_array() {
+                        for adapter in adapters {
+                            if let Some(name) = adapter["Name"].as_str() {
+                                crate::interaction::label(ui, format!("{} · driver {}", name, adapter["DriverVersion"].as_str().unwrap_or("unknown")));
+                            } else if let Some(error) = adapter["error"].as_str() {
+                                crate::interaction::label(ui, format!("Windows display adapters unavailable: {error}"));
+                            }
+                        }
+                    }
+                    if let Some(csv) = report["hardware_csv"].as_str() {
+                        crate::interaction::label(ui, report["hardware_columns"].as_str().unwrap_or(""));
+                        crate::interaction::label(ui, csv);
+                    }
                     let runtime=&report["python_runtime"];
-                    crate::interaction::label(ui,format!("Selected Python: PyTorch {}, CUDA {}",runtime["torch"],runtime["cuda"]));
+                    crate::interaction::label(ui,format!("Selected Python: PyTorch {}, CUDA {}, HIP {}",runtime["torch"],runtime["cuda"],runtime["hip"]));
                     if runtime.get("error").is_some() {crate::interaction::label(ui,format!("Runtime diagnostic: {}",runtime["error"]));}
                     else if runtime["cuda"].is_string() {
                         match crate::compatibility::preflight(runtime,report["backend_mode"].as_str().unwrap_or("auto")) {
                             Ok(())=> {crate::interaction::label(ui,"CUDA kernel probe passed. This does not verify model generation.");}
                             Err(e)=> {ui.colored_label(egui::Color32::YELLOW,e);}
+                        }
+                    }
+                    else if runtime["hip"].is_string() || runtime["xpu_devices"].is_array() {
+                        match crate::compatibility::gpu_preflight(runtime) {
+                            Ok(()) => { crate::interaction::label(ui, "GPU kernel probe passed. Image generation still needs testing."); }
+                            Err(error) => { ui.colored_label(egui::Color32::YELLOW, error); }
                         }
                     }
                     if let Some(server)=report["running_server"].as_object() {
@@ -1001,6 +1030,9 @@ impl Manager {
             let hardware=[("nvidia","NVIDIA RTX (recommended)"),("nvidia_cu126","GTX 10-series / older — CUDA 12.6, unverified"),("amd","AMD"),("intel","Intel")];
             let label=hardware.iter().find(|(id,_)|*id==self.gpu).map(|(_,label)|*label).unwrap_or("Choose GPU");
             egui::ComboBox::from_id_salt("dependency_hardware").selected_text(label).show_ui(ui,|ui| {for (id,label) in hardware {ui.selectable_value(&mut self.gpu,id.into(),label);}});
+            ui.separator();
+            show_optional_dependencies(ui);
+            ui.separator();
             for (category, (heading, description)) in [
                 ("Generation & AI Restore", "ComfyUI and models for image generation and instruction-based editing."),
                 ("Photo Cleanup", "Noise reduction and deblurring."),
@@ -1098,8 +1130,8 @@ mod tests {
             Status{component:Some(Component::Denoise),title:"Active component".into(),required:true,installed:false,detail:"Test".into(),rollback:false},
             Status{component:Some(Component::Upscale),title:"Next component".into(),required:true,installed:false,detail:"Test".into(),rollback:false}];
         let input=||egui::RawInput{screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1000.0,1200.0))),..Default::default()};
-        let _=ctx.run(input(),|ctx|{manager.show(ctx,None,vec![],false);});
-        let output=ctx.run(input(),|ctx|{manager.show(ctx,None,vec![],false);});
+        let _=ctx.run(input(),|ctx|{manager.show(ctx,None,vec![],false, |_| {});});
+        let output=ctx.run(input(),|ctx|{manager.show(ctx,None,vec![],false, |_| {});});
         let position=|label:&str|output.shapes.iter().find_map(|shape|match &shape.shape {
             egui::Shape::Text(text) if text.galley.job.text==label=>Some(text.pos.y),_=>None}).unwrap_or_else(||panic!("Missing {label}"));
         assert!(position("Active component")<position("1.0 / 2.0 MB"));

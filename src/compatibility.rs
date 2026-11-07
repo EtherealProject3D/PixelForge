@@ -8,7 +8,7 @@ use std::{
 
 pub const TORCH_PROBE: &str = r#"
 import json, torch
-v = {'torch':torch.__version__, 'cuda':torch.version.cuda, 'available':torch.cuda.is_available(), 'devices':[]}
+v = {'torch':torch.__version__, 'cuda':torch.version.cuda, 'hip':getattr(torch.version, 'hip', None), 'available':torch.cuda.is_available(), 'devices':[]}
 if v['available']:
     v['architectures'] = torch.cuda.get_arch_list()
     for i in range(torch.cuda.device_count()):
@@ -20,6 +20,13 @@ if v['available']:
         v['kernel_test'] = 'passed'
     except Exception as e:
         v['kernel_test'] = str(e)
+if hasattr(torch, 'xpu') and torch.xpu.is_available():
+    v['xpu_devices'] = [torch.xpu.get_device_name(i) for i in range(torch.xpu.device_count())]
+    try:
+        x = torch.ones((16,16),device='xpu'); y = x @ x; torch.xpu.synchronize()
+        v['xpu_kernel_test'] = 'passed'
+    except Exception as e:
+        v['xpu_kernel_test'] = str(e)
 print('PIXELFORGE_DIAGNOSTIC='+json.dumps(v))
 "#;
 
@@ -64,7 +71,12 @@ pub fn capture(mut command: Command, timeout: Duration) -> Result<String, String
         if status.success() {
             Ok(text)
         } else {
-            Err(actionable(&text))
+            let detail = if text.trim().is_empty() {
+                format!("Process exited with {status} and produced no output.")
+            } else {
+                format!("Process exited with {status}.\n{text}")
+            };
+            Err(actionable(&detail))
         }
     })();
     let _ = std::fs::remove_file(path);
@@ -90,7 +102,14 @@ pub fn probe(root: &Path) -> Result<Value, String> {
 fn parse_probe(text: &str) -> Result<Value, String> {
     text.lines()
         .find_map(|line| line.strip_prefix("PIXELFORGE_DIAGNOSTIC="))
-        .ok_or_else(|| actionable(text))
+        .ok_or_else(|| {
+            let output = text.trim();
+            if output.is_empty() {
+                actionable("Python exited successfully without producing a diagnostic report.")
+            } else {
+                actionable(output)
+            }
+        })
         .and_then(|s| serde_json::from_str(s).map_err(|e| e.to_string()))
 }
 pub fn legacy(capability: (u64, u64)) -> bool {
@@ -101,9 +120,22 @@ pub fn selected_device(value: &Value) -> Option<&Value> {
         .as_array()?
         .get(value["selected"].as_u64().unwrap_or(0) as usize)
 }
+pub fn gpu_preflight(value: &Value) -> Result<(), String> {
+    if value["kernel_test"] == "passed" || value["xpu_kernel_test"] == "passed" {
+        return Ok(());
+    }
+    let detail = value["kernel_test"]
+        .as_str()
+        .or_else(|| value["xpu_kernel_test"].as_str())
+        .unwrap_or("The selected PyTorch runtime did not report a CUDA, HIP or Intel XPU device.");
+    Err(format!(
+        "The selected ComfyUI runtime did not pass its GPU check. {detail}"
+    ))
+}
+
 pub fn preflight(value: &Value, mode: &str) -> Result<(), String> {
     if !value["available"].as_bool().unwrap_or(false) {
-        return Err("CUDA unavailable in the selected Python runtime. Check NVIDIA driver and choose a matching ComfyUI package in Dependencies. No packages were changed.".into());
+        return Err("CUDA unavailable in the selected Python runtime. Check NVIDIA driver and choose a matching ComfyUI package in Setup and Maintenance. No packages were changed.".into());
     }
     let device = selected_device(value).ok_or("No selected CUDA device reported")?;
     let cap = (
@@ -116,10 +148,10 @@ pub fn preflight(value: &Value, mode: &str) -> Result<(), String> {
         return Err("Legacy backend is for GTX 10-series and older GPUs. Select Auto / Modern for RTX hardware; existing packages were preserved.".into());
     }
     if mode == "modern" && legacy(cap) {
-        return Err("This GPU needs the legacy CUDA 12.6 ComfyUI package. Choose Legacy in Dependencies. Actual GTX 1080 generation remains unverified.".into());
+        return Err("This GPU needs the legacy CUDA 12.6 ComfyUI package. Choose Legacy in Setup and Maintenance. Actual GTX 1080 generation remains unverified.".into());
     }
     if legacy(cap) && value["cuda"].as_str() != Some("12.6") {
-        return Err("GTX 10-series needs a compatible CUDA 12.6 PyTorch build. Register a separate legacy ComfyUI portable folder in Dependencies. Do not upgrade your working environment in place.".into());
+        return Err("GTX 10-series needs a compatible CUDA 12.6 PyTorch build. Register a separate legacy ComfyUI portable folder in Setup and Maintenance. Do not upgrade your working environment in place.".into());
     }
     if value["kernel_test"].as_str() != Some("passed") {
         return Err(actionable(
@@ -131,6 +163,11 @@ pub fn preflight(value: &Value, mode: &str) -> Result<(), String> {
     Ok(())
 }
 pub fn actionable(raw: &str) -> String {
+    let raw = if raw.trim().is_empty() {
+        "The backend produced no output."
+    } else {
+        raw.trim()
+    };
     let lower = raw.to_ascii_lowercase();
     let advice = if lower.contains("out of memory") || lower.contains("outofmemory") {
         "GPU memory exhausted. Lower resolution, use batch 1, close other GPU apps, or choose a smaller model. Check the resolution guidance."
@@ -138,30 +175,60 @@ pub fn actionable(raw: &str) -> String {
         || lower.contains("invalid device function")
         || lower.contains("not compatible with the current pytorch")
     {
-        "GPU architecture is unsupported by this PyTorch build. Open Dependencies and run diagnostics. GTX 10-series needs a separate legacy CUDA 12.6 backend; RTX uses the modern backend."
+        "GPU architecture is unsupported by this PyTorch build. Open Setup and Maintenance and run diagnostics. GTX 10-series needs a separate legacy CUDA 12.6 backend; RTX uses the modern backend."
     } else if lower.contains("driver") || lower.contains("cuda initialization") {
-        "CUDA driver initialization failed. Update the NVIDIA driver from NVIDIA, restart Windows, and recheck Dependencies. The CUDA version reported by nvidia-smi is the driver limit, not the installed PyTorch runtime."
+        "CUDA driver initialization failed. Update the NVIDIA driver from NVIDIA, restart Windows, and recheck Setup and Maintenance. The CUDA version reported by nvidia-smi is the driver limit, not the installed PyTorch runtime."
     } else if lower.contains("fp8")
         || lower.contains("bfloat16")
         || lower.contains("not implemented for 'half'")
     {
         "This model or precision needs newer GPU features. On legacy GPUs try an FP32/FP16 checkpoint with the legacy backend; FP8 models may require modern hardware."
     } else {
-        "Open Dependencies > Run GPU diagnostics and inspect the backend log. Check model requirements and the selected ComfyUI environment."
+        "Open Setup and Maintenance > Run GPU diagnostics and inspect the backend log. Check model requirements and the selected ComfyUI environment."
     };
     format!(
         "{advice}\nTechnical detail: {}",
         raw.chars().take(12000).collect::<String>()
     )
 }
+#[cfg(windows)]
+fn display_adapters() -> Result<Vec<Value>, String> {
+    let mut command = Command::new("powershell.exe");
+    command.args(["-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference = 'Stop'; [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $adapters = @(Get-CimInstance Win32_VideoController | Select-Object Name, DriverVersion, AdapterCompatibility); ConvertTo-Json -InputObject $adapters -Compress"]);
+    let output = capture(command, Duration::from_secs(15))?;
+    serde_json::from_str(&output).map_err(|error| error.to_string())
+}
+
+#[cfg(not(windows))]
+fn display_adapters() -> Result<Vec<Value>, String> {
+    Ok(Vec::new())
+}
+
 pub fn collect() -> Value {
-    let mut command = Command::new("nvidia-smi");
-    command.args([
-        "--query-gpu=name,memory.total,memory.free,driver_version,compute_cap",
-        "--format=csv,noheader,nounits",
-    ]);
-    let hardware = capture(command, Duration::from_secs(10));
+    let adapters = display_adapters();
+    let has_nvidia = adapters.as_ref().map_or(true, |adapters| {
+        adapters.is_empty()
+            || adapters.iter().any(|adapter| {
+                adapter["AdapterCompatibility"]
+                    .as_str()
+                    .is_some_and(|id| id.to_ascii_lowercase().contains("nvidia"))
+                    || adapter["Name"]
+                        .as_str()
+                        .is_some_and(|name| name.to_ascii_lowercase().contains("nvidia"))
+            })
+    });
+    let hardware = has_nvidia.then(|| {
+        let mut command = Command::new("nvidia-smi");
+        command.args([
+            "--query-gpu=name,memory.total,memory.free,driver_version,compute_cap",
+            "--format=csv,noheader,nounits",
+        ]);
+        capture(command, Duration::from_secs(10))
+            .unwrap_or_else(|error| format!("NVIDIA GPU details unavailable: {error}"))
+    });
     let server = reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(3))
         .build()
         .ok()
@@ -174,10 +241,11 @@ pub fn collect() -> Value {
         .as_ref()
         .map_err(Clone::clone)
         .and_then(|p| probe(p));
-    json!({"hardware_csv":hardware.unwrap_or_else(|e|format!("Unavailable (driver tool may not be installed): {e}")),
+    json!({"hardware_csv":hardware,
+        "display_adapters":adapters.unwrap_or_else(|error| vec![json!({"error":error})]),
         "hardware_columns":"name, total VRAM MiB, free VRAM MiB, driver, compute capability",
-        "backend_mode":config.mode,"backend_path":selected.ok(),"python_runtime":runtime.unwrap_or_else(|e|json!({"error":e})),
-        "running_server":server,"note":"Running server may be externally managed and use a different runtime. GTX 1080 generation is unverified pending hardware test. Diagnostics are read-only; the small CUDA kernel test is not a generation test."})
+        "backend_mode":config.mode,"processing_device":config.processing,"backend_path":selected.ok(),"python_runtime":runtime.unwrap_or_else(|e|json!({"error":e})),
+        "running_server":server,"note":"Running server may be externally managed and use a different runtime. GTX 1080 generation is unverified pending hardware test. Diagnostics are read-only; the small GPU kernel test is not a generation test."})
 }
 pub fn vram_gib(report: &Value) -> Option<f64> {
     // Prefer the running server's device over an environment that may not be serving requests.
@@ -195,6 +263,16 @@ mod tests {
     fn runtime(cap: u64, cuda: &str, kernel: &str) -> Value {
         json!({"available":true,"cuda":cuda,"selected":0,"kernel_test":kernel,"devices":[{"capability":[cap,1],"vram":8589934592u64}]})
     }
+    #[test]
+    fn an_empty_python_probe_explains_the_missing_output() {
+        assert!(
+            parse_probe("  ")
+                .unwrap_err()
+                .contains("without producing a diagnostic report")
+        );
+        assert!(actionable("").contains("backend produced no output"));
+    }
+
     #[test]
     fn gtx1080_requires_legacy_and_real_kernel_probe() {
         assert!(preflight(&runtime(6, "12.6", "passed"), "legacy").is_ok());
