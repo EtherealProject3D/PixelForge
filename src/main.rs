@@ -273,7 +273,11 @@ struct ThumbnailGroup {
 }
 
 enum GroupDialog {
-    Name { group: Option<usize>, name: String },
+    Name {
+        group: Option<usize>,
+        name: String,
+        thumbnails: Vec<usize>,
+    },
     Delete(usize),
 }
 
@@ -560,6 +564,7 @@ struct PixelForge {
     generation_gallery: Vec<GeneratedItem>,
     thumbnail_groups: Vec<ThumbnailGroup>,
     group_dialog: Option<GroupDialog>,
+    thumbnail_selection: Vec<usize>,
     generation_project_path: Option<PathBuf>,
     refinement_source: Option<usize>,
     refinement_strength: f32,
@@ -781,6 +786,7 @@ impl Default for PixelForge {
             generation_gallery: Vec::new(),
             thumbnail_groups: Vec::new(),
             group_dialog: None,
+            thumbnail_selection: Vec::new(),
             generation_project_path: None,
             refinement_source: None,
             refinement_strength: 0.35,
@@ -2683,6 +2689,13 @@ impl PixelForge {
         if self.refinement_source==Some(removed) {self.refinement_mask.clear();self.refinement_mask_texture=None;}
         self.refinement_source=remap(self.refinement_source);
         self.workspace_ai_parent=remap(self.workspace_ai_parent);
+        self.remap_thumbnail_selection(|index| remap(Some(index)));
+        if let Some(mut crop) = self.crop.take() {
+            if let Some(index) = remap(Some(crop.source)) {
+                crop.source = index;
+                self.crop = Some(crop);
+            }
+        }
         for item in &mut self.generation_gallery {item.settings.refine_parent=remap(item.settings.refine_parent);}
         let last=self.generation_gallery.len().saturating_sub(1);
         self.generation_selected=remap(Some(self.generation_selected)).unwrap_or(removed).min(last);
@@ -2724,46 +2737,127 @@ impl PixelForge {
         crate::interaction::label_widget(ui,egui::Label::new(&prompts).truncate()).on_hover_text(&prompts);
     }
 
-    fn move_thumbnail(&mut self, drop: ThumbnailDrop) {
-        let ThumbnailDrop {
-            index,
-            group,
-            before,
-        } = drop;
-        let len = self.generation_gallery.len();
-        if self.generation_running || self.ai_running || index >= len || before > len {
-            return;
-        }
-        let destination = before - usize::from(index < before);
-        if index == destination && self.generation_gallery[index].group == group {
-            return;
-        }
-        let mut item = self.generation_gallery.remove(index);
-        item.group = group;
-        self.generation_gallery.insert(destination, item);
-        let remap = |old| {
-            if old == index {
-                destination
+    fn select_thumbnail(&mut self, index: usize, extend: bool) {
+        if extend {
+            if let Some(position) = self
+                .thumbnail_selection
+                .iter()
+                .position(|&item| item == index)
+            {
+                self.thumbnail_selection.remove(position);
             } else {
-                let shifted = old - usize::from(old > index);
-                shifted + usize::from(shifted >= destination)
+                self.thumbnail_selection.push(index);
             }
+        } else {
+            self.thumbnail_selection.clear();
+            self.thumbnail_selection.push(index);
+            self.generation_selected = index;
+            self.refinement_source = None;
+            self.refinement_mask_texture = None;
+        }
+    }
+
+    fn thumbnail_action_selection(&self, index: usize) -> Vec<usize> {
+        if self.thumbnail_selection.contains(&index) {
+            self.thumbnail_selection.clone()
+        } else {
+            vec![index]
+        }
+    }
+
+    fn remap_thumbnail_selection(&mut self, remap: impl Fn(usize) -> Option<usize>) {
+        let update = |indices: &mut Vec<usize>| {
+            indices.retain_mut(|index| match remap(*index) {
+                Some(new_index) => {
+                    *index = new_index;
+                    true
+                }
+                None => false,
+            });
         };
-        self.generation_selected = remap(self.generation_selected);
-        self.generation_compare_index = remap(self.generation_compare_index);
-        self.workspace_editor = self.workspace_editor.map(remap);
-        self.workspace_ai_parent = self.workspace_ai_parent.map(remap);
-        self.refinement_source = self.refinement_source.map(remap);
+        update(&mut self.thumbnail_selection);
+        if let Some(GroupDialog::Name { thumbnails, .. }) = &mut self.group_dialog {
+            update(thumbnails);
+        }
+    }
+
+    fn move_thumbnail(&mut self, drop: ThumbnailDrop) {
+        let indices = self.thumbnail_action_selection(drop.index);
+        self.move_thumbnails(&indices, drop.group, drop.before);
+    }
+
+    fn move_thumbnails(&mut self, indices: &[usize], group: Option<usize>, before: usize) {
+        let len = self.generation_gallery.len();
+        if self.generation_running || self.ai_running || indices.is_empty() || before > len {
+            return;
+        }
+
+        let mut moving = vec![false; len];
+        for &index in indices {
+            moving[index] = true;
+        }
+        let mut moved: Vec<_> = (0..len).filter(|&index| moving[index]).collect();
+        // Preserve the order in which the selected thumbnails appear in the strip.
+        moved.sort_by_key(|&index| (self.generation_gallery[index].group, index));
+        let mut order: Vec<_> = (0..len).filter(|&index| !moving[index]).collect();
+        let destination = order.partition_point(|&index| index < before);
+        order.splice(destination..destination, moved.iter().copied());
+        if order.iter().copied().eq(0..len)
+            && moved
+                .iter()
+                .all(|&index| self.generation_gallery[index].group == group)
+        {
+            return;
+        }
+
+        let mut new_indices = vec![0; len];
+        for (new_index, &old_index) in order.iter().enumerate() {
+            new_indices[old_index] = new_index;
+        }
+        let mut gallery: Vec<_> = std::mem::take(&mut self.generation_gallery)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.generation_gallery = order
+            .into_iter()
+            .map(|old_index| {
+                let mut item = gallery[old_index]
+                    .take()
+                    .expect("each thumbnail appears once");
+                if moving[old_index] {
+                    item.group = group;
+                }
+                item.settings.refine_parent = item
+                    .settings
+                    .refine_parent
+                    .and_then(|parent| new_indices.get(parent).copied());
+                item
+            })
+            .collect();
+
+        let remap = |index| new_indices.get(index).copied();
+        self.generation_selected = remap(self.generation_selected).unwrap_or(0);
+        self.generation_compare_index = remap(self.generation_compare_index).unwrap_or(0);
+        self.workspace_editor = self.workspace_editor.and_then(remap);
+        self.workspace_ai_parent = self.workspace_ai_parent.and_then(remap);
+        self.refinement_source = self.refinement_source.and_then(remap);
+        if let Some(crop) = &mut self.crop {
+            crop.source = new_indices[crop.source];
+        }
         if let Some((index, _)) = &mut self.rename_version {
-            *index = remap(*index);
+            *index = new_indices[*index];
         }
-        for item in &mut self.generation_gallery {
-            item.settings.refine_parent = item
-                .settings
-                .refine_parent
-                .filter(|&parent| parent < len)
-                .map(remap);
-        }
+        self.remap_thumbnail_selection(remap);
+        self.project_dirty = true;
+    }
+
+    fn create_thumbnail_group(&mut self, name: String, thumbnails: &[usize]) {
+        let group = self.thumbnail_groups.len();
+        self.thumbnail_groups.push(ThumbnailGroup {
+            name,
+            collapsed: false,
+        });
+        self.move_thumbnails(thumbnails, Some(group), self.generation_gallery.len());
         self.project_dirty = true;
     }
 
@@ -2842,7 +2936,11 @@ impl PixelForge {
         let mut open = true;
         let mut done = false;
         match &mut dialog {
-            GroupDialog::Name { group, name } => {
+            GroupDialog::Name {
+                group,
+                name,
+                thumbnails,
+            } => {
                 let title = if group.is_some() {
                     "Rename Thumbnail Group"
                 } else {
@@ -2857,20 +2955,20 @@ impl PixelForge {
                         let edit = interaction::singleline(ui, name);
                         let clean: String = name.trim().chars().take(100).collect();
                         ui.horizontal(|ui| {
+                            let can_save = !clean.is_empty()
+                                && (thumbnails.is_empty()
+                                    || (!self.generation_running && !self.ai_running));
                             let save = ui
-                                .add_enabled(!clean.is_empty(), egui::Button::new("Save Group"))
+                                .add_enabled(can_save, egui::Button::new("Save Group"))
                                 .clicked()
-                                || (!clean.is_empty()
+                                || (can_save
                                     && edit.lost_focus()
                                     && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                             if save {
                                 if let Some(index) = *group {
                                     self.thumbnail_groups[index].name = clean;
                                 } else {
-                                    self.thumbnail_groups.push(ThumbnailGroup {
-                                        name: clean,
-                                        collapsed: false,
-                                    });
+                                    self.create_thumbnail_group(clean, thumbnails);
                                 }
                                 self.project_dirty = true;
                                 done = true;
@@ -2923,6 +3021,8 @@ impl PixelForge {
         let mut rename_version = None;
         let mut open_project = None;
         let mut moved = None;
+        let mut selected_thumbnail = None;
+        let mut group_thumbnail = None;
         let busy = self.generation_running || self.ai_running;
         let project = self.active_tab;
         let drop_target = |response: &egui::Response, group, before, after| {
@@ -2965,6 +3065,7 @@ impl PixelForge {
                         self.group_dialog = Some(GroupDialog::Name {
                             group: None,
                             name: String::new(),
+                            thumbnails: Vec::new(),
                         });
                     }
                     let grouped = !self.thumbnail_groups.is_empty();
@@ -3009,6 +3110,7 @@ impl PixelForge {
                                             self.group_dialog = Some(GroupDialog::Name {
                                                 group,
                                                 name: self.thumbnail_groups[index].name.clone(),
+                                                thumbnails: Vec::new(),
                                             });
                                             ui.close();
                                         }
@@ -3064,7 +3166,8 @@ impl PixelForge {
                                                     thumb,
                                                 )))
                                                 .sense(sense)
-                                                .selected(index == self.generation_selected),
+                                                .selected(self.thumbnail_selection.contains(&index)
+                                                    || (self.thumbnail_selection.is_empty() && index == self.generation_selected)),
                                             )
                                             .on_hover_text(
                                                 item.settings
@@ -3081,11 +3184,13 @@ impl PixelForge {
                                                 .or(moved);
                                         }
                                         if response.clicked() {
-                                            self.generation_selected = index;
-                                            self.refinement_source = None;
-                                            self.refinement_mask_texture = None;
+                                            selected_thumbnail = Some((index, ui.input(|i| i.modifiers.ctrl)));
                                         }
                                         response.context_menu(|ui| {
+                                            if ui.add_enabled(!busy, egui::Button::new("Add to New Group…")).clicked() {
+                                                group_thumbnail = Some(index);
+                                                ui.close();
+                                            }
                                             if ui.button("Open as New Project").clicked() {
                                                 open_project = Some((vec![index], None));
                                                 ui.close();
@@ -3127,6 +3232,16 @@ impl PixelForge {
                 });
             });
 
+        if let Some((index, extend)) = selected_thumbnail {
+            self.select_thumbnail(index, extend);
+        }
+        if let Some(index) = group_thumbnail {
+            self.group_dialog = Some(GroupDialog::Name {
+                group: None,
+                name: String::new(),
+                thumbnails: self.thumbnail_action_selection(index),
+            });
+        }
         if let Some(drop) = moved {
             self.move_thumbnail(drop);
         }
@@ -8566,6 +8681,126 @@ mod workspace_tests {
         frame(vec![click(to, false)]);
         assert_eq!(app.generation_gallery[0].group, Some(0));
         assert!(app.project_dirty);
+    }
+
+    #[test]
+    fn ctrl_click_then_right_click_offers_to_group_the_selection() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.generation_gallery = (1..=3)
+            .map(|seed| fixture_thumbnail(&ctx, seed, None))
+            .collect();
+        let frame = |app: &mut PixelForge, modifiers, events| {
+            ctx.run(
+                egui::RawInput {
+                    modifiers,
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| app.show_workspace_filmstrip(ui));
+                },
+            )
+        };
+        let text_center = |output: &egui::FullOutput, label: &str| {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == label => {
+                        Some(text.pos + text.galley.size() * 0.5)
+                    }
+                    _ => None,
+                })
+                .expect("visible label")
+        };
+        let output = frame(&mut app, egui::Modifiers::NONE, vec![]);
+        let first = text_center(&output, "Version 1") - egui::vec2(0.0, 30.0);
+        let third = text_center(&output, "Version 3") - egui::vec2(0.0, 30.0);
+        let click = |app: &mut PixelForge, pos, button, modifiers| {
+            let event = |pressed| egui::Event::PointerButton {
+                pos,
+                button,
+                pressed,
+                modifiers,
+            };
+            frame(
+                app,
+                modifiers,
+                vec![egui::Event::PointerMoved(pos), event(true)],
+            );
+            frame(app, modifiers, vec![event(false)])
+        };
+        let ctrl = egui::Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        click(&mut app, first, egui::PointerButton::Primary, ctrl);
+        click(&mut app, third, egui::PointerButton::Primary, ctrl);
+        assert_eq!(app.thumbnail_selection, [0, 2]);
+        click(
+            &mut app,
+            third,
+            egui::PointerButton::Secondary,
+            egui::Modifiers::NONE,
+        );
+        let menu = frame(&mut app, egui::Modifiers::NONE, vec![]);
+        let action = text_center(&menu, "Add to New Group…");
+        click(
+            &mut app,
+            action,
+            egui::PointerButton::Primary,
+            egui::Modifiers::NONE,
+        );
+        assert!(matches!(
+            app.group_dialog,
+            Some(GroupDialog::Name { group: None, ref thumbnails, .. }) if thumbnails == &[0, 2]
+        ));
+    }
+
+    #[test]
+    fn multi_selection_groups_and_moves_as_a_block_in_strip_order() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.generation_gallery = vec![
+            fixture_thumbnail(&ctx, 1, None),
+            fixture_thumbnail(&ctx, 2, Some(0)),
+            fixture_thumbnail(&ctx, 3, Some(0)),
+            fixture_thumbnail(&ctx, 4, Some(2)),
+        ];
+        app.select_thumbnail(2, true);
+        app.select_thumbnail(0, true);
+        app.select_thumbnail(1, true);
+        app.select_thumbnail(1, true);
+        assert_eq!(app.thumbnail_action_selection(1), vec![1]);
+        let selected = app.thumbnail_action_selection(0);
+        app.create_thumbnail_group("Drafts".into(), &selected);
+        let seeds_in = |app: &PixelForge, group| {
+            app.generation_gallery
+                .iter()
+                .filter(|item| item.group == group)
+                .map(|item| item.seed)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(seeds_in(&app, Some(0)), [1, 3]);
+        assert_eq!(seeds_in(&app, None), [2, 4]);
+        assert_eq!(app.generation_gallery[0].settings.refine_parent, Some(2));
+        assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(3));
+
+        app.create_thumbnail_group("Finals".into(), &[0]);
+        let index = app
+            .generation_gallery
+            .iter()
+            .position(|item| item.seed == 3)
+            .unwrap();
+        app.move_thumbnail(ThumbnailDrop {
+            index,
+            group: Some(1),
+            before: app.generation_gallery.len(),
+        });
+        assert!(seeds_in(&app, Some(0)).is_empty());
+        assert_eq!(seeds_in(&app, Some(1)), [2, 1, 3]);
+        assert_eq!(app.thumbnail_selection.len(), 2);
     }
 
     #[test]
