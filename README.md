@@ -6,7 +6,7 @@
 
 PixelForge is a Windows desktop image studio that brings local AI generation, conversational editing, photo restoration, and traditional adjustments into one workspace. Generate an image or import a photograph, make changes, and compare every result without switching between separate viewers.
 
-**Version 0.6.4 · Windows x64 · Rust + egui · Local ComfyUI**
+**Version 0.6.5 · Windows x64 · Rust + egui · Local ComfyUI**
 
 [Download v0.6.5](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.5) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
 
