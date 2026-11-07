@@ -2696,6 +2696,9 @@ impl PixelForge {
         self.generation_status="Removed image version (original files were not deleted)".into();
     }
 
+    const THUMBNAIL_WIDTH: f32 = 94.0;
+    const THUMBNAIL_HEIGHT: f32 = 72.0;
+
     fn workspace_filmstrip_height(&self, ui: &egui::Ui) -> f32 {
         // Fixed thumbnail cells and captions, with only the scrollbar gutter below.
         let group_header = if self.thumbnail_groups.is_empty() {
@@ -2704,9 +2707,7 @@ impl PixelForge {
             ui.spacing().interact_size.y + ui.spacing().item_spacing.y
         };
         group_header
-            + ui.spacing().interact_size.y
-            + ui.spacing().item_spacing.y
-            + 96.0
+            + Self::THUMBNAIL_HEIGHT
             + ui.text_style_height(&egui::TextStyle::Small)
             + ui.spacing().item_spacing.y * 2.0
             + ui.spacing().scroll.bar_width
@@ -2918,12 +2919,6 @@ impl PixelForge {
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
         self.capture_workspace_editor();
         ui.separator();
-        if ui.small_button("+ New Group").clicked() {
-            self.group_dialog = Some(GroupDialog::Name {
-                group: None,
-                name: String::new(),
-            });
-        }
         let mut remove_version = None;
         let mut rename_version = None;
         let mut open_project = None;
@@ -2966,6 +2961,12 @@ impl PixelForge {
             .max_height(self.workspace_filmstrip_height(ui))
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
+                    if ui.small_button("+ New Group").clicked() {
+                        self.group_dialog = Some(GroupDialog::Name {
+                            group: None,
+                            name: String::new(),
+                        });
+                    }
                     let grouped = !self.thumbnail_groups.is_empty();
                     for group in
                         std::iter::once(None).chain((0..self.thumbnail_groups.len()).map(Some))
@@ -2990,8 +2991,8 @@ impl PixelForge {
                                         )
                                     },
                                 );
-                                let header = ui.button(label).on_hover_text(
-                                    "Drop a thumbnail here to move it to this section",
+                                let header = ui.small_button(&label).on_hover_text(
+                                    "Click a named group to expand or collapse it. Drop a thumbnail here to move it into this section.",
                                 );
                                 let end = indices
                                     .last()
@@ -3034,18 +3035,22 @@ impl PixelForge {
                                             });
                                         });
                                     });
-                                    if self.thumbnail_groups[index].collapsed {
-                                        return;
-                                    }
                                 }
                             }
 
+                            // The first thumbnail in display order is the collapsed group's cover.
+                            let visible_count =
+                                if group.is_some_and(|index| self.thumbnail_groups[index].collapsed) {
+                                    1
+                                } else {
+                                    indices.len()
+                                };
                             ui.horizontal(|ui| {
-                                for &index in &indices {
+                                for &index in indices.iter().take(visible_count) {
                                     let item = &self.generation_gallery[index];
                                     ui.vertical(|ui| {
                                         let size = item.texture.size_vec2();
-                                        let thumb = size * (92.0 / size.x.max(size.y));
+                                        let thumb = size * ((Self::THUMBNAIL_HEIGHT - 8.0) / size.x.max(size.y));
                                         let sense = if busy {
                                             egui::Sense::click()
                                         } else {
@@ -3053,7 +3058,7 @@ impl PixelForge {
                                         };
                                         let response = ui
                                             .add_sized(
-                                                [116.0, 96.0],
+                                                [Self::THUMBNAIL_WIDTH, Self::THUMBNAIL_HEIGHT],
                                                 egui::Button::image(egui::Image::new((
                                                     item.texture.id(),
                                                     thumb,
@@ -3103,7 +3108,10 @@ impl PixelForge {
                                         });
                                         let caption = item.version_label(index);
                                         ui.add_sized(
-                                            [116.0, ui.text_style_height(&egui::TextStyle::Small)],
+                                            [
+                                                Self::THUMBNAIL_WIDTH,
+                                                ui.text_style_height(&egui::TextStyle::Small),
+                                            ],
                                             egui::Label::new(egui::RichText::new(&caption).small())
                                                 .truncate(),
                                         )
@@ -8468,6 +8476,43 @@ mod workspace_tests {
                 > 0.0
         );
         assert_eq!(app.generation_zoom, zoom);
+    }
+
+    #[test]
+    fn collapsed_group_shows_first_thumbnail_and_expands_to_show_the_rest() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.thumbnail_groups.push(ThumbnailGroup {
+            name: "Drafts".into(),
+            collapsed: true,
+        });
+        for (seed, name) in [(1, "Cover image"), (2, "Second image"), (3, "Third image")] {
+            let mut item = fixture_thumbnail(&ctx, seed, None);
+            item.group = Some(0);
+            item.editor.name = name.into();
+            app.generation_gallery.push(item);
+        }
+        let frame = |app: &mut PixelForge| {
+            ctx.run(egui::RawInput::default(), |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.show_workspace_filmstrip(ui));
+            })
+        };
+        let has_caption = |output: &egui::FullOutput, caption: &str| {
+            output.shapes.iter().any(|shape| match &shape.shape {
+                egui::Shape::Text(text) => text.galley.job.text.starts_with(caption),
+                _ => false,
+            })
+        };
+        let collapsed = frame(&mut app);
+        assert!(has_caption(&collapsed, "Cover image"));
+        assert!(!has_caption(&collapsed, "Second image"));
+        assert!(!has_caption(&collapsed, "Third image"));
+
+        app.thumbnail_groups[0].collapsed = false;
+        let expanded = frame(&mut app);
+        for caption in ["Cover image", "Second image", "Third image"] {
+            assert!(has_caption(&expanded, caption));
+        }
     }
 
     #[test]
