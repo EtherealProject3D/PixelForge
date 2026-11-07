@@ -3124,18 +3124,35 @@ impl PixelForge {
         let project = self.active_tab;
         let pointer = ui.input(|input| input.pointer.interact_pos());
         let preview = self.thumbnail_drop_preview;
-        let show_gap = |ui: &mut egui::Ui| {
+        let dragging = egui::DragAndDrop::payload::<ThumbnailDrag>(ui.ctx())
+            .is_some_and(|drag| drag.project == project && !busy);
+        let mut showing_placeholder = false;
+        let mut show_gap = |ui: &mut egui::Ui, group, before| {
+            let active = dragging && preview == Some((group, before));
+            let progress = ui.ctx().animate_bool_with_time_and_easing(
+                egui::Id::new(("thumbnail_drop_gap", project, group, before)),
+                active,
+                0.14,
+                egui::emath::easing::quadratic_in_out,
+            );
+            let width = Self::THUMBNAIL_WIDTH * progress;
+            if !dragging || width < 1.0 {
+                return None;
+            }
+            showing_placeholder = true;
             let (rect, _) = ui.allocate_exact_size(
-                egui::vec2(18.0, Self::THUMBNAIL_HEIGHT),
+                egui::vec2(width, Self::THUMBNAIL_HEIGHT),
                 egui::Sense::hover(),
             );
-            ui.painter().rect_stroke(
-                rect.shrink(2.0),
-                3.0,
-                egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
-                egui::StrokeKind::Inside,
-            );
-            rect
+            if active {
+                ui.painter().rect_stroke(
+                    rect,
+                    4.0,
+                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            active.then_some(rect)
         };
 
         ui.spacing_mut().scroll.floating = false;
@@ -3257,11 +3274,14 @@ impl PixelForge {
                             ui.horizontal(|ui| {
                                 row_top = Some(ui.cursor().top());
                                 for &index in indices.iter().take(visible_count) {
-                                    if preview == Some((group, index)) {
-                                        gap = Some((show_gap(ui), index));
+                                    if let Some(rect) = show_gap(ui, group, index) {
+                                        gap = Some((rect, index));
                                     }
                                     let item = &self.generation_gallery[index];
-                                    let tile = ui.vertical(|ui| {
+                                    let tile_layout = egui::UiBuilder::new()
+                                        .id_salt(("thumbnail_tile", index))
+                                        .layout(egui::Layout::top_down(egui::Align::Min));
+                                    let tile = ui.scope_builder(tile_layout, |ui| {
                                         ui.spacing_mut().item_spacing.y = Self::THUMBNAIL_CAPTION_GAP;
                                         ui.spacing_mut().button_padding = egui::vec2(3.0, 3.0);
                                         let thumb = Self::thumbnail_image_size(item.texture.size_vec2());
@@ -3334,8 +3354,8 @@ impl PixelForge {
                                     });
                                     tile_centers.push((index, tile.response.rect.center().x));
                                 }
-                                if preview == Some((group, end)) {
-                                    gap = Some((show_gap(ui), end));
+                                if let Some(rect) = show_gap(ui, group, end) {
+                                    gap = Some((rect, end));
                                 }
                             });
                             });
@@ -3357,7 +3377,8 @@ impl PixelForge {
             });
 
         let overflows = strip.content_size.x > strip.inner_rect.width() + 0.5;
-        if self.thumbnail_strip_overflows != overflows {
+        // The temporary opening should not resize the canvas if it causes overflow.
+        if !showing_placeholder && self.thumbnail_strip_overflows != overflows {
             self.thumbnail_strip_overflows = overflows;
             ui.ctx().request_repaint();
         }
@@ -8871,7 +8892,9 @@ mod workspace_tests {
                 collapsed: true,
             });
             app.generation_gallery = vec![fixture_thumbnail(&ctx, 1, None)];
+            let mut time = 0.0;
             let mut frame = |events| {
+                time += 1.0 / 60.0;
                 ctx.run(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
@@ -8879,6 +8902,7 @@ mod workspace_tests {
                             egui::vec2(800.0, 640.0),
                         )),
                         events,
+                        time: Some(time),
                         ..Default::default()
                     },
                     |ctx| {
@@ -8914,11 +8938,31 @@ mod workspace_tests {
             };
             frame(vec![egui::Event::PointerMoved(from), click(from, true)]);
             frame(vec![egui::Event::PointerMoved(to)]);
-            let preview = frame(vec![]);
-            assert!(preview.shapes.iter().any(|shape| matches!(
-            &shape.shape,
-            egui::Shape::Rect(rect) if rect.stroke.color == egui::Color32::LIGHT_BLUE && rect.rect.width() < 24.0
-        )));
+            let placeholder_width = |output: &egui::FullOutput| {
+                output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.stroke.color == egui::Color32::LIGHT_BLUE
+                            && rect.stroke.width == 2.0
+                            && (rect.rect.height() - PixelForge::THUMBNAIL_HEIGHT).abs() < 1.0 =>
+                    {
+                        Some(rect.rect.width())
+                    }
+                    _ => None,
+                })
+            };
+            let widths: Vec<_> = (0..12)
+                .filter_map(|_| placeholder_width(&frame(vec![])))
+                .collect();
+            assert!(
+                widths
+                    .iter()
+                    .any(|&width| width > 1.0 && width < PixelForge::THUMBNAIL_WIDTH - 1.0)
+            );
+            assert!(
+                widths
+                    .last()
+                    .is_some_and(|&width| (width - PixelForge::THUMBNAIL_WIDTH).abs() < 1.0)
+            );
             frame(vec![click(to, false)]);
             assert_eq!(app.generation_gallery[0].group, Some(0));
             assert!(app.project_dirty);
