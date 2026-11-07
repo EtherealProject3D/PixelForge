@@ -286,6 +286,7 @@ enum GroupDialog {
 struct ThumbnailDrag {
     project: usize,
     index: usize,
+    grab_offset: Vec2,
 }
 
 #[derive(Clone, Copy)]
@@ -3112,6 +3113,41 @@ impl PixelForge {
         }
     }
 
+    fn paint_dragged_thumbnail(&self, ui: &egui::Ui, drag: &ThumbnailDrag, pointer: Pos2) {
+        let Some(item) = self.generation_gallery.get(drag.index) else {
+            return;
+        };
+        let painter = ui.ctx().layer_painter(egui::LayerId::new(
+            egui::Order::Tooltip,
+            egui::Id::new(("thumbnail_drag_image", drag.project)),
+        ));
+        let tile = egui::Rect::from_min_size(
+            pointer - drag.grab_offset,
+            egui::vec2(Self::THUMBNAIL_WIDTH, Self::THUMBNAIL_HEIGHT),
+        );
+        painter.rect_filled(
+            tile.translate(egui::vec2(3.0, 4.0)),
+            4.0,
+            egui::Color32::from_black_alpha(110),
+        );
+        painter.rect_filled(tile, 4.0, ui.visuals().widgets.inactive.bg_fill);
+        painter.image(
+            item.texture.id(),
+            egui::Rect::from_center_size(
+                tile.center(),
+                Self::thumbnail_image_size(item.texture.size_vec2()),
+            ),
+            egui::Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        painter.rect_stroke(
+            tile,
+            4.0,
+            egui::Stroke::new(1.0_f32, egui::Color32::LIGHT_BLUE),
+            egui::StrokeKind::Inside,
+        );
+    }
+
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
         self.capture_workspace_editor();
         let mut remove_version = None;
@@ -3124,8 +3160,9 @@ impl PixelForge {
         let project = self.active_tab;
         let pointer = ui.input(|input| input.pointer.interact_pos());
         let preview = self.thumbnail_drop_preview;
-        let dragging = egui::DragAndDrop::payload::<ThumbnailDrag>(ui.ctx())
-            .is_some_and(|drag| drag.project == project && !busy);
+        let active_drag = egui::DragAndDrop::payload::<ThumbnailDrag>(ui.ctx())
+            .filter(|drag| drag.project == project && !busy);
+        let dragging = active_drag.is_some();
         let mut showing_placeholder = false;
         let mut show_gap = |ui: &mut egui::Ui, group, before| {
             let active = dragging && preview == Some((group, before));
@@ -3285,6 +3322,11 @@ impl PixelForge {
                                         ui.spacing_mut().item_spacing.y = Self::THUMBNAIL_CAPTION_GAP;
                                         ui.spacing_mut().button_padding = egui::vec2(3.0, 3.0);
                                         let thumb = Self::thumbnail_image_size(item.texture.size_vec2());
+                                        let tint = if active_drag.as_ref().is_some_and(|drag| drag.index == index) {
+                                            egui::Color32::WHITE.gamma_multiply(0.35)
+                                        } else {
+                                            egui::Color32::WHITE
+                                        };
                                         let sense = if busy {
                                             egui::Sense::click()
                                         } else {
@@ -3296,7 +3338,7 @@ impl PixelForge {
                                                 egui::Button::image(egui::Image::new((
                                                     item.texture.id(),
                                                     thumb,
-                                                )))
+                                                )).tint(tint))
                                                 .sense(sense)
                                                 .selected(self.thumbnail_selection.contains(&index)
                                                     || (self.thumbnail_selection.is_empty() && index == self.generation_selected)),
@@ -3307,10 +3349,13 @@ impl PixelForge {
                                                     .as_deref()
                                                     .unwrap_or(&item.settings.prompt),
                                             );
-                                        if !busy {
+                                        if !busy && response.drag_started_by(egui::PointerButton::Primary) {
+                                            let origin = ui.input(|input| input.pointer.press_origin())
+                                                .unwrap_or(response.rect.center());
                                             response.dnd_set_drag_payload(ThumbnailDrag {
                                                 project,
                                                 index,
+                                                grab_offset: origin - response.rect.min,
                                             });
                                         }
                                         if response.clicked() {
@@ -3407,6 +3452,9 @@ impl PixelForge {
                 }
                 None
             } else {
+                if let Some(pointer) = pointer {
+                    self.paint_dragged_thumbnail(ui, &drag, pointer);
+                }
                 hovered_drop
             }
         } else {
@@ -8892,6 +8940,7 @@ mod workspace_tests {
                 collapsed: true,
             });
             app.generation_gallery = vec![fixture_thumbnail(&ctx, 1, None)];
+            let texture = app.generation_gallery[0].texture.id();
             let mut time = 0.0;
             let mut frame = |events| {
                 time += 1.0 / 60.0;
@@ -8937,7 +8986,23 @@ mod workspace_tests {
                 modifiers: egui::Modifiers::NONE,
             };
             frame(vec![egui::Event::PointerMoved(from), click(from, true)]);
-            frame(vec![egui::Event::PointerMoved(to)]);
+            let outside_strip = from - egui::vec2(0.0, 90.0);
+            let floating_center = |output: &egui::FullOutput| {
+                output
+                    .shapes
+                    .iter()
+                    .rev()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Mesh(mesh) if mesh.texture_id == texture => {
+                            Some(mesh.calc_bounds().center())
+                        }
+                        _ => None,
+                    })
+                    .expect("floating thumbnail")
+            };
+            let outside = floating_center(&frame(vec![egui::Event::PointerMoved(outside_strip)]));
+            let inside = floating_center(&frame(vec![egui::Event::PointerMoved(to)]));
+            assert!(((inside - outside) - (to - outside_strip)).length() < 1.0);
             let placeholder_width = |output: &egui::FullOutput| {
                 output.shapes.iter().find_map(|shape| match &shape.shape {
                     egui::Shape::Rect(rect)
