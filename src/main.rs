@@ -565,6 +565,7 @@ struct PixelForge {
     thumbnail_groups: Vec<ThumbnailGroup>,
     group_dialog: Option<GroupDialog>,
     thumbnail_selection: Vec<usize>,
+    thumbnail_strip_overflows: bool,
     generation_project_path: Option<PathBuf>,
     refinement_source: Option<usize>,
     refinement_strength: f32,
@@ -787,6 +788,7 @@ impl Default for PixelForge {
             thumbnail_groups: Vec::new(),
             group_dialog: None,
             thumbnail_selection: Vec::new(),
+            thumbnail_strip_overflows: false,
             generation_project_path: None,
             refinement_source: None,
             refinement_strength: 0.35,
@@ -2341,7 +2343,20 @@ impl PixelForge {
         } else {
             &self.generation_status
         };
-        crate::interaction::small(ui, status);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("+ New Group").clicked() {
+                    self.group_dialog = Some(GroupDialog::Name {
+                        group: None,
+                        name: String::new(),
+                        thumbnails: Vec::new(),
+                    });
+                }
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    crate::interaction::small(ui, status);
+                });
+            });
+        });
     }
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
@@ -2491,18 +2506,19 @@ impl PixelForge {
     }
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
-        if self.blank_project {
+        if self.generation_gallery.is_empty() {
+            if !self.blank_project {
+                crate::interaction::strong(ui, "Image Studio");
+            }
             crate::interaction::label(ui, "Import an image, or choose Generate to create one.");
-            self.show_workspace_filmstrip(ui);
+            if !self.thumbnail_groups.is_empty() {
+                let spacer = (ui.available_height() - self.workspace_filmstrip_height(ui)).max(0.0);
+                ui.add_space(spacer);
+                self.show_workspace_filmstrip(ui);
+            }
             return;
         }
         self.bind_workspace_editor(ui.ctx());
-        if self.generation_gallery.is_empty() {
-            crate::interaction::strong(ui, "Image Studio");
-            crate::interaction::label(ui, "Import an image, or choose Generate to create one.");
-            self.show_workspace_filmstrip(ui);
-            return;
-        }
         let count = self.generation_gallery.len();
         self.generation_selected = self.generation_selected.min(count-1);
         self.generation_compare_index = self.generation_compare_index.min(count-1);
@@ -2711,20 +2727,33 @@ impl PixelForge {
 
     const THUMBNAIL_WIDTH: f32 = 94.0;
     const THUMBNAIL_HEIGHT: f32 = 72.0;
+    const THUMBNAIL_CAPTION_GAP: f32 = 2.0;
+
+    fn thumbnail_image_size(size: Vec2) -> Vec2 {
+        let bounds = egui::vec2(Self::THUMBNAIL_WIDTH - 6.0, Self::THUMBNAIL_HEIGHT - 6.0);
+        size * (bounds.x / size.x).min(bounds.y / size.y)
+    }
 
     fn workspace_filmstrip_height(&self, ui: &egui::Ui) -> f32 {
-        // Fixed thumbnail cells and captions, with only the scrollbar gutter below.
+        let spacing = ui.spacing();
         let group_header = if self.thumbnail_groups.is_empty() {
             0.0
         } else {
-            ui.spacing().interact_size.y + ui.spacing().item_spacing.y
+            ui.text_style_height(&egui::TextStyle::Button) + spacing.item_spacing.y
+        };
+        let scrollbar = if self.thumbnail_strip_overflows {
+            spacing.scroll.bar_width
+                + spacing.scroll.bar_inner_margin
+                + spacing.scroll.bar_outer_margin
+        } else {
+            0.0
         };
         group_header
             + Self::THUMBNAIL_HEIGHT
+            + Self::THUMBNAIL_CAPTION_GAP
             + ui.text_style_height(&egui::TextStyle::Small)
-            + ui.spacing().item_spacing.y * 2.0
-            + ui.spacing().scroll.bar_width
-            + 8.0
+            + spacing.item_spacing.y
+            + scrollbar
     }
 
     fn show_workspace_details(&self,ui:&mut egui::Ui) {
@@ -3016,7 +3045,6 @@ impl PixelForge {
 
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
         self.capture_workspace_editor();
-        ui.separator();
         let mut remove_version = None;
         let mut rename_version = None;
         let mut open_project = None;
@@ -3052,7 +3080,7 @@ impl PixelForge {
 
         ui.spacing_mut().scroll.floating = false;
         ui.style_mut().always_scroll_the_only_direction = true;
-        egui::ScrollArea::horizontal()
+        let strip = egui::ScrollArea::horizontal()
             .id_salt(("studio_filmstrip", project))
             .scroll_source(egui::scroll_area::ScrollSource {
                 drag: false,
@@ -3061,17 +3089,13 @@ impl PixelForge {
             .max_height(self.workspace_filmstrip_height(ui))
             .show(ui, |ui| {
                 ui.horizontal_top(|ui| {
-                    if ui.small_button("+ New Group").clicked() {
-                        self.group_dialog = Some(GroupDialog::Name {
-                            group: None,
-                            name: String::new(),
-                            thumbnails: Vec::new(),
-                        });
-                    }
                     let grouped = !self.thumbnail_groups.is_empty();
                     for group in
                         std::iter::once(None).chain((0..self.thumbnail_groups.len()).map(Some))
                     {
+                        if group.is_some() {
+                            ui.add_space(4.0);
+                        }
                         let indices: Vec<_> = self
                             .generation_gallery
                             .iter()
@@ -3151,8 +3175,9 @@ impl PixelForge {
                                 for &index in indices.iter().take(visible_count) {
                                     let item = &self.generation_gallery[index];
                                     ui.vertical(|ui| {
-                                        let size = item.texture.size_vec2();
-                                        let thumb = size * ((Self::THUMBNAIL_HEIGHT - 8.0) / size.x.max(size.y));
+                                        ui.spacing_mut().item_spacing.y = Self::THUMBNAIL_CAPTION_GAP;
+                                        ui.spacing_mut().button_padding = egui::vec2(3.0, 3.0);
+                                        let thumb = Self::thumbnail_image_size(item.texture.size_vec2());
                                         let sense = if busy {
                                             egui::Sense::click()
                                         } else {
@@ -3225,12 +3250,15 @@ impl PixelForge {
                                 }
                             });
                         });
-                        if grouped {
-                            ui.separator();
-                        }
                     }
                 });
             });
+
+        let overflows = strip.content_size.x > strip.inner_rect.width() + 0.5;
+        if self.thumbnail_strip_overflows != overflows {
+            self.thumbnail_strip_overflows = overflows;
+            ui.ctx().request_repaint();
+        }
 
         if let Some((index, extend)) = selected_thumbnail {
             self.select_thumbnail(index, extend);
@@ -3249,7 +3277,6 @@ impl PixelForge {
             self.open_thumbnails_as_project(ui.ctx(), &indices, group);
             return;
         }
-        self.show_group_dialog(ui.ctx());
 
         if let Some(index) = remove_version {
             self.remove_workspace_version(index);
@@ -7820,6 +7847,7 @@ impl eframe::App for PixelForge {
         ) {
             self.model_library_open = true;
         }
+        self.show_group_dialog(ctx);
         self.handle_file_drops(ctx);
         self.show_model_library(ctx);
         self.show_model_removal(ctx);
@@ -8534,6 +8562,86 @@ mod workspace_tests {
         assert_eq!(app.generation_gallery[1].pixels.get_pixel(0, 0)[0], 91);
         assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(0));
         assert_eq!(app.ai_variations.len(), 1);
+    }
+
+    #[test]
+    fn thumbnail_images_fill_the_available_bounds_without_distortion() {
+        let landscape = PixelForge::thumbnail_image_size(egui::vec2(300.0, 200.0));
+        assert!((landscape.x - (PixelForge::THUMBNAIL_WIDTH - 6.0)).abs() < 0.01);
+        assert!((landscape.x / landscape.y - 1.5).abs() < 0.001);
+
+        let portrait = PixelForge::thumbnail_image_size(egui::vec2(200.0, 300.0));
+        assert!((portrait.y - (PixelForge::THUMBNAIL_HEIGHT - 6.0)).abs() < 0.01);
+        assert!((portrait.y / portrait.x - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn new_group_stays_in_the_footer_and_grouped_captions_fit_near_it() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let frame = |app: &mut PixelForge| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 640.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::TopBottomPanel::bottom("test_status").show(ctx, |ui| {
+                        ui.set_min_height(60.0);
+                        app.show_generation_progress(ui);
+                    });
+                    egui::CentralPanel::default().show(ctx, |ui| app.show_generation_workspace(ui));
+                },
+            )
+        };
+        let label = |output: &egui::FullOutput, value: &str| {
+            output
+                .shapes
+                .iter()
+                .rev()
+                .find_map(|shape| match &shape.shape {
+                    egui::Shape::Text(text) if text.galley.job.text == value => Some((
+                        text.pos,
+                        text.pos.y + text.galley.size().y,
+                        shape.clip_rect.bottom(),
+                    )),
+                    _ => None,
+                })
+                .unwrap_or_else(|| {
+                    let painted: Vec<_> = output
+                        .shapes
+                        .iter()
+                        .filter_map(|shape| match &shape.shape {
+                            egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
+                            _ => None,
+                        })
+                        .collect();
+                    panic!("Expected {value:?} in {painted:?}");
+                })
+        };
+        frame(&mut app); // Let the bottom panel settle to its minimum height.
+        let empty = frame(&mut app);
+        let (empty_button, _, _) = label(&empty, "+ New Group");
+        app.thumbnail_groups.push(ThumbnailGroup {
+            name: "Drafts".into(),
+            collapsed: false,
+        });
+        let mut thumbnail = fixture_thumbnail(&ctx, 1, None);
+        thumbnail.group = Some(0);
+        app.generation_gallery.push(thumbnail);
+        let populated = frame(&mut app);
+        let (populated_button, _, _) = label(&populated, "+ New Group");
+        assert_eq!(empty_button, populated_button);
+        let (_, caption_bottom, clip_bottom) = label(&populated, "Version 1");
+        assert!(caption_bottom <= clip_bottom + 1.0);
+        let gap = populated_button.y - caption_bottom;
+        assert!(
+            gap < 25.0,
+            "Unexpected {gap:.1}-point gap after the caption"
+        );
     }
 
     #[test]
