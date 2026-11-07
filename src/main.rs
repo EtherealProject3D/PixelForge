@@ -591,6 +591,7 @@ struct PixelForge {
     generation_started: Option<std::time::Instant>,
     generation_progress: std::sync::Arc<std::sync::atomic::AtomicU32>,
     generation_models_rx: Option<std::sync::mpsc::Receiver<Result<Vec<String>, String>>>,
+    generation_models_status: String,
     generation_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     generation_image: Option<image::RgbaImage>,
     generation_texture: Option<TextureHandle>,
@@ -811,6 +812,7 @@ impl Default for PixelForge {
             generation_started: None,
             generation_progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             generation_models_rx: None,
+            generation_models_status: String::new(),
             generation_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             generation_image: None,
             generation_texture: None,
@@ -1297,7 +1299,7 @@ impl PixelForge {
         });
     }
 
-    fn poll_generation(&mut self, ctx: &egui::Context) {
+    fn poll_model_catalog(&mut self, ctx: &egui::Context) {
         if let Some(rx) = &self.install_rx {
             if let Ok(result) = rx.try_recv() {
                 self.install_rx = None;
@@ -1305,13 +1307,7 @@ impl PixelForge {
                 match result {
                     Ok(path) => {
                         self.install_status = format!("Installed in {}. Refresh models; restart ComfyUI if Qwen is not yet available.", path.display());
-                        let (tx, rx) = std::sync::mpsc::channel();
-                        self.generation_models_rx = Some(rx);
-                        let repaint = ctx.clone();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(ai_generation::checkpoints());
-                            repaint.request_repaint();
-                        });
+                        self.refresh_generation_models(ctx);
                     }
                     Err(error) => self.install_status = format!("Install failed: {error}"),
                 }
@@ -1319,33 +1315,47 @@ impl PixelForge {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
         }
-        if let Some(rx) = &self.generation_models_rx {
-            if let Ok(result) = rx.try_recv() {
+        let Some(receiver) = self.generation_models_rx.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Ok(models)) => {
                 self.generation_models_rx = None;
-                match result {
-                    Ok(models) => {
-                        if !models.contains(&self.generation_checkpoint) && self.generation_checkpoint!=ai_generation::FLUX_KLEIN && self.generation_checkpoint!=ai_generation::Z_IMAGE {
-                            self.generation_checkpoint =
-                                models.first().cloned().unwrap_or_default();
-                            self.reset_generation_sampling();
-                        }
-                        self.generation_status =
-                            format!("Found {} local checkpoints", models.len());
-                        self.generation_checkpoints = models;
-                        if !self.install_folder_manual {
-                            if let Some(folder) =
-                                model_installer::detect_models_folder(&self.generation_checkpoints)
-                            {
-                                self.install_folder = Some(folder);
-                            }
-                        }
+                self.generation_models_status = format!("Found {} local checkpoints", models.len());
+                self.generation_checkpoints = models;
+                self.select_default_checkpoint();
+                if !self.install_folder_manual {
+                    if let Some(folder) =
+                        model_installer::detect_models_folder(&self.generation_checkpoints)
+                    {
+                        self.install_folder = Some(folder);
                     }
-                    Err(error) => self.generation_status = error,
                 }
-            } else {
+            }
+            Ok(Err(error)) => {
+                self.generation_models_rx = None;
+                self.generation_models_status = error;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ctx.request_repaint_after(std::time::Duration::from_millis(200));
             }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.generation_models_rx = None;
+                self.generation_models_status = "The model discovery worker stopped. Reconnect to try again.".into();
+            }
         }
+    }
+
+    fn select_default_checkpoint(&mut self) {
+        if self.generation_checkpoint.is_empty() {
+            if let Some(checkpoint) = self.generation_checkpoints.first() {
+                self.generation_checkpoint = checkpoint.clone();
+                self.reset_generation_sampling();
+            }
+        }
+    }
+
+    fn poll_generation(&mut self, ctx: &egui::Context) {
         if !self.generation_running {
             return;
         }
@@ -1418,13 +1428,13 @@ impl PixelForge {
     }
 
     fn refresh_generation_models(&mut self, ctx: &egui::Context) {
-        if self.dependency_manager.busy() {self.generation_status="Wait for the dependency check or setup to finish, then refresh models".into();return;}
+        if self.dependency_manager.busy() {self.generation_models_status="Wait for the dependency check or setup to finish, then refresh models".into();return;}
         if self.generation_models_rx.is_some() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.generation_models_rx = Some(rx);
-        self.generation_status =
+        self.generation_models_status =
             "Connecting to local ComfyUI (starting backend if needed)...".into();
         let repaint = ctx.clone();
         std::thread::spawn(move || {
@@ -1724,6 +1734,9 @@ impl PixelForge {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
             ui.separator();
         }
+        if !self.generation_models_status.is_empty() {
+            crate::interaction::label(ui, &self.generation_models_status);
+        }
         self.show_conversation(ui);
         ui.separator();
         if self.generation_checkpoint.is_empty() {
@@ -1886,6 +1899,9 @@ impl PixelForge {
             }
             if self.install_model_index.is_none() && !self.install_status.is_empty() {crate::interaction::label(ui,&self.install_status);}
             crate::interaction::label(ui,"Existing complete files are kept. Refresh models after installation; Qwen may need a ComfyUI restart.");
+            if !self.generation_models_status.is_empty() {
+                crate::interaction::label(ui, &self.generation_models_status);
+            }
             if ui.add_enabled(self.generation_models_rx.is_none(),egui::Button::new("Refresh Installed Models")).clicked() {self.refresh_generation_models(ui.ctx());}
         });
         self.model_library_open = open;
@@ -2244,6 +2260,7 @@ impl PixelForge {
         self.generation_steps = current.steps;
         self.generation_cfg = current.cfg;
         self.generation_seed = current.seed;
+        self.select_default_checkpoint();
         self.refinement_source = None;
         self.refinement_mask.clear();
         self.refinement_mask_texture=None;
@@ -3150,6 +3167,9 @@ impl PixelForge {
     // A tab owns its editor, gallery and worker receivers. Only application services
     // and window state stay with the active shell when the tab changes.
     fn swap_app_state(&mut self, other: &mut PixelForge) {
+        std::mem::swap(&mut self.generation_checkpoints, &mut other.generation_checkpoints);
+        std::mem::swap(&mut self.generation_models_rx, &mut other.generation_models_rx);
+        std::mem::swap(&mut self.generation_models_status, &mut other.generation_models_status);
         std::mem::swap(&mut self.dependency_manager, &mut other.dependency_manager);
         std::mem::swap(&mut self.controls, &mut other.controls);
         std::mem::swap(&mut self.show_settings, &mut other.show_settings);
@@ -3187,6 +3207,7 @@ impl PixelForge {
     }
 
     fn poll_open_projects(&mut self, ctx: &egui::Context) {
+        self.poll_model_catalog(ctx);
         self.poll_project_jobs(ctx);
         for (_, project) in &mut self.inactive_tabs {
             project.poll_project_jobs(ctx);
@@ -3231,6 +3252,7 @@ impl PixelForge {
         tabs[position].0 = previous;
         self.inactive_tabs = tabs;
         self.active_tab = target;
+        self.select_default_checkpoint();
         self.next_tab = next_id;
         self.closing_tab = closing;
     }
@@ -3259,6 +3281,7 @@ impl PixelForge {
         let id = self.next_tab;
         let mut old = std::mem::replace(self, PixelForge::default());
         self.swap_app_state(&mut old);
+        self.select_default_checkpoint();
         tabs.push((previous, Box::new(old)));
         self.inactive_tabs = tabs;
         self.active_tab = id;
@@ -3417,6 +3440,7 @@ impl PixelForge {
         let id = self.next_tab;
         let mut previous = std::mem::take(self);
         self.swap_app_state(&mut previous);
+        self.select_default_checkpoint();
         self.active_tab = id;
         self.next_tab = id + 1;
         self.blank_project = true;
@@ -7654,7 +7678,7 @@ impl eframe::App for PixelForge {
         if self.dependency_manager.show_diagnostics(
             ctx,
             workspace_busy,
-            &self.generation_status,
+            &self.generation_models_status,
             self.generation_models_rx.is_none(),
         ) {
             self.refresh_generation_models(ctx);
@@ -7731,6 +7755,11 @@ fn main() -> eframe::Result {
             cc.egui_ctx
                 .set_pixels_per_point(native_scale * controls.ui_scale);
             let mut app = PixelForge::default();
+            if !app.install_folder_manual {
+                if let Some(folder) = model_installer::detect_models_folder(&[]) {
+                    app.install_folder = Some(folder);
+                }
+            }
             if let Some(storage) = cc.storage {
                 app.prompt_guide.restore_layout(storage);
             }
@@ -8246,6 +8275,34 @@ mod workspace_tests {
             texture,
             seed: seed.into(),
         }
+    }
+
+    #[test]
+    fn model_discovery_follows_the_app_while_project_model_choices_stay_local() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let first = app.active_tab;
+        app.generation_checkpoint = "Custom A.safetensors".into();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.generation_models_rx = Some(rx);
+        app.create_blank_project_tab();
+        let second = app.active_tab;
+        assert!(app.generation_models_rx.is_some());
+
+        tx.send(Ok(vec!["Custom A.safetensors".into(), "Custom B.safetensors".into()])).unwrap();
+        app.poll_open_projects(&ctx);
+        assert_eq!(app.generation_checkpoints.len(), 2);
+        assert_eq!(app.generation_checkpoint, "Custom A.safetensors");
+        app.generation_checkpoint = "Custom B.safetensors".into();
+
+        app.switch_project_tab(first);
+        assert_eq!(app.generation_checkpoints.len(), 2);
+        assert_eq!(app.generation_checkpoint, "Custom A.safetensors");
+        app.switch_project_tab(second);
+        assert_eq!(app.generation_checkpoint, "Custom B.safetensors");
+        app.create_blank_project_tab();
+        assert_eq!(app.generation_checkpoints.len(), 2);
+        assert_eq!(app.generation_checkpoint, "Custom A.safetensors");
     }
 
     #[test]
