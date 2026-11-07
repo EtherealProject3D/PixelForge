@@ -20,6 +20,24 @@ pub struct Model {
 }
 impl Model {
     pub fn bundle(&self) -> bool { self.files.iter().any(|file|file.directory!="checkpoints") }
+    pub fn show_compatibility(&self, ui: &mut egui::Ui) {
+        let disk_gb = self.files.iter().map(|file| file.size).sum::<u64>() as f64 / 1e9;
+        ui.label(format!("Download size: about {disk_gb:.1} GB before reusing shared files."));
+        if self.bundle() {
+            let requirements = match self.keyword {
+                "fluxklein4b" => "Requires ComfyUI with the FLUX.2 text encoder and FP8 model loading.",
+                "qwen" | "qwen2511" => "Requires ComfyUI with Qwen image edit nodes, the Qwen text encoder, and FP8 model loading.",
+                "cyberrealistic_zit" => "Requires ComfyUI with the Z-Image workflow nodes and the Qwen 3 text encoder.",
+                _ => "Requires ComfyUI with the model’s loaders and precision support.",
+            };
+            ui.label(requirements);
+            ui.label("NVIDIA: depends on GPU and PyTorch precision support. AMD, Intel and CPU: not yet verified in PixelForge.");
+        } else {
+            ui.label("Requires ComfyUI with SDXL support. NVIDIA: expected with a compatible PyTorch runtime. AMD and Intel: not yet verified in PixelForge.");
+            ui.label("CPU: ComfyUI offers CPU mode. This checkpoint has not been tested on CPU in PixelForge.");
+        }
+        ui.label("RAM and VRAM needs depend on resolution, precision and offloading. A minimum has not been verified.");
+    }
 }
 pub const MODELS: &[Model] = &[
     Model {name:crate::ai_generation::Z_IMAGE,keyword:"cyberrealistic_zit",description:"Fast photographic generation with natural lighting and detail. About 20.7 GB total, or 12.6 GB if the FLUX Qwen encoder is installed. Start at 8–9 steps, CFG 1; negative prompts are unused.",page:"https://huggingface.co/cyberdelia/cyberrealistic_zimage",editing:false,generation:true,

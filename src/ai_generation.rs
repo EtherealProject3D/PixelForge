@@ -51,7 +51,7 @@ fn z_image_workflow(prompt:&str,seed:u64,steps:u32,width:u32,height:u32)->Value 
 
 fn validate_z_image_nodes(info:&Value)->Result<(),String> {
     for node in ["UNETLoader","CLIPLoader","VAELoader","EmptySD3LatentImage","ModelSamplingAuraFlow","ConditioningZeroOut","CLIPTextEncode","KSampler","VAEDecode","SaveImage"] {
-        if info.get(node).is_none() {return Err(format!("Z-Image Turbo needs ComfyUI node {node}. Update ComfyUI from Dependencies."));}
+        if info.get(node).is_none() {return Err(format!("Z-Image Turbo needs ComfyUI node {node}. Update ComfyUI from Setup and Maintenance."));}
     }
     for (node,input,value) in [("UNETLoader","unet_name",Z_IMAGE_UNET),("CLIPLoader","clip_name",FLUX_CLIP),("VAELoader","vae_name","ae.safetensors"),("CLIPLoader","type","lumina2"),("KSampler","sampler_name","res_multistep"),("KSampler","scheduler","simple")] {
         if !info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|name.as_str()==Some(value))) {
@@ -173,7 +173,7 @@ fn flux_workflow(filename:Option<&str>,prompt:&str,seed:u64,steps:u32,width:u32,
 fn validate_flux_nodes(info:&Value,editing:bool)->Result<(),String> {
     let mut required=vec!["UNETLoader","CLIPLoader","VAELoader","EmptyFlux2LatentImage","Flux2Scheduler","KSamplerSelect","RandomNoise","CFGGuider","SamplerCustomAdvanced","ConditioningZeroOut"];
     if editing {required.extend(["ReferenceLatent","ImageScaleToTotalPixels","GetImageSize","VAEEncode","LoadImage"]);}
-    for node in required {if info.get(node).is_none() {return Err(format!("FLUX Klein needs ComfyUI node {node}. Update ComfyUI from Dependencies before using this model."));}}
+    for node in required {if info.get(node).is_none() {return Err(format!("FLUX Klein needs ComfyUI node {node}. Update ComfyUI from Setup and Maintenance before using this model."));}}
     for (node,input,file,folder) in [("UNETLoader","unet_name",FLUX_UNET,"diffusion_models"),("CLIPLoader","clip_name",FLUX_CLIP,"text_encoders"),("VAELoader","vae_name",FLUX_VAE,"vae")] {
         if !info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|name.as_str()==Some(file))) {
             return Err(format!("FLUX Klein file missing: models/{folder}/{file}. Install its bundle in Model Library and refresh ComfyUI."));
@@ -185,7 +185,7 @@ fn validate_flux_nodes(info:&Value,editing:bool)->Result<(),String> {
 
 fn client() -> Result<reqwest::blocking::Client, String> {
     reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(25))
+        .no_proxy().timeout(Duration::from_secs(25))
         .build().map_err(|e| e.to_string())
 }
 
@@ -198,35 +198,59 @@ use std::sync::{Mutex, OnceLock};
 static MANAGED: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 fn managed() -> &'static Mutex<Option<Child>> { MANAGED.get_or_init(|| Mutex::new(None)) }
 
-fn server_ready() -> bool {
-    reqwest::blocking::Client::builder().timeout(Duration::from_secs(2)).build()
-        .and_then(|c| c.get(format!("{BASE}/system_stats")).send())
-        .map(|r| r.status().is_success()).unwrap_or(false)
+pub const CPU_FALLBACK_HINT: &str = "Try with CPU in the Generate tab or select CPU in Setup and Maintenance.";
+
+fn server_ready(processing: &str) -> Result<bool, String> {
+    let stats = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()
+        .and_then(|client| client.get(format!("{BASE}/system_stats")).send())
+        .and_then(|response| response.error_for_status())
+        .and_then(|response| response.json::<Value>());
+    let Ok(stats) = stats else { return Ok(false) };
+    let device = stats["devices"].get(0).and_then(|device| device["type"].as_str());
+    if (processing == "cpu" && device != Some("cpu"))
+        || (processing == "gpu" && matches!(device, None | Some("cpu")))
+    {
+        return Err("The running ComfyUI server uses a different processing device. Stop it and reconnect to apply the selected device.".into());
+    }
+    Ok(true)
 }
 
-/// Start only a PixelForge-owned local backend. Never terminate a server we did not start.
+/// Start only a PixelForge-owned local backend.
 pub fn ensure_server() -> Result<(), String> {
-    if server_ready() { return Ok(()); }
+    let config = crate::backend::Config::load();
+    ensure_server_for(&config).map_err(|error| {
+        if config.processing == "cpu" { error } else { format!("{error}\n{CPU_FALLBACK_HINT}") }
+    })
+}
+
+fn ensure_server_for(config: &crate::backend::Config) -> Result<(), String> {
+    if server_ready(&config.processing)? { return Ok(()); }
     let mut owned = managed().lock().map_err(|e| e.to_string())?;
     if let Some(child) = owned.as_mut() {
         if child.try_wait().map_err(|e| e.to_string())?.is_some() { *owned = None; }
     }
     if owned.is_none() {
-        let config = crate::backend::Config::load();
         let folder = config.resolve()?;
-        let runtime = crate::compatibility::probe(&folder)?;
-        // Non-NVIDIA installations keep their existing launcher behavior.
-        if runtime["cuda"].is_string() {
-            crate::compatibility::preflight(&runtime, &config.mode)?;
-        } else if config.mode == "legacy" || config.mode == "modern" {
-            return Err("Selected NVIDIA backend has no CUDA runtime. Open Dependencies and choose a matching package.".into());
-        }
         let mut command = Command::new(crate::compatibility::python(&folder).ok_or("Backend Python missing")?);
         command.current_dir(&folder).arg("-s").arg("ComfyUI/main.py");
-        if folder.join("python_embeded/python.exe").is_file() {command.arg("--windows-standalone-build");}
-        if config.mode == "legacy" || crate::compatibility::selected_device(&runtime)
-            .and_then(|d|d["capability"][0].as_u64()).is_some_and(|major|major<=6) {
-            command.args(["--force-fp32", "--use-pytorch-cross-attention"]);
+        if folder.join("python_embeded/python.exe").is_file() { command.arg("--windows-standalone-build"); }
+        if config.processing == "cpu" {
+            command.args(["--cpu", "--force-fp32"]);
+        } else {
+            let runtime = crate::compatibility::probe(&folder)?;
+            if runtime["cuda"].is_string() {
+                crate::compatibility::preflight(&runtime, &config.mode)?;
+            } else if config.mode == "legacy" || config.mode == "modern" {
+                return Err("Selected NVIDIA backend has no CUDA runtime. Choose a matching package in Setup and Maintenance.".into());
+            }
+            if config.processing == "gpu" {
+                crate::compatibility::gpu_preflight(&runtime)?;
+            }
+            if config.mode == "legacy" || crate::compatibility::selected_device(&runtime)
+                .and_then(|device| device["capability"][0].as_u64()).is_some_and(|major| major <= 6)
+            {
+                command.args(["--force-fp32", "--use-pytorch-cross-attention"]);
+            }
         }
         let settings = crate::profile::settings_root().ok_or("APPDATA unavailable")?;
         std::fs::create_dir_all(&settings).map_err(|e|e.to_string())?;
@@ -253,7 +277,7 @@ pub fn ensure_server() -> Result<(), String> {
     }
     drop(owned);
     for _ in 0..90 {
-        if server_ready() { return Ok(()); }
+        if server_ready(&config.processing)? { return Ok(()); }
         std::thread::sleep(Duration::from_secs(1));
         let mut owned = managed().lock().map_err(|e| e.to_string())?;
         if let Some(child) = owned.as_mut() {
@@ -265,7 +289,7 @@ pub fn ensure_server() -> Result<(), String> {
             }
         }
     }
-    Err("ComfyUI did not become ready within 90 seconds. Inspect backend.log in the PixelForge profile and run GPU diagnostics in Dependencies.".into())
+    Err("ComfyUI did not become ready within 90 seconds. Inspect backend.log in the PixelForge profile and run GPU diagnostics in Setup and Maintenance.".into())
 }
 
 pub fn stop_managed_backend() {
@@ -446,14 +470,15 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
     let id = response.get("prompt_id").and_then(Value::as_str)
         .ok_or_else(|| format!("ComfyUI did not accept the prompt: {response}"))?.to_owned();
     let _progress_guard = ProgressStop(stop_progress);
-    let deadline = Instant::now() + Duration::from_secs(900);
+    let timeout_minutes = if crate::backend::Config::load().processing == "cpu" { 60 } else { 15 };
+    let deadline = Instant::now() + Duration::from_secs(timeout_minutes * 60);
     loop {
         if cancel.load(Ordering::Relaxed) {
             // Cancel only this queued prompt; do not interrupt unrelated ComfyUI jobs.
             let _ = http.post(format!("{BASE}/queue")).json(&json!({"delete":[id]})).send();
             return Err("Generation cancelled".into());
         }
-        if Instant::now() >= deadline { return Err("ComfyUI generation timed out after 15 minutes".into()); }
+        if Instant::now() >= deadline { return Err(format!("ComfyUI generation timed out after {timeout_minutes} minutes")); }
         let history: Value = http.get(format!("{BASE}/history/{id}"))
             .send().map_err(|e| e.to_string())?
             .error_for_status().map_err(|e| e.to_string())?

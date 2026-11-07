@@ -64,6 +64,8 @@ pub fn apply(ctx: &egui::Context) {
     ctx.style_mut(|style| {
         style.spacing.button_padding = egui::vec2(9.0, 5.0);
         style.animation_time = 0.12;
+        style.spacing.scroll = egui::style::ScrollStyle::solid();
+        style.spacing.scroll.bar_width = 10.0;
     });
 }
 

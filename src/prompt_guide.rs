@@ -1,4 +1,9 @@
-use crate::{ai_generation, model_installer::MODELS};
+use crate::{
+    ai_assist, ai_generation,
+    model_installer::MODELS,
+    quick_assist::{self, Profile},
+    spelling::{PromptSpelling, SCRATCHPAD_FIELD},
+};
 
 const QUALITY: &[&str] = &["score_9", "score_8_up", "score_7_up"];
 const COMMON_TAGS: &[(&str, &[&str])] = &[
@@ -223,6 +228,7 @@ struct Guide {
     example: &'static str,
     negative: &'static str,
     danbooru: bool,
+    assist_profile: Profile,
 }
 
 const GENERAL: Guide = Guide {
@@ -230,6 +236,7 @@ const GENERAL: Guide = Guide {
     example: "A small lighthouse on a rocky coast at dawn, wide composition, soft mist, watercolor illustration.",
     negative: "Check whether your checkpoint supports negative prompts before using one.",
     danbooru: false,
+    assist_profile: Profile::General,
 };
 
 fn model_guide(keyword: &str) -> Option<Guide> {
@@ -276,6 +283,11 @@ fn model_guide(keyword: &str) -> Option<Guide> {
         example,
         negative,
         danbooru: keyword == "cyberrealisticpony",
+        assist_profile: match keyword {
+            "cyberrealisticpony" => Profile::Pony,
+            "cyberrealistic_zit" | "fluxklein4b" => Profile::NaturalLanguage,
+            _ => Profile::General,
+        },
     })
 }
 
@@ -298,6 +310,8 @@ fn guide_for(checkpoint: &str) -> (Guide, Option<&'static str>) {
 pub struct PromptGuide {
     pub open: bool,
     scratchpad: Scratchpad,
+    assist: Option<AssistPreview>,
+    local_assist: LocalAssist,
     user_tags: UserTags,
     anchor: Option<[f32; 2]>,
     sizes: GuideSizes,
@@ -328,7 +342,129 @@ impl PromptGuide {
         eframe::set_value(storage, LAYOUT_KEY, &(self.anchor, &self.sizes));
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, checkpoint: &str, prompt: &mut String) {
+    pub(crate) fn show_ollama_dependency(&mut self, ui: &mut egui::Ui, checkpoint: &str) {
+        let local = &mut self.local_assist;
+        local.poll(checkpoint, &self.scratchpad.draft, &mut self.assist);
+        crate::theme::section(ui, "Ollama · Optional for AI Assist");
+        ui.label("Runs local text models for scratchpad rewrites. Download text models in Model Library after setup.");
+        ui.hyperlink_to("Ollama for Windows", "https://ollama.com/download/windows");
+        #[cfg(windows)]
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    local.pending.is_none(),
+                    egui::Button::new("Download Ollama Installer"),
+                )
+                .clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .set_title("Save the Ollama installer")
+                    .set_file_name("OllamaSetup.exe")
+                    .add_filter("Windows installer", &["exe"])
+                    .save_file()
+            {
+                let progress = std::sync::Arc::new(InstallerProgress::default());
+                local.installer_progress = Some(progress.clone());
+                local.start(ui.ctx(), "Downloading the Ollama installer…", move || {
+                    AssistReply::Installer(ai_assist::download_ollama_installer(
+                        path,
+                        |received, total| {
+                            *progress.lock().unwrap() = (received, total);
+                        },
+                    ))
+                });
+            }
+            if ui
+                .add_enabled(local.pending.is_none(), egui::Button::new("Open Installer"))
+                .on_hover_text("Open the downloaded installer or select a saved copy.")
+                .clicked()
+                && let Some(path) = local
+                    .installer
+                    .as_ref()
+                    .filter(|path| path.is_file())
+                    .cloned()
+                    .or_else(|| {
+                        rfd::FileDialog::new()
+                            .set_title("Select the downloaded Ollama installer")
+                            .add_filter("Windows installer", &["exe"])
+                            .pick_file()
+                    })
+            {
+                local.start(ui.ctx(), "Verifying the Windows installer…", move || {
+                    AssistReply::InstallerOpened(ai_assist::open_ollama_installer(&path))
+                });
+            }
+        });
+        let idle = local.pending.is_none();
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(idle, egui::Button::new("Check Ollama"))
+                .clicked()
+            {
+                local.start(ui.ctx(), "Checking Ollama…", || {
+                    AssistReply::Models(ai_assist::models())
+                });
+            }
+            if local.connected {
+                ui.label("Ollama is running.");
+            }
+        });
+        local.show_status(ui);
+    }
+
+    pub(crate) fn show_ollama_library(&mut self, ui: &mut egui::Ui, checkpoint: &str) -> bool {
+        let local = &mut self.local_assist;
+        local.poll(checkpoint, &self.scratchpad.draft, &mut self.assist);
+        ui.strong("Ollama text models · AI Assist");
+        ui.label("Optional local text models for rewriting Prompt Guide scratchpad drafts.");
+        ui.heading(egui::RichText::new("Qwen2.5 3B").size(23.0).strong());
+        ui.label("Requires Ollama. CPU: available through Ollama. NVIDIA, AMD and Intel acceleration depends on Ollama’s hardware support.");
+        ui.label("About 1.9 GB on disk. Runtime memory depends on context size.");
+        let open_dependencies = !local.connected && ui.button("Open Ollama Setup").clicked();
+        let idle = local.pending.is_none();
+        let starter_installed = local
+            .models
+            .iter()
+            .any(|model| model == ai_assist::STARTER_MODEL);
+        if ui
+            .add_enabled(
+                idle && local.connected && !starter_installed,
+                egui::Button::new("Download Qwen2.5 3B (1.9 GB)"),
+            )
+            .clicked()
+        {
+            let progress =
+                std::sync::Arc::new(std::sync::Mutex::new(ai_assist::ModelProgress::default()));
+            local.model_progress = Some(progress.clone());
+            local.start(
+                ui.ctx(),
+                "Downloading Qwen2.5 3B through Ollama…",
+                move || {
+                    AssistReply::Download(ai_assist::download_starter_model(|update| {
+                        *progress.lock().unwrap() = update;
+                    }))
+                },
+            );
+        }
+        local.show_status(ui);
+        if local.connected && !local.models.is_empty() {
+            ui.label("Installed local models");
+            for model in &local.models {
+                ui.heading(egui::RichText::new(model).size(23.0).strong());
+            }
+        }
+        open_dependencies
+    }
+
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        checkpoint: &str,
+        prompt: &mut String,
+        spelling: &mut PromptSpelling,
+    ) {
+        if self.scratchpad.model.as_deref() != Some(checkpoint) {
+            self.assist = None;
+        }
         self.scratchpad.select_model(checkpoint);
         let [width, height] = self
             .sizes
@@ -349,9 +485,25 @@ impl PromptGuide {
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let danbooru = guide_for(checkpoint).0.danbooru;
-                    self.scratchpad
-                        .show(ui, prompt, danbooru.then_some(&self.user_tags));
+                    let guide = guide_for(checkpoint).0;
+                    self.scratchpad.show(
+                        ui,
+                        prompt,
+                        guide.danbooru.then_some(&self.user_tags),
+                        spelling,
+                    );
+                    if self.scratchpad.open {
+                        show_assist(
+                            ui,
+                            &mut self.assist,
+                            &mut self.local_assist,
+                            &mut self.scratchpad.draft,
+                            checkpoint,
+                            guide.assist_profile,
+                        );
+                    } else {
+                        self.assist = None;
+                    }
                     ui.separator();
                     show_guide(
                         ui,
@@ -367,6 +519,354 @@ impl PromptGuide {
             self.anchor = Some([position.x, position.y]);
             self.sizes.insert(checkpoint.to_owned(), [size.x, size.y]);
         }
+    }
+}
+
+struct AssistPreview {
+    source: String,
+    suggestion: String,
+}
+
+#[cfg(windows)]
+type InstallerProgress = std::sync::Mutex<(u64, Option<u64>)>;
+
+#[derive(Default)]
+struct LocalAssist {
+    open: bool,
+    models: Vec<String>,
+    selected: String,
+    connected: bool,
+    #[cfg(windows)]
+    installer: Option<std::path::PathBuf>,
+    #[cfg(windows)]
+    installer_progress: Option<std::sync::Arc<InstallerProgress>>,
+    activity: &'static str,
+    rewrite_progress: Option<(std::time::Instant, std::sync::Arc<std::sync::Mutex<String>>)>,
+    model_progress: Option<std::sync::Arc<std::sync::Mutex<ai_assist::ModelProgress>>>,
+    pending: Option<std::sync::mpsc::Receiver<AssistReply>>,
+    message: String,
+}
+
+enum AssistReply {
+    Models(Result<Vec<String>, String>),
+    Download(Result<Vec<String>, String>),
+    #[cfg(windows)]
+    Installer(Result<std::path::PathBuf, String>),
+    #[cfg(windows)]
+    InstallerOpened(Result<(), String>),
+    Rewrite {
+        checkpoint: String,
+        source: String,
+        result: Result<String, String>,
+    },
+}
+
+impl LocalAssist {
+    fn start(
+        &mut self,
+        ctx: &egui::Context,
+        activity: &'static str,
+        task: impl FnOnce() -> AssistReply + Send + 'static,
+    ) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let ctx = ctx.clone();
+        self.message.clear();
+        self.activity = activity;
+        self.pending = Some(receiver);
+        std::thread::spawn(move || {
+            let _ = sender.send(task());
+            ctx.request_repaint();
+        });
+    }
+
+    fn poll(&mut self, checkpoint: &str, draft: &str, preview: &mut Option<AssistPreview>) {
+        use std::sync::mpsc::TryRecvError;
+        let Some(receiver) = &self.pending else {
+            return;
+        };
+        let reply = match receiver.try_recv() {
+            Err(TryRecvError::Empty) => return,
+            reply => reply,
+        };
+        self.pending = None;
+        self.rewrite_progress = None;
+        self.model_progress = None;
+        #[cfg(windows)]
+        {
+            self.installer_progress = None;
+        }
+        match reply {
+            Ok(AssistReply::Models(Ok(models)) | AssistReply::Download(Ok(models))) => {
+                self.connected = true;
+                self.models = models;
+                if !self.models.contains(&self.selected) {
+                    self.selected = self.models.first().cloned().unwrap_or_default();
+                }
+                if self.models.is_empty() {
+                    self.message = "Ollama is running. No local models are installed.".into();
+                }
+            }
+            Ok(AssistReply::Models(Err(error))) => {
+                self.connected = false;
+                self.models.clear();
+                self.selected.clear();
+                self.message = error;
+            }
+            Ok(AssistReply::Download(Err(error))) => self.message = error,
+            #[cfg(windows)]
+            Ok(AssistReply::Installer(result)) => match result {
+                Ok(path) => {
+                    self.installer = Some(path);
+                    self.message =
+                        "Ollama installer downloaded. Click Open Installer to run setup.".into();
+                }
+                Err(error) => self.message = error,
+            },
+            #[cfg(windows)]
+            Ok(AssistReply::InstallerOpened(result)) => {
+                self.message = match result {
+                    Ok(()) => "After Ollama setup finishes, click Check Ollama.".into(),
+                    Err(error) => error,
+                };
+            }
+            Ok(AssistReply::Rewrite {
+                checkpoint: source_model,
+                source,
+                result,
+            }) => {
+                if source_model != checkpoint || source != draft {
+                    self.message = "The draft or image model changed. Run AI Assist again.".into();
+                } else {
+                    match result {
+                        Ok(suggestion) => *preview = Some(AssistPreview { source, suggestion }),
+                        Err(error) => self.message = error,
+                    }
+                }
+            }
+            Err(TryRecvError::Disconnected) => {
+                self.message = "AI Assist stopped unexpectedly.".into()
+            }
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
+    fn show_status(&self, ui: &mut egui::Ui) {
+        if let Some((started, progress)) = &self.rewrite_progress {
+            let text = progress.lock().unwrap().clone();
+            let stage = if text.is_empty() {
+                "Waiting for model"
+            } else {
+                "Writing suggestion"
+            };
+            ui.add(
+                egui::ProgressBar::new(0.0)
+                    .animate(true)
+                    .text(format!("{stage} · {:.0}s", started.elapsed().as_secs_f64())),
+            );
+            if !text.is_empty() {
+                egui::ScrollArea::vertical()
+                    .id_salt("ai-assist-stream")
+                    .max_height(100.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.label(text);
+                    });
+            }
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        if let Some(progress) = &self.model_progress {
+            let progress = progress.lock().unwrap().clone();
+            let mib = 1024.0 * 1024.0;
+            ui.label(self.activity);
+            ui.label(&progress.status);
+            let bar = if progress.total > 0 {
+                egui::ProgressBar::new(progress.completed as f32 / progress.total as f32).text(
+                    format!(
+                        "{:.1} / {:.1} MiB",
+                        progress.completed as f64 / mib,
+                        progress.total as f64 / mib
+                    ),
+                )
+            } else {
+                egui::ProgressBar::new(0.0)
+                    .animate(true)
+                    .text("Preparing download…")
+            };
+            ui.add(bar);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+
+        #[cfg(windows)]
+        if let Some(progress) = &self.installer_progress {
+            let (received, total) = *progress.lock().unwrap();
+            let mib = 1024.0 * 1024.0;
+            let received_mib = received as f64 / mib;
+            let bar = if let Some(total) = total.filter(|total| *total > 0) {
+                egui::ProgressBar::new((received as f64 / total as f64) as f32)
+                    .text(format!("{received_mib:.1} / {:.1} MiB", total as f64 / mib))
+            } else {
+                egui::ProgressBar::new(0.0)
+                    .animate(true)
+                    .text(format!("{received_mib:.1} MiB downloaded"))
+            };
+            ui.label(self.activity);
+            ui.add(bar);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        if self.pending.is_some() {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(self.activity);
+            });
+        } else if !self.message.is_empty() {
+            ui.label(&self.message);
+        }
+    }
+}
+
+fn show_assist(
+    ui: &mut egui::Ui,
+    preview: &mut Option<AssistPreview>,
+    local: &mut LocalAssist,
+    draft: &mut String,
+    checkpoint: &str,
+    profile: Profile,
+) {
+    local.poll(checkpoint, draft, preview);
+    let idle = local.pending.is_none();
+    let has_draft = !draft.trim().is_empty();
+    ui.horizontal_wrapped(|ui| {
+        if ui
+            .add_enabled(idle && has_draft, egui::Button::new("Quick Assist"))
+            .on_hover_text("Preview rule-based cleanup for this draft.")
+            .clicked()
+        {
+            *preview = Some(AssistPreview {
+                source: draft.clone(),
+                suggestion: quick_assist::suggest(draft, profile),
+            });
+        }
+        if ui
+            .add_enabled(
+                idle,
+                egui::Button::new(if local.open {
+                    "Hide AI Assist"
+                } else {
+                    "AI Assist"
+                }),
+            )
+            .clicked()
+        {
+            local.open = !local.open;
+            if local.open && local.models.is_empty() {
+                local.start(ui.ctx(), "Checking Ollama…", || {
+                    AssistReply::Models(ai_assist::models())
+                });
+            }
+        }
+    });
+    if local.open {
+        ui.label("AI Assist uses an installed Ollama text model on this computer.");
+        ui.small("Review the rewrite for changed details before applying it.");
+        ui.horizontal_wrapped(|ui| {
+            ui.add_enabled_ui(idle && !local.models.is_empty(), |ui| {
+                egui::ComboBox::from_id_salt("ai-assist-model")
+                    .selected_text(if local.selected.is_empty() {
+                        "No local model selected"
+                    } else {
+                        &local.selected
+                    })
+                    .show_ui(ui, |ui| {
+                        for model in &local.models {
+                            ui.selectable_value(&mut local.selected, model.clone(), model);
+                        }
+                    });
+            });
+            if ui
+                .add_enabled(idle, egui::Button::new("Refresh Models"))
+                .clicked()
+            {
+                local.start(ui.ctx(), "Checking Ollama…", || {
+                    AssistReply::Models(ai_assist::models())
+                });
+            }
+            if ui
+                .add_enabled(
+                    idle && has_draft && !local.selected.is_empty(),
+                    egui::Button::new("Rewrite Draft"),
+                )
+                .clicked()
+            {
+                let source = draft.clone();
+                let checkpoint = checkpoint.to_owned();
+                let model = local.selected.clone();
+                *preview = None;
+                let progress = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+                local.rewrite_progress = Some((std::time::Instant::now(), progress.clone()));
+                local.start(ui.ctx(), "Rewriting with local Ollama…", move || {
+                    let result = ai_assist::rewrite(&model, &source, profile, |draft| {
+                        let mut text = progress.lock().unwrap();
+                        text.clear();
+                        text.push_str(draft);
+                    });
+                    AssistReply::Rewrite {
+                        checkpoint,
+                        source,
+                        result,
+                    }
+                });
+            }
+        });
+        local.show_status(ui);
+        if local.models.is_empty() && local.pending.is_none() {
+            ui.small(
+                "Set up Ollama in Setup and Maintenance, then download a local text model in Model Library.",
+            );
+        }
+    }
+    let Some(assist) = preview else {
+        return;
+    };
+    ui.label("Suggested Prompt");
+    let stale = assist.source != *draft;
+    if stale {
+        ui.label("The scratchpad changed. Generate a new suggestion to apply it.");
+    } else if assist.suggestion == *draft {
+        ui.label("Quick Assist found no changes to suggest. You can edit the result below.");
+    }
+    let output = egui::TextEdit::multiline(&mut assist.suggestion)
+        .desired_width(f32::INFINITY)
+        .desired_rows(3)
+        .show(ui);
+    crate::interaction::text_menu(
+        ui,
+        &output.response,
+        &assist.suggestion,
+        &output.state,
+        |_| {},
+    );
+
+    let close = ui
+        .horizontal_wrapped(|ui| {
+            let can_apply =
+                !stale && !assist.suggestion.trim().is_empty() && assist.suggestion != *draft;
+            let applied = ui
+                .add_enabled(can_apply, egui::Button::new("Apply to Scratchpad"))
+                .clicked();
+            if applied {
+                draft.clone_from(&assist.suggestion);
+            }
+            ui.button("Close Preview").clicked() || applied
+        })
+        .inner;
+    if close {
+        *preview = None;
     }
 }
 
@@ -424,6 +924,7 @@ impl Scratchpad {
         ui: &mut egui::Ui,
         initial_prompt: &mut String,
         user_tags: Option<&UserTags>,
+        spelling: &mut PromptSpelling,
     ) {
         let label = if self.open {
             "Close Scratchpad"
@@ -436,17 +937,17 @@ impl Scratchpad {
         if !self.open {
             return;
         }
-        let text_id = ui.make_persistent_id("scratchpad-text");
+        let text_id = PromptSpelling::editor_id(ui, SCRATCHPAD_FIELD);
         let slots = user_tags
             .map(|tags| tag_slots(&self.draft, &tags.saved))
             .unwrap_or_default();
         if self.edit_as_text || slots.is_empty() || ui.memory(|memory| memory.has_focus(text_id)) {
-            ui.add(
-                egui::TextEdit::multiline(&mut self.draft)
-                    .id(text_id)
-                    .hint_text("Draft a prompt here…")
-                    .desired_width(f32::INFINITY)
-                    .desired_rows(SCRATCHPAD_ROWS),
+            spelling.edit(
+                ui,
+                &mut self.draft,
+                SCRATCHPAD_FIELD,
+                "Draft a prompt here…",
+                SCRATCHPAD_ROWS,
             );
         } else {
             self.show_tag_editor(ui, &slots);
@@ -465,12 +966,12 @@ impl Scratchpad {
                         + 2.0 * ui.spacing().button_padding.y,
                 );
             ui.spacing_mut().interact_size.y = height;
-            ui.add(
-                egui::TextEdit::singleline(&mut self.name)
-                    .hint_text("Prompt name")
-                    .desired_width(name_width)
-                    .min_size(egui::vec2(0.0, height)),
-            );
+            let name = egui::TextEdit::singleline(&mut self.name)
+                .hint_text("Prompt name")
+                .desired_width(name_width)
+                .min_size(egui::vec2(0.0, height))
+                .show(ui);
+            crate::interaction::text_menu(ui, &name.response, &self.name, &name.state, |_| {});
             if ui
                 .add_enabled(
                     !self.name.trim().is_empty() && !self.draft.trim().is_empty(),
@@ -807,14 +1308,12 @@ fn edit_fragment(
     }
     let mut text = fragment.to_owned();
     ui.push_id(("scratchpad-prose", index), |ui| {
-        if ui
-            .add(
-                egui::TextEdit::multiline(&mut text)
-                    .desired_rows(1)
-                    .desired_width(ui.available_width()),
-            )
-            .changed()
-        {
+        let output = egui::TextEdit::multiline(&mut text)
+            .desired_rows(1)
+            .desired_width(ui.available_width())
+            .show(ui);
+        crate::interaction::text_menu(ui, &output.response, &text, &output.state, |_| {});
+        if output.response.changed() {
             edits.push((range, text));
         }
     });
@@ -917,6 +1416,117 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ai_assist_previews_only_results_for_the_current_draft_and_checkpoint() {
+        for (checkpoint, draft, expected) in [
+            ("FLUX", "two cyclists, back view", true),
+            ("Pony", "two cyclists, back view", false),
+            ("FLUX", "two cyclists, front view", false),
+        ] {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let mut assist = LocalAssist {
+                pending: Some(receiver),
+                ..Default::default()
+            };
+            sender
+                .send(AssistReply::Rewrite {
+                    checkpoint: "FLUX".into(),
+                    source: "two cyclists, back view".into(),
+                    result: Ok("Rear view of two cyclists.".into()),
+                })
+                .unwrap();
+            let mut preview = None;
+            assist.poll(checkpoint, draft, &mut preview);
+            assert!(assist.pending.is_none());
+            assert_eq!(
+                preview.as_ref().map(|preview| preview.suggestion.as_str()),
+                expected.then_some("Rear view of two cyclists.")
+            );
+        }
+    }
+
+    #[test]
+    fn quick_assist_uses_the_selected_checkpoint_guide() {
+        let input = "score_9,back view";
+        let pony = guide_for("models/CyberRealisticPony_V18.0_F16.safetensors").0;
+        assert_eq!(
+            quick_assist::suggest(input, pony.assist_profile),
+            "score_9, back view"
+        );
+
+        for checkpoint in [ai_generation::Z_IMAGE, ai_generation::FLUX_KLEIN] {
+            let guide = guide_for(checkpoint).0;
+            assert_eq!(
+                quick_assist::suggest("back view", guide.assist_profile),
+                "back view."
+            );
+        }
+
+        let custom = guide_for("custom-pony.safetensors").0;
+        assert_eq!(quick_assist::suggest(input, custom.assist_profile), input);
+    }
+
+    #[test]
+    fn clicking_scratchpad_in_prompt_guide_draws_caret_and_accepts_text() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut guide = PromptGuide {
+            open: true,
+            scratchpad: Scratchpad {
+                open: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut spelling = PromptSpelling::default();
+        let mut initial = String::new();
+        let mut frame = |events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1000.0, 800.0),
+                    )),
+                    focused: true,
+                    events,
+                    ..Default::default()
+                },
+                |ctx| guide.show(ctx, "Test model", &mut initial, &mut spelling),
+            )
+        };
+        frame(vec![]);
+        let output = frame(vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Draft a prompt here…" => {
+                    Some(text.pos + egui::vec2(4.0, 6.0))
+                }
+                _ => None,
+            })
+            .expect("scratchpad hint");
+        for pressed in [true, false] {
+            frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ]);
+        }
+        let output = frame(vec![egui::Event::Text("red coat".into())]);
+        assert_eq!(guide.scratchpad.draft, "red coat");
+        assert!(output.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::LineSegment { points, stroke }
+                if points[0].x == points[1].x && stroke.color.a() > 0 && stroke.width == 2.0
+                    && shape.clip_rect.contains(points[0].lerp(points[1], 0.5))
+        )));
+    }
+
+    #[test]
     fn saved_prompt_controls_have_matching_visible_heights() {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
@@ -935,8 +1545,12 @@ mod tests {
             ..Default::default()
         };
         let mut initial = String::new();
+        let mut spelling = PromptSpelling::default();
+        spelling.enabled = false;
         let output = ctx.run(Default::default(), |ctx| {
-            egui::CentralPanel::default().show(ctx, |ui| scratchpad.show(ui, &mut initial, None));
+            egui::CentralPanel::default().show(ctx, |ui| {
+                scratchpad.show(ui, &mut initial, None, &mut spelling)
+            });
         });
         let control_rect = |label: &str| {
             let center = output
@@ -1155,6 +1769,7 @@ mod tests {
         };
         let ctx = egui::Context::default();
         let mut prompt = String::new();
+        let mut spelling = PromptSpelling::default();
         for checkpoint in ["Model A", "Model B", "Model A"] {
             let input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -1163,7 +1778,9 @@ mod tests {
                 )),
                 ..Default::default()
             };
-            let _ = ctx.run(input, |ctx| guide.show(ctx, checkpoint, &mut prompt));
+            let _ = ctx.run(input, |ctx| {
+                guide.show(ctx, checkpoint, &mut prompt, &mut spelling)
+            });
             assert_eq!(guide.anchor, Some([80.0, 95.0]));
         }
         #[derive(Default)]

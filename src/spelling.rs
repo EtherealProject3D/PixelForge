@@ -29,16 +29,24 @@ struct Field {
 impl Default for Field {
     fn default() -> Self {Self {observed:String::new(),checked:String::new(),revision:0,changed:Instant::now(),pending:false,issues:Vec::new(),error:None,menu_issue:None}}
 }
+pub(crate) const SCRATCHPAD_FIELD: usize = 4;
+
 pub struct PromptSpelling {
     pub enabled: bool,
-    fields: [Field;4], service: Option<Service>, ignored: HashSet<String>,
+    fields: [Field; SCRATCHPAD_FIELD + 1], service: Option<Service>, ignored: HashSet<String>,
 }
 impl Default for PromptSpelling {
     fn default() -> Self {Self {enabled:true,fields:Default::default(),service:None,
         ignored:["comfyui","sdxl","qwen","img2img","safetensors","lora","cfg","realesrgan"].into_iter().map(str::to_owned).collect()}}
 }
 impl PromptSpelling {
-    /// Field IDs: initial prompt, changes prompt, optional negative terms.
+    pub(crate) fn editor_id(ui: &egui::Ui, field_id: usize) -> egui::Id {
+        if field_id == SCRATCHPAD_FIELD {
+            ui.make_persistent_id("scratchpad-text")
+        } else {
+            ui.make_persistent_id(egui::Id::new(("prompt_spelling", field_id)))
+        }
+    }
     pub fn edit(&mut self, ui: &mut egui::Ui, text: &mut String, field_id: usize, hint: &str, rows: usize) {
         if self.enabled && self.service.is_none() {self.service=Some(Service::new(ui.ctx().clone()));}
         if let Some(service)=&self.service {
@@ -58,8 +66,10 @@ impl PromptSpelling {
         let mut layouter=|ui:&egui::Ui,buffer:&dyn egui::TextBuffer,width:f32| {
             let value=buffer.as_str();
             let normal=egui::TextFormat {font_id:egui::TextStyle::Body.resolve(ui.style()),color:ui.visuals().text_color(),..Default::default()};
-            let mut job=egui::text::LayoutJob::default();
-            job.wrap.max_width=width;
+            let mut job = egui::text::LayoutJob::simple(
+                String::new(), normal.font_id.clone(), normal.color, width,
+            );
+            job.sections.clear();
             let mut offset=0;
             if value==checked {
                 for issue in &issues {
@@ -73,9 +83,41 @@ impl PromptSpelling {
             job.append(&value[offset..],0.0,normal);
             ui.fonts(|fonts|fonts.layout_job(job))
         };
-        let output=egui::TextEdit::multiline(text).id_salt(("prompt_spelling",field_id)).hint_text(hint)
-            .desired_width(f32::INFINITY).desired_rows(rows).layouter(&mut layouter).show(ui);
+        let editor = egui::TextEdit::multiline(text)
+            .id(Self::editor_id(ui, field_id))
+            .hint_text(hint)
+            .desired_width(f32::INFINITY)
+            .desired_rows(rows);
+        let output = if issues.is_empty() {
+            editor.show(ui)
+        } else {
+            editor.layouter(&mut layouter).show(ui)
+        };
+        if field_id == SCRATCHPAD_FIELD {
+            if output.response.clicked() {
+                output.response.request_focus();
+            }
+            // egui skips its caret when the viewport reports no native focus.
+            // Keep the insertion point visible while the scratchpad owns keyboard focus.
+            if ui.memory(|memory| memory.has_focus(output.response.id))
+                && !ui.input(|input| input.focused)
+                && let Some(selection) = output.cursor_range
+            {
+                let caret = output
+                    .galley
+                    .pos_from_cursor(selection.primary)
+                    .translate(output.galley_pos.to_vec2());
+                let top = caret.center_top();
+                let height = ui.fonts(|fonts| fonts.row_height(&egui::TextStyle::Body.resolve(ui.style())));
+                let bottom = top + egui::vec2(0.0, caret.height().max(height));
+                ui.painter_at(output.text_clip_rect)
+                    .line_segment([top, bottom], ui.visuals().text_cursor.stroke);
+            }
+        }
         if output.response.secondary_clicked() {
+            if field_id == SCRATCHPAD_FIELD {
+                output.response.request_focus();
+            }
             field.menu_issue=output.response.interact_pointer_pos().and_then(|pointer| {
                 let cursor=output.galley.cursor_from_pos(pointer-output.galley_pos);
                 let byte=text.char_indices().nth(cursor.index).map(|(byte,_)|byte).unwrap_or(text.len());
@@ -88,8 +130,14 @@ impl PromptSpelling {
         crate::interaction::text_menu(ui,&output.response,text,&output.state,|ui| {
             if let Some(issue)=&issue {ui.separator();suggestions(ui,issue,&mut correction,&mut ignore);}
         });
-        if let Some((issue,replacement))=correction {apply_correction(text,&field.checked,&issue,&replacement);}
-        if let Some(word)=ignore {self.ignored.insert(word.to_lowercase());}
+        if let Some((issue, replacement)) = correction {
+            apply_correction(text, &field.checked, &issue, &replacement);
+            output.response.request_focus();
+        }
+        if let Some(word) = ignore {
+            self.ignored.insert(word.to_lowercase());
+            output.response.request_focus();
+        }
         if field.observed!=*text {
             field.observed=text.clone();field.changed=Instant::now();field.revision=field.revision.wrapping_add(1);
             field.pending=false;field.menu_issue=None;field.error=None;
@@ -205,6 +253,42 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focused_scratchpad_paints_caret_with_and_without_spelling_marks() {
+        for (input, marked, focused) in [
+            ("", false, true),
+            ("mispeling", true, true),
+            ("red coat", false, false),
+        ] {
+            let ctx = egui::Context::default();
+            crate::theme::apply(&ctx);
+            let mut spelling = PromptSpelling::default();
+            let mut draft = input.to_owned();
+            if marked {
+                let field = &mut spelling.fields[SCRATCHPAD_FIELD];
+                field.checked = draft.clone();
+                field.observed = draft.clone();
+                field.issues.push(Issue {
+                    range: 0..draft.len(),
+                    word: draft.clone(),
+                    suggestions: vec!["misspelling".to_owned()],
+                });
+            }
+            let output = ctx.run(egui::RawInput { focused, ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let id = PromptSpelling::editor_id(ui, SCRATCHPAD_FIELD);
+                    ui.memory_mut(|memory| memory.request_focus(id));
+                    spelling.edit(ui, &mut draft, SCRATCHPAD_FIELD, "Draft a prompt here…", 6);
+                });
+            });
+            assert!(output.shapes.iter().any(|shape| matches!(
+                &shape.shape,
+                egui::Shape::LineSegment { points, stroke }
+                    if points[0].x == points[1].x && stroke.color == Color32::WHITE && stroke.width == 2.0
+            )), "missing caret for {input:?}");
+        }
+    }
     #[test]
     fn utf16_offsets_handle_emoji_and_accents() {
         let text="🦊 café teh";

@@ -44,6 +44,7 @@ WizardSizePercent=110
 CloseApplications=yes
 RestartApplications=no
 UsePreviousTasks=yes
+ChangesAssociations=yes
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"; Flags: unchecked
@@ -54,13 +55,24 @@ Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\docs\*"; DestDir: "{app}\docs"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "installed.txt"; DestDir: "{app}"; DestName: "pixelforge-installed.txt"; Flags: ignoreversion
 
+Source: "..\assets\pixelforge.ico"; DestDir: "{app}"; Flags: ignoreversion
+
 [Icons]
 #ifdef SmokeTest
-Name: "{app}\Test Shortcuts\Start Menu\PixelForge"; Filename: "{app}\PixelForge.exe"; WorkingDir: "{app}"
-Name: "{app}\Test Shortcuts\Desktop\PixelForge"; Filename: "{app}\PixelForge.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{app}\Test Shortcuts\Start Menu\PixelForge"; Filename: "{app}\PixelForge.exe"; WorkingDir: "{app}"; IconFilename: "{app}\pixelforge.ico"
+Name: "{app}\Test Shortcuts\Desktop\PixelForge"; Filename: "{app}\PixelForge.exe"; WorkingDir: "{app}"; IconFilename: "{app}\pixelforge.ico"; Tasks: desktopicon
 #else
-Name: "{group}\PixelForge"; Filename: "{app}\PixelForge.exe"; WorkingDir: "{app}"
-Name: "{autodesktop}\PixelForge"; Filename: "{app}\PixelForge.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\PixelForge"; Filename: "{app}\PixelForge.exe"; WorkingDir: "{app}"; IconFilename: "{app}\pixelforge.ico"
+Name: "{autodesktop}\PixelForge"; Filename: "{app}\PixelForge.exe"; WorkingDir: "{app}"; IconFilename: "{app}\pixelforge.ico"; Tasks: desktopicon
+#endif
+
+#ifndef SmokeTest
+[Registry]
+Root: HKA; Subkey: "Software\Classes\PixelForge.Project"; ValueType: string; ValueData: "PixelForge Project"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\PixelForge.Project\DefaultIcon"; ValueType: string; ValueData: "{app}\pixelforge.ico,0"
+Root: HKA; Subkey: "Software\Classes\PixelForge.Project\shell\open\command"; ValueType: string; ValueData: """{app}\PixelForge.exe"" ""%1"""
+Root: HKA; Subkey: "Software\Classes\.pxf\OpenWithProgids"; ValueType: string; ValueName: "PixelForge.Project"; ValueData: ""; Flags: uninsdeletevalue uninsdeletekeyifempty
+Root: HKA; Subkey: "Software\Classes\.pxf"; ValueType: string; ValueData: "PixelForge.Project"; Flags: createvalueifdoesntexist uninsdeletevalue uninsdeletekeyifempty; Check: ProjectDefaultIsUnassigned
 #endif
 
 [Run]
@@ -72,6 +84,11 @@ Type: files; Name: "{app}\PixelForge.exe.previous"
 [Code]
 var
   RemoveManagedDownloads: Boolean;
+
+function ProjectDefaultIsUnassigned(): Boolean;
+begin
+  Result := not RegValueExists(HKCR, '.pxf', '');
+end;
 
 function ManagedDownloadsPath(): String;
 begin

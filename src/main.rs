@@ -11,9 +11,11 @@ mod compatibility;
 mod resolution;
 mod backend;
 mod updater;
+mod ai_assist;
 mod ai_denoise;
 mod ai_generation;
 mod prompt_guide;
+mod quick_assist;
 mod ai_restoration;
 mod ai_upscale;
 mod analysis;
@@ -574,7 +576,7 @@ struct PixelForge {
     dependency_manager: dependencies::Manager,
     updater: updater::Manager,
     remove_model: Option<(usize,PathBuf,Option<String>,bool)>,
-    model_library_reveal: bool,
+    model_library_open: bool,
     install_folder: Option<PathBuf>,
     install_folder_manual: bool,
     ai_rx: Option<std::sync::mpsc::Receiver<Result<ai_upscale::UpscaleResult, String>>>,
@@ -790,7 +792,7 @@ impl Default for PixelForge {
             dependency_manager: dependencies::Manager::default(),
             updater: updater::Manager::default(),
             remove_model: None,
-            model_library_reveal: false,
+            model_library_open: false,
             install_folder: None,
             install_folder_manual: false,
             ai_rx: None,
@@ -1053,7 +1055,7 @@ impl PixelForge {
                 let mut open = false;
                 let mut cancel = false;
                 egui::Window::new("Open dropped project?").collapsible(false).resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER,[0.0,0.0]).show(ctx,|ui| {
+                    .pivot(egui::Align2::CENTER_CENTER).default_pos(ctx.screen_rect().center()).show(ctx,|ui| {
                         crate::interaction::label(ui,format!("Open {}?",path.file_name().unwrap_or_default().to_string_lossy()));
                         crate::interaction::label(ui,"This project replaces the current workspace. Save your work first, or discard it to continue.");
                         ui.horizontal(|ui| {
@@ -1720,18 +1722,43 @@ impl PixelForge {
         }
         self.show_conversation(ui);
         ui.separator();
-        self.show_model_library(ui);
-        ui.separator();
         if self.generation_checkpoint.is_empty() {
             crate::interaction::label(ui,"Connect a local model to begin.");
             if ui.button("Connect Models").clicked() { self.refresh_generation_models(ui.ctx()); }
         }
-
+        if self.generation_status.contains(ai_generation::CPU_FALLBACK_HINT)
+            && ui.add_enabled(
+                self.generation_models_rx.is_none() && !self.dependency_manager.busy()
+                    && !self.generation_running && !self.ai_running,
+                egui::Button::new("Try with CPU"),
+            ).clicked()
+        {
+            match self.dependency_manager.try_cpu() {
+                Ok(()) => self.refresh_generation_models(ui.ctx()),
+                Err(error) => self.generation_status = error,
+            }
+        }
+        if ui.button("Open Model Library").clicked() { self.model_library_open = true; }
     }
 
-    fn show_model_library(&mut self,ui:&mut egui::Ui) {
-        theme::collapsible_section_reveal(ui,"Model Library",false,self.model_library_reveal,|ui| {
-            crate::interaction::label(ui,"Generation and editing models");
+    fn show_model_library(&mut self, ctx: &egui::Context) {
+        if !self.model_library_open { return; }
+        let mut open = self.model_library_open;
+        egui::Window::new("Model Library")
+            .collapsible(false)
+            .open(&mut open)
+            .default_width(650.0)
+            .default_height(700.0)
+            .vscroll(true)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .show(ctx, |ui| {
+            ui.heading("PixelForge model library");
+            theme::section(ui, "AI Assist");
+            if self.prompt_guide.show_ollama_library(ui, &self.generation_checkpoint) {
+                self.dependency_manager.open = true;
+            }
+            ui.separator();
+            crate::interaction::label(ui,"ComfyUI models");
             if self.install_folder.is_none() && !self.install_folder_manual {
                 self.install_folder=model_installer::detect_models_folder(&self.generation_checkpoints);
             }
@@ -1747,69 +1774,99 @@ impl PixelForge {
                     self.install_folder_manual=true;
                 }
             }
-            for (index,model) in model_installer::MODELS.iter().enumerate() {
-                let present=self.install_folder.as_ref().map(|root|model_installer::installed_files(model,root)).unwrap_or(0);
-                let backend_model=(!model.bundle()).then(||self.generation_checkpoints.iter().find(|name|name.to_lowercase().contains(model.keyword)).cloned()).flatten();
-                let installed=present==model.files.len() || backend_model.is_some();
+            for (heading, generation, editing) in [
+                ("Image Generation", true, false),
+                ("Generation and Editing", true, true),
+                ("Instruction Editing", false, true),
+            ] {
+                ui.add_space(8.0);
+                theme::section(ui, heading);
+                for (index, model) in model_installer::MODELS.iter().enumerate()
+                    .filter(|(_, model)| model.generation == generation && model.editing == editing)
+                {
+                    let present=self.install_folder.as_ref().map(|root|model_installer::installed_files(model,root)).unwrap_or(0);
+                    let backend_model=(!model.bundle()).then(||self.generation_checkpoints.iter().find(|name|name.to_lowercase().contains(model.keyword)).cloned()).flatten();
+                    let installed=present==model.files.len() || backend_model.is_some();
+                    ui.group(|ui| {
+                        // Use the whole column instead of sizing each card to its text.
+                        ui.set_width(ui.available_width());
+                        ui.heading(egui::RichText::new(model.name).size(23.0).strong());
+                        crate::interaction::label(ui,if installed {"Installed".to_owned()} else if present>0 {format!("{} / {} files installed",present,model.files.len())} else {"Not installed".to_owned()});
+                        crate::interaction::label(ui,model.description);
+                        model.show_compatibility(ui);
+                        ui.hyperlink_to("Model page and license",model.page);
+                        if installed {
+                            if model.generation && ui.button("Use for Generation").clicked() {
+                                self.generation_checkpoint=if model.bundle() {model.name.into()} else {backend_model.clone().unwrap_or_else(||model.files[0].file.to_owned())};
+                                self.reset_generation_sampling();
+                            }
+                            if model.editing && ui.button("Use for Edits").clicked() {
+                                self.edit_checkpoint=model.name.into();
+                                if model.name==ai_generation::QWEN_EDIT_2511 {self.qwen_steps=40;}
+                            }
+                        } else if ui.add_enabled(self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Download & Install")).clicked() {
+                            let folder=self.install_folder.clone().or_else(||rfd::FileDialog::new().set_title("Select the ComfyUI models folder").pick_folder());
+                            if let Some(folder)=folder {
+                                let folder=if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder};
+                                self.install_folder=Some(folder.clone());self.install_folder_manual=true;
+                                self.install_cancel.store(false,std::sync::atomic::Ordering::Relaxed);
+                                self.install_progress.store(0,std::sync::atomic::Ordering::Relaxed);
+                                self.install_total.store(0,std::sync::atomic::Ordering::Relaxed);
+                                let progress=self.install_progress.clone();let total=self.install_total.clone();let cancel=self.install_cancel.clone();
+                                let (tx,rx)=std::sync::mpsc::channel();self.install_rx=Some(rx);
+                                self.install_model_index=Some(index);
+                                self.install_status=format!("Downloading {}…",model.name);
+                                let repaint=ui.ctx().clone();
+                                std::thread::spawn(move || {
+                                    let _=tx.send(model_installer::install(index,folder,progress,total,cancel));
+                                    repaint.request_repaint();
+                                });
+                            }
+                        }
+                        if present>0 || backend_model.is_some() {
+                            if ui.add_enabled(!self.generation_running&&!self.ai_running&&self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Remove Model…")).clicked() {
+                                if let Some(root)=&self.install_folder {self.remove_model=Some((index,root.clone(),backend_model.clone(),false));}
+                                else {self.install_model_index=None;self.install_status="Choose the model folder before removing files".into();}
+                            }
+                        }
+                        if self.install_model_index==Some(index) {
+                            if self.install_rx.is_some() {
+                                let bytes=self.install_progress.load(std::sync::atomic::Ordering::Relaxed);
+                                let total=self.install_total.load(std::sync::atomic::Ordering::Relaxed);
+                                ui.add(egui::ProgressBar::new(if total>0 {bytes as f32/total as f32} else {0.0})
+                                    .text(if total>0 {format!("{:.2} / {:.2} GB",bytes as f64/1e9,total as f64/1e9)} else {"Preparing download…".into()}));
+                                if ui.button("Cancel Download").clicked() {self.install_cancel.store(true,std::sync::atomic::Ordering::Relaxed);}
+                                ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+                            }
+                            if !self.install_status.is_empty() {crate::interaction::label(ui,&self.install_status);}
+                        }
+                    });
+                }
+            }
+            ui.add_space(8.0);
+            theme::section(ui, "Restoration and Upscaling");
+            for (component, compatibility) in [
+                (dependencies::Component::Denoise, "Requires a compatible Vulkan GPU. CPU processing is unavailable in this engine."),
+                (dependencies::Component::Upscale, "Requires a compatible Vulkan GPU. CPU processing is unavailable in this engine."),
+                (dependencies::Component::DeblurModel, "Uses the ONNX Runtime CPU provider. Requires the Deblur Python runtime."),
+            ] {
                 ui.group(|ui| {
-                    // Use the whole column instead of sizing each card to its text.
                     ui.set_width(ui.available_width());
-                    crate::interaction::strong(ui,model.name);
-                    crate::interaction::label(ui,if installed {"Installed".to_owned()} else if present>0 {format!("{} / {} files installed",present,model.files.len())} else {"Not installed".to_owned()});
-                    crate::interaction::label(ui,model.description);
-                    ui.hyperlink_to("Model page and license",model.page);
-                    if installed {
-                        if model.generation && ui.button("Use for Generation").clicked() {
-                            self.generation_checkpoint=if model.bundle() {model.name.into()} else {backend_model.clone().unwrap_or_else(||model.files[0].file.to_owned())};
-                            self.reset_generation_sampling();
-                        }
-                        if model.editing && ui.button("Use for Edits").clicked() {
-                            self.edit_checkpoint=model.name.into();
-                            if model.name==ai_generation::QWEN_EDIT_2511 {self.qwen_steps=40;}
-                        }
-                    } else if ui.add_enabled(self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Download & Install")).clicked() {
-                        let folder=self.install_folder.clone().or_else(||rfd::FileDialog::new().set_title("Select the ComfyUI models folder").pick_folder());
-                        if let Some(folder)=folder {
-                            let folder=if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder};
-                            self.install_folder=Some(folder.clone());self.install_folder_manual=true;
-                            self.install_cancel.store(false,std::sync::atomic::Ordering::Relaxed);
-                            self.install_progress.store(0,std::sync::atomic::Ordering::Relaxed);
-                            self.install_total.store(0,std::sync::atomic::Ordering::Relaxed);
-                            let progress=self.install_progress.clone();let total=self.install_total.clone();let cancel=self.install_cancel.clone();
-                            let (tx,rx)=std::sync::mpsc::channel();self.install_rx=Some(rx);
-                            self.install_model_index=Some(index);
-                            self.install_status=format!("Downloading {}…",model.name);
-                            let repaint=ui.ctx().clone();
-                            std::thread::spawn(move || {
-                                let _=tx.send(model_installer::install(index,folder,progress,total,cancel));
-                                repaint.request_repaint();
-                            });
-                        }
+                    ui.heading(egui::RichText::new(component.title()).size(23.0).strong());
+                    if let Some(row) = self.dependency_manager.rows.iter().find(|row| row.component == Some(component)) {
+                        ui.label(if row.installed { "Installed" } else { "Not installed" });
                     }
-                    if present>0 || backend_model.is_some() {
-                        if ui.add_enabled(!self.generation_running&&!self.ai_running&&self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Remove Model…")).clicked() {
-                            if let Some(root)=&self.install_folder {self.remove_model=Some((index,root.clone(),backend_model.clone(),false));}
-                            else {self.install_model_index=None;self.install_status="Choose the model folder before removing files".into();}
-                        }
-                    }
-                    if self.install_model_index==Some(index) {
-                        if self.install_rx.is_some() {
-                            let bytes=self.install_progress.load(std::sync::atomic::Ordering::Relaxed);
-                            let total=self.install_total.load(std::sync::atomic::Ordering::Relaxed);
-                            ui.add(egui::ProgressBar::new(if total>0 {bytes as f32/total as f32} else {0.0})
-                                .text(if total>0 {format!("{:.2} / {:.2} GB",bytes as f64/1e9,total as f64/1e9)} else {"Preparing download…".into()}));
-                            if ui.button("Cancel Download").clicked() {self.install_cancel.store(true,std::sync::atomic::Ordering::Relaxed);}
-                            ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-                        }
-                        if !self.install_status.is_empty() {crate::interaction::label(ui,&self.install_status);}
-                    }
+                    ui.label(compatibility);
                 });
+            }
+            if ui.button("Open restoration and upscaling setup").clicked() {
+                self.dependency_manager.open = true;
             }
             if self.install_model_index.is_none() && !self.install_status.is_empty() {crate::interaction::label(ui,&self.install_status);}
             crate::interaction::label(ui,"Existing complete files are kept. Refresh models after installation; Qwen may need a ComfyUI restart.");
             if ui.add_enabled(self.generation_models_rx.is_none(),egui::Button::new("Refresh Installed Models")).clicked() {self.refresh_generation_models(ui.ctx());}
         });
-        self.model_library_reveal=false;
+        self.model_library_open = open;
     }
 
     fn show_model_removal(&mut self,ctx:&egui::Context) {
@@ -2218,6 +2275,7 @@ impl PixelForge {
                 ui.ctx(),
                 &self.generation_checkpoint,
                 &mut self.generation_prompt,
+                &mut self.prompt_spelling,
             );
         }
         ui.separator();
@@ -2672,7 +2730,7 @@ impl PixelForge {
         std::mem::swap(&mut self.install_status, &mut other.install_status);
         std::mem::swap(&mut self.dependency_manager, &mut other.dependency_manager);
         std::mem::swap(&mut self.remove_model, &mut other.remove_model);
-        std::mem::swap(&mut self.model_library_reveal, &mut other.model_library_reveal);
+        std::mem::swap(&mut self.model_library_open, &mut other.model_library_open);
         std::mem::swap(&mut self.install_folder, &mut other.install_folder);
         std::mem::swap(
             &mut self.install_folder_manual,
@@ -2975,7 +3033,8 @@ impl PixelForge {
             .collapsible(false)
             .resizable(false)
             .auto_sized()
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 let messages = [
                     "Your project has unsaved changes.",
@@ -3029,7 +3088,9 @@ impl PixelForge {
         egui::Window::new("Unsaved Project Changes")
             .collapsible(false)
             .resizable(false)
-            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .id(egui::Id::new("unsaved-before-replacement"))
+            .pivot(egui::Align2::CENTER_CENTER)
+            .default_pos(ctx.screen_rect().center())
             .show(ctx, |ui| {
                 crate::interaction::label(ui,"This image has unsaved project changes.");
                 match action {
@@ -4089,7 +4150,7 @@ impl PixelForge {
             }
         });
         crate::interaction::label(ui,"Try one step, then compare with the original using Compare above the image. Enlarge last using Upscaling below.");
-        if ui.button("Check Restoration Dependencies").clicked() { self.dependency_manager.open = true; }
+        if ui.button("Open Setup and Maintenance").clicked() { self.dependency_manager.open = true; }
         ui.separator();
     }
 
@@ -6609,10 +6670,6 @@ impl eframe::App for PixelForge {
         std::time::Duration::from_secs(1)
     }
 
-    fn persist_egui_memory(&self) -> bool {
-        false
-    }
-
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         startup::ready(_frame);
         for action in self.interaction.begin_frame(ctx) {self.edit_command(ctx,action);}
@@ -6747,8 +6804,21 @@ impl eframe::App for PixelForge {
 
                 if ui.button("Settings").clicked() {self.show_settings=!self.show_settings;}
                 let missing=self.dependency_manager.missing();
-                let label=if missing>0 {egui::RichText::new(format!("Dependencies ({missing})")).color(egui::Color32::YELLOW).strong()} else {egui::RichText::new("Dependencies")};
-                if ui.button(label).clicked() {self.dependency_manager.open=!self.dependency_manager.open;}
+                let label = if missing > 0 {
+                    egui::RichText::new(format!("Dependencies ({missing})")).color(egui::Color32::YELLOW).strong()
+                } else {
+                    egui::RichText::new("Dependencies")
+                };
+                ui.menu_button(label, |ui| {
+                    if ui.button("Setup and Maintenance").clicked() {
+                        self.dependency_manager.open = true;
+                        ui.close();
+                    }
+                    if ui.button("Model Library").clicked() {
+                        self.model_library_open = true;
+                        ui.close();
+                    }
+                });
                 let updates=if self.updater.available() {egui::RichText::new("Updates").color(egui::Color32::YELLOW).strong()}else{egui::RichText::new("Updates")};
                 if ui.button(updates).clicked() {self.updater.open=!self.updater.open;}
                 ui.separator();
@@ -7144,12 +7214,18 @@ impl eframe::App for PixelForge {
             }
         });
 
-        let workspace_busy=self.generation_running||self.ai_running||self.install_rx.is_some();
-        if self.dependency_manager.show(ctx,self.install_folder.clone(),self.generation_checkpoints.clone(),workspace_busy) {
-            self.generation_tools_tab=true;self.ai_tools_tab=false;self.selection_tools_tab=false;
-            self.generation_workspace=true;self.model_library_reveal=true;
+        let workspace_busy=self.generation_running||self.ai_running||self.install_rx.is_some()||self.generation_models_rx.is_some();
+        if self.dependency_manager.show(
+            ctx,
+            self.install_folder.clone(),
+            self.generation_checkpoints.clone(),
+            workspace_busy,
+            |ui| self.prompt_guide.show_ollama_dependency(ui, &self.generation_checkpoint),
+        ) {
+            self.model_library_open = true;
         }
         self.handle_file_drops(ctx);
+        self.show_model_library(ctx);
         self.show_model_removal(ctx);
         self.show_controls_settings(ctx);
         self.show_unsaved_prompt(ctx);

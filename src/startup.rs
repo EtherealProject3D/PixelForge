@@ -93,14 +93,14 @@ mod platform {
             if RegisterClassW(&wc) == 0 { return Err(windows::core::Error::from_win32().to_string()); }
             let title = HSTRING::from(if crate::profile::is_dev() {"Pixel Forge Dev is loading…"} else {"Pixel Forge is loading…"});
             let width=380; let height=110;
-            let window = CreateWindowExW(WS_EX_TOOLWINDOW,&*class,&title,WS_POPUP|WS_BORDER,
+            let window = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,&*class,&title,WS_POPUP|WS_BORDER,
                 (GetSystemMetrics(SM_CXSCREEN)-width)/2,(GetSystemMetrics(SM_CYSCREEN)-height)/2,
                 width,height,None,None,Some(instance),None).map_err(|e|e.to_string())?;
             let text = CreateWindowExW(WINDOW_EX_STYLE::default(),w!("STATIC"),&title,
                 WS_CHILD|WS_VISIBLE|WINDOW_STYLE(1),20,35,340,40,Some(window),None,Some(instance),None).map_err(|e|e.to_string())?;
             let font = GetStockObject(DEFAULT_GUI_FONT);
             SendMessageW(text,WM_SETFONT,Some(WPARAM(font.0 as usize)),Some(LPARAM(1)));
-            let _ = ShowWindow(window,SW_SHOWNORMAL);
+            let _ = ShowWindow(window,SW_SHOWNOACTIVATE);
             let _ = UpdateWindow(window);
             Ok(window)
         }
@@ -112,8 +112,11 @@ mod platform {
             if let RawWindowHandle::Win32(main) = handle.as_raw() {
                 unsafe {
                     let window = HWND(splash as *mut _);
-                    let _ = SetPropW(window,w!("PixelForgeMainWindow"),Some(HANDLE(main.hwnd.get() as *mut _)));
+                    let main = HWND(main.hwnd.get() as *mut _);
+                    let splash_had_focus = GetForegroundWindow() == window;
+                    let _ = SetPropW(window,w!("PixelForgeMainWindow"),Some(HANDLE(main.0)));
                     let _ = ShowWindow(window,SW_HIDE);
+                    if splash_had_focus { focus(main); }
                 }
             }
         }
