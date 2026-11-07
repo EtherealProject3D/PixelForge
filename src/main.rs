@@ -812,11 +812,11 @@ impl Default for PixelForge {
             generation_started: None,
             generation_progress: std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0)),
             generation_models_rx: None,
-            generation_models_status: String::new(),
+            generation_models_status: "Connect to local ComfyUI to begin".into(),
             generation_cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             generation_image: None,
             generation_texture: None,
-            generation_status: "Connect to local ComfyUI to begin".into(),
+            generation_status: String::new(),
             install_rx: None,
             install_model_index: None,
             install_progress: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -2330,7 +2330,12 @@ impl PixelForge {
                 if ui.button("Cancel").clicked() { self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
             });
         }
-        crate::interaction::small(ui,&self.generation_status);
+        let status = if self.generation_status.is_empty() {
+            &self.generation_models_status
+        } else {
+            &self.generation_status
+        };
+        crate::interaction::small(ui, status);
     }
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
