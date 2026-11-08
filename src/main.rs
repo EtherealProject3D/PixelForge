@@ -33,7 +33,7 @@ mod spelling;
 
 use eframe::egui;
 use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureHandle, TextureOptions, Vec2};
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 fn restoration_preset_settings(preset: usize) -> (u32, f32) {
     match preset {
@@ -186,6 +186,21 @@ enum ExportFormat {
 }
 
 impl ExportFormat {
+    const ALL: [Self; 3] = [Self::Png, Self::Jpeg, Self::WebP];
+
+    fn encode(self, pixels: image::RgbaImage) -> Result<Vec<u8>, String> {
+        let image = image::DynamicImage::ImageRgba8(pixels);
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        match self {
+            Self::Jpeg => image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buffer, 100)
+                .encode_image(&image.into_rgb8()),
+            Self::Png => image.write_to(&mut buffer, image::ImageFormat::Png),
+            Self::WebP => image.write_to(&mut buffer, image::ImageFormat::WebP),
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(buffer.into_inner())
+    }
+
     fn extension(self) -> &'static str {
         match self {
             Self::Png => "png",
@@ -194,6 +209,13 @@ impl ExportFormat {
         }
     }
 
+    fn name(self) -> &'static str {
+        match self {
+            Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::WebP => "WebP",
+        }
+    }
     fn label(self) -> &'static str {
         match self {
             Self::Png => "PNG Image",
@@ -203,13 +225,83 @@ impl ExportFormat {
     }
 }
 
+fn write_new_export(
+    path: &std::path::Path,
+    bytes: &[u8],
+    mut progress: impl FnMut(f32),
+) -> Result<PathBuf, String> {
+    use std::io::{ErrorKind, Write};
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let extension = path.extension().unwrap_or_default().to_string_lossy();
+    for suffix in 0..=u32::MAX {
+        let candidate = if suffix == 0 {
+            path.to_owned()
+        } else {
+            path.with_file_name(format!("{stem}_{suffix:03}.{extension}"))
+        };
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        let result = (|| -> std::io::Result<()> {
+            let mut written = 0;
+            for chunk in bytes.chunks(1024 * 1024) {
+                file.write_all(chunk)?;
+                written += chunk.len();
+                progress(written as f32 / bytes.len() as f32);
+            }
+            file.sync_all()
+        })();
+        drop(file);
+        if let Err(error) = result {
+            let _ = std::fs::remove_file(&candidate);
+            return Err(error.to_string());
+        }
+        return Ok(candidate);
+    }
+    Err("No available numbered filename".into())
+}
+
+struct StudioExport {
+    filename: String,
+    editor: studio::EditorState,
+    pixels: Arc<image::RgbaImage>,
+}
+
+fn write_studio_batch(
+    folder: &std::path::Path,
+    images: Vec<StudioExport>,
+    format: ExportFormat,
+    mut progress: impl FnMut(f32),
+) -> Result<PathBuf, String> {
+    let count = images.len();
+    for (index, image) in images.into_iter().enumerate() {
+        let result = format
+            .encode(image.editor.render(&image.pixels))
+            .and_then(|bytes| write_new_export(&folder.join(&image.filename), &bytes, |_| {}));
+        result.map_err(|error| {
+            format!(
+                "Saved {index} of {count} images. {}: {error}",
+                image.filename
+            )
+        })?;
+        progress((index + 1) as f32 / count as f32);
+    }
+    Ok(folder.to_owned())
+}
+
 enum ExportEvent {
     Progress {
         fraction: f32,
         stage: &'static str,
         encoding: bool,
     },
-    Finished(Result<PathBuf, String>),
+    Finished { result: Result<PathBuf, String>, count: usize },
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PendingOpen {
@@ -264,7 +356,7 @@ struct GeneratedItem {
     group: Option<usize>,
     editor: studio::EditorState,
     settings: GenerationSettings,
-    pixels: image::RgbaImage,
+    pixels: Arc<image::RgbaImage>,
     texture: TextureHandle,
     seed: u64,
 }
@@ -1430,7 +1522,7 @@ impl PixelForge {
                     group: self.generation_batch_group,
                     editor: studio::EditorState::default(),
                     settings,
-                    pixels: image,
+                    pixels: Arc::new(image),
                     texture,
                     seed,
                 });
@@ -1539,7 +1631,7 @@ impl PixelForge {
         self.crop=None;
         self.capture_workspace_editor();
         let Some(item) = self.generation_gallery.get(self.generation_selected) else {return};
-        let pixels = item.pixels.clone();
+        let pixels = item.pixels.as_ref().clone();
         let editor = item.editor.clone();
         self.processed_texture = Some(item.texture.clone());
         self.texture = Some(ctx.load_texture("studio_original",ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR));
@@ -1576,7 +1668,7 @@ impl PixelForge {
                 let mut settings = settings_from_json(&serde_json::json!({"checkpoint":"Imported image","width":pixels.width(),"height":pixels.height()}));
                 settings.custom_size=true;
                 let texture=self.texture.as_ref().expect("loaded editor has texture").clone();
-                self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
+                self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed:0});
                 self.generation_selected=self.generation_gallery.len()-1;
                 self.workspace_editor=Some(self.generation_selected);
                 self.capture_workspace_editor();
@@ -1673,7 +1765,7 @@ impl PixelForge {
         let parent=self.generation_selected;
         let Some(item)=self.generation_gallery.get(parent) else {return};
         let [x,y,w,h]=crop.pixels([item.pixels.width(),item.pixels.height()]);
-        let pixels=image::imageops::crop_imm(&item.pixels,x,y,w,h).to_image();
+        let pixels=image::imageops::crop_imm(item.pixels.as_ref(),x,y,w,h).to_image();
         let crop_mask=|mask:&masking::SelectionMask| {
             let (mw,mh)=mask.dimensions();
             let gray=image::GrayImage::from_raw(mw,mh,mask.pixels().to_vec()).expect("valid selection mask");
@@ -1690,7 +1782,7 @@ impl PixelForge {
         settings.width=w;settings.height=h;settings.custom_size=true;
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("Crop at {x}, {y}: {w} × {h}"));
         let seed=item.seed;
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor,settings,pixels,texture,seed});
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor,settings,pixels:Arc::new(pixels),texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.refinement_source=None;
@@ -1709,7 +1801,7 @@ impl PixelForge {
         settings.refine_prompt=Some(label.into());
         let texture=ctx.load_texture(format!("studio_snapshot_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
         let seed=item.seed;
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels,texture,seed});
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -1722,7 +1814,7 @@ impl PixelForge {
         let parent = self.generation_selected;
         let Some(item) = self.generation_gallery.get(parent) else { return; };
         let mut editor = item.editor.clone();
-        let pixels = if clockwise { image::imageops::rotate90(&item.pixels) } else { image::imageops::rotate270(&item.pixels) };
+        let pixels = if clockwise { image::imageops::rotate90(item.pixels.as_ref()) } else { image::imageops::rotate270(item.pixels.as_ref()) };
         let rotate_mask = |mask: &masking::SelectionMask| {
             let (w,h) = mask.dimensions();
             let source = image::GrayImage::from_raw(w,h,mask.pixels().to_vec()).expect("valid selection mask");
@@ -1736,7 +1828,7 @@ impl PixelForge {
         let item = &mut self.generation_gallery[parent];
         item.settings.width = pixels.width();
         item.settings.height = pixels.height();
-        item.pixels = pixels;
+        item.pixels = Arc::new(pixels);
         item.editor = editor;
         item.texture = texture;
         // Reload this version without capturing the old, unrotated editor state.
@@ -1764,7 +1856,7 @@ impl PixelForge {
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("{label} · strength {:.0}%",self.ai_strength*100.0));
         settings.checkpoint=format!("AI Tools: {label}");settings.width=pixels.width();settings.height=pixels.height();settings.steps=0;settings.cfg=0.0;
         let texture=ctx.load_texture(format!("studio_ai_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels,texture,seed:0});
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed:0});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -2235,7 +2327,7 @@ impl PixelForge {
                         value["version_number"] = serde_json::json!(i.version_number);
                         value
                     },
-                    pixels: i.pixels.clone(),
+                    pixels: i.pixels.as_ref().clone(),
                     seed: i.seed,
                 })
                 .collect(),
@@ -2313,7 +2405,7 @@ impl PixelForge {
                     group,
                     editor,
                     settings: settings_from_json(&i.settings),
-                    pixels: i.pixels,
+                    pixels: Arc::new(i.pixels),
                     texture,
                     seed: i.seed,
                 }
@@ -2419,7 +2511,7 @@ impl PixelForge {
             group: self.thumbnail_destination,
             editor: studio::EditorState::default(),
             settings,
-            pixels,
+            pixels: Arc::new(pixels),
             texture,
             seed: 0,
         });
@@ -2428,13 +2520,78 @@ impl PixelForge {
         self.project_dirty = true;
     }
 
-    fn export_generation_selected(&mut self,format:image::ImageFormat,ext:&str) {
+    fn studio_export_filename(item: &GeneratedItem, format: ExportFormat) -> String {
+        format!("PixelForge_{}_{}.{}", item.version_number, item.seed, format.extension())
+    }
+
+    fn export_generation_selected(&mut self, format: ExportFormat) {
         self.capture_workspace_editor();
-        let Some(item)=self.generation_gallery.get(self.generation_selected) else {return};
-        let filename=format!("PixelForge_{}_{}.{}",item.version_number,item.seed,ext);
-        if let Some(path)=rfd::FileDialog::new().add_filter(ext,&[ext]).set_file_name(&filename).save_file() {
-            self.generation_status=match item.editor.render(&item.pixels).save_with_format(&path,format) {Ok(())=>format!("Exported {}",path.display()),Err(e)=>format!("Export failed: {e}")};
+        let Some(item) = self.generation_gallery.get(self.generation_selected) else {
+            return;
+        };
+        if let Some(mut path) = rfd::FileDialog::new()
+            .add_filter(format.label(), &[format.extension()])
+            .set_file_name(Self::studio_export_filename(item, format))
+            .save_file()
+        {
+            path.set_extension(format.extension());
+            self.generation_status = match format
+                .encode(item.editor.render(&item.pixels))
+                .and_then(|bytes| std::fs::write(&path, bytes).map_err(|error| error.to_string()))
+            {
+                Ok(()) => format!("Exported {}", path.display()),
+                Err(error) => format!("Export failed: {error}"),
+            };
         }
+    }
+
+    fn studio_batch_images(&self, selected_only: bool, format: ExportFormat) -> Vec<StudioExport> {
+        let mut indices: Vec<_> = (0..self.generation_gallery.len())
+            .filter(|index| !selected_only || self.thumbnail_selection.contains(index))
+            .collect();
+        indices.sort_by_key(|&index| {
+            (
+                self.thumbnail_group_position(self.generation_gallery[index].group),
+                index,
+            )
+        });
+        indices
+            .into_iter()
+            .map(|index| {
+                let item = &self.generation_gallery[index];
+                StudioExport {
+                    filename: Self::studio_export_filename(item, format),
+                    editor: item.editor.clone(),
+                    pixels: item.pixels.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn start_studio_batch_export(&mut self, selected_only: bool, format: ExportFormat) {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Choose an export folder")
+            .pick_folder()
+        else {
+            return;
+        };
+        self.capture_workspace_editor();
+        let images = self.studio_batch_images(selected_only, format);
+        let count = images.len();
+        if count == 0 {
+            return;
+        }
+        let tx = self.begin_export();
+        std::thread::spawn(move || {
+            let result = write_studio_batch(&folder, images, format, |fraction| {
+                let _ = tx.send(ExportEvent::Progress {
+                    fraction,
+                    stage: "Exporting thumbnails",
+                    encoding: false,
+                });
+            });
+            let _ = tx.send(ExportEvent::Finished { result, count });
+        });
     }
 
     fn submit_conversation(&mut self, ctx: &egui::Context, edit: bool) {
@@ -4822,23 +4979,9 @@ impl PixelForge {
         let selection_mask = self.selection_mask.clone();
         let local_settings = self.selection_adjustments;
 
-        let (tx, rx) = std::sync::mpsc::channel();
-
-        self.export_rx = Some(rx);
-        self.export_progress = 0.0;
-        self.export_stage = "Starting export".into();
-        self.export_encoding = false;
-        self.exporting = true;
-        self.export_result = None;
-        self.last_export_path = None;
-        self.status = "Export started".into();
-
+        let tx = self.begin_export();
         std::thread::spawn(move || {
-            let mut created_output = false;
-
-            let result = (|| -> Result<(), String> {
-                use std::io::{Cursor, Write};
-
+            let result = (|| -> Result<PathBuf, String> {
                 let mut adjusted = original;
 
                 let settings = adjustments::Adjustments {
@@ -4902,140 +5045,30 @@ impl PixelForge {
                     encoding: true,
                 });
 
-                let bytes = match format {
-                    ExportFormat::Jpeg => {
-                        let rgb = image::DynamicImage::ImageRgba8(adjusted).to_rgb8();
-
-                        let mut output = Vec::new();
-
-                        {
-                            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-                                &mut output,
-                                100,
-                            );
-
-                            encoder
-                                .encode(
-                                    rgb.as_raw(),
-                                    rgb.width(),
-                                    rgb.height(),
-                                    image::ExtendedColorType::Rgb8,
-                                )
-                                .map_err(|e| e.to_string())?;
-                        }
-
-                        output
-                    }
-
-                    ExportFormat::Png | ExportFormat::WebP => {
-                        let image = image::DynamicImage::ImageRgba8(adjusted);
-
-                        let image_format = match format {
-                            ExportFormat::Png => image::ImageFormat::Png,
-                            ExportFormat::WebP => image::ImageFormat::WebP,
-                            ExportFormat::Jpeg => unreachable!(),
-                        };
-
-                        let mut buffer = Cursor::new(Vec::new());
-
-                        image
-                            .write_to(&mut buffer, image_format)
-                            .map_err(|e| e.to_string())?;
-
-                        buffer.into_inner()
-                    }
-                };
-
-                let _ = tx.send(ExportEvent::Progress {
-                    fraction: 0.80,
-                    stage: "Writing image file",
-                    encoding: false,
-                });
-
-                // Create the output exclusively. If its name
-                // exists, try _001, _002, and so on.
-                // No existing file is ever opened for writing.
-                let base_path = path.clone();
-
-                let stem = base_path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "image".to_owned());
-
-                let extension = format.extension();
-
-                let mut suffix = 0u32;
-
-                let mut file = loop {
-                    let candidate = if suffix == 0 {
-                        base_path.clone()
-                    } else {
-                        base_path.with_file_name(format!("{stem}_{suffix:03}.{extension}"))
-                    };
-
-                    match std::fs::OpenOptions::new()
-                        .write(true)
-                        .create_new(true)
-                        .open(&candidate)
-                    {
-                        Ok(file) => {
-                            path = candidate;
-                            break file;
-                        }
-
-                        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                            suffix = suffix
-                                .checked_add(1)
-                                .ok_or_else(|| "No available numbered filename".to_owned())?;
-                        }
-
-                        Err(err) => {
-                            return Err(err.to_string());
-                        }
-                    }
-                };
-
-                created_output = true;
-
-                // Actual file-writing progress: 80-99%.
-                let total_bytes = bytes.len().max(1);
-                let mut written = 0usize;
-
-                for chunk in bytes.chunks(1024 * 1024) {
-                    file.write_all(chunk).map_err(|e| e.to_string())?;
-
-                    written += chunk.len();
-
-                    let fraction = 0.80 + 0.19 * written as f32 / total_bytes as f32;
-
+                let bytes = format.encode(adjusted)?;
+                write_new_export(&path, &bytes, |written| {
                     let _ = tx.send(ExportEvent::Progress {
-                        fraction,
+                        fraction: 0.80 + 0.19 * written,
                         stage: "Writing image file",
                         encoding: false,
                     });
-                }
-
-                file.sync_all().map_err(|e| e.to_string())?;
-
-                let _ = tx.send(ExportEvent::Progress {
-                    fraction: 1.0,
-                    stage: "Export complete",
-                    encoding: false,
-                });
-
-                Ok(())
+                })
             })();
-
-            // Remove only an incomplete file created by this
-            // export worker. Never remove a pre-existing file.
-            if result.is_err() && created_output {
-                let _ = std::fs::remove_file(&path);
-            }
-
-            let final_result = result.map(|_| path);
-
-            let _ = tx.send(ExportEvent::Finished(final_result));
+            let _ = tx.send(ExportEvent::Finished { result, count: 1 });
         });
+    }
+
+    fn begin_export(&mut self) -> std::sync::mpsc::Sender<ExportEvent> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.export_rx = Some(rx);
+        self.export_progress = 0.0;
+        self.export_stage = "Starting export".into();
+        self.export_encoding = false;
+        self.exporting = true;
+        self.export_result = None;
+        self.last_export_path = None;
+        self.status = "Export started".into();
+        tx
     }
 
     fn poll_export(&mut self, ctx: &egui::Context) {
@@ -5063,7 +5096,7 @@ impl PixelForge {
                     self.export_encoding = encoding;
                 }
 
-                ExportEvent::Finished(result) => {
+                ExportEvent::Finished { result, count } => {
                     self.exporting = false;
                     self.export_result = Some(result.is_ok());
                     self.export_encoding = false;
@@ -5073,7 +5106,11 @@ impl PixelForge {
                         Ok(path) => {
                             self.export_progress = 1.0;
                             self.export_stage = "Export complete".into();
-                            self.status = format!("Exported: {}", path.display());
+                            self.status = if count > 1 {
+                                format!("Exported {count} images to {}", path.display())
+                            } else {
+                                format!("Exported: {}", path.display())
+                            };
                             self.last_export_path = Some(path);
                         }
                         Err(err) => {
@@ -5082,6 +5119,7 @@ impl PixelForge {
                             self.status = format!("Export failed: {err}");
                         }
                     }
+                    break;
                 }
             }
         }
@@ -7839,28 +7877,33 @@ impl eframe::App for PixelForge {
                 ui.menu_button("Export", |ui| {
                     let can_export = (if self.generation_workspace {!self.generation_gallery.is_empty()} else {self.original_pixels.is_some()}) && !self.exporting;
 
-                    if ui
-                        .add_enabled(can_export, egui::Button::new("Export as PNG..."))
-                        .clicked()
-                    {
-                        ui.close();
-                        if self.generation_workspace {self.export_generation_selected(image::ImageFormat::Png,"png");} else {self.start_export(ExportFormat::Png);}
+                    for format in ExportFormat::ALL {
+                        if ui.add_enabled(can_export, egui::Button::new(format!("Export as {}...", format.name()))).clicked() {
+                            ui.close();
+                            if self.generation_workspace {
+                                self.export_generation_selected(format);
+                            } else {
+                                self.start_export(format);
+                            }
+                        }
                     }
-
-                    if ui
-                        .add_enabled(can_export, egui::Button::new("Export as JPEG..."))
-                        .clicked()
-                    {
-                        ui.close();
-                        if self.generation_workspace {self.export_generation_selected(image::ImageFormat::Jpeg,"jpg");} else {self.start_export(ExportFormat::Jpeg);}
-                    }
-
-                    if ui
-                        .add_enabled(can_export, egui::Button::new("Export as WebP..."))
-                        .clicked()
-                    {
-                        ui.close();
-                        if self.generation_workspace {self.export_generation_selected(image::ImageFormat::WebP,"webp");} else {self.start_export(ExportFormat::WebP);}
+                    if self.generation_workspace {
+                        ui.add_enabled_ui(can_export, |ui| {
+                            ui.menu_button("Batch Export", |ui| {
+                                for (selected_only, label) in [(true, "Selected Thumbnails"), (false, "All Thumbnails")] {
+                                    ui.add_enabled_ui(!selected_only || !self.thumbnail_selection.is_empty(), |ui| {
+                                        ui.menu_button(label, |ui| {
+                                            for format in ExportFormat::ALL {
+                                                if ui.button(format!("{}...", format.name())).clicked() {
+                                                    ui.close();
+                                                    self.start_studio_batch_export(selected_only, format);
+                                                }
+                                            }
+                                        });
+                                    });
+                                }
+                            });
+                        });
                     }
                 });
 
@@ -8205,7 +8248,11 @@ impl eframe::App for PixelForge {
                 self.show_generation_progress(ui);
                 self.show_workspace_details(ui);
                 if self.ai_running {ui.spinner();crate::interaction::label(ui,&self.ai_status);}
-                if self.exporting || self.ai_saving {crate::interaction::label(ui,&self.export_stage);}
+                if self.exporting {
+                    ui.add(egui::ProgressBar::new(self.export_progress).text(&self.export_stage));
+                } else if self.ai_saving {
+                    crate::interaction::label(ui, &self.export_stage);
+                }
                 if !self.status.is_empty() && self.status!="Ready" {crate::interaction::label(ui,&self.status);}
                 return;
             }
@@ -8442,14 +8489,14 @@ mod workspace_tests {
         editor.mask=Some(mask.clone());editor.saved_selections.push(("Subject".into(),mask));
         let rendered=editor.render(&pixels);
         let texture=ctx.load_texture("crop_original",ColorImage::from_rgba_unmultiplied([8,6],rendered.as_raw()),TextureOptions::LINEAR);
-        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor,settings:settings_from_json(&serde_json::json!({"prompt":"Original","dimension_step":16,"resolution":4})),pixels:pixels.clone(),texture,seed:42});
+        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor,settings:settings_from_json(&serde_json::json!({"prompt":"Original","dimension_step":16,"resolution":4})),pixels:Arc::new(pixels.clone()),texture,seed:42});
         app.generation_workspace=true;app.bind_workspace_editor(&ctx);
         let mut crop=crop::Crop::new(0,[8,6]);
         crop.rect=Rect::from_min_max(egui::pos2(1.0,1.0),egui::pos2(6.0,5.0));
         crop.set_pixel_size(5,4,true,[8,6]);
         app.crop=Some(crop);app.apply_workspace_crop(&ctx);
         assert_eq!(app.generation_gallery.len(),2);
-        assert_eq!(app.generation_gallery[0].pixels,pixels);
+        assert_eq!(app.generation_gallery[0].pixels.as_ref(), &pixels);
         let cropped=&app.generation_gallery[1];
         assert_eq!(cropped.pixels.dimensions(),(5,4));
         assert_eq!(cropped.pixels.get_pixel(0,0),pixels.get_pixel(1,1));
@@ -8549,7 +8596,7 @@ mod workspace_tests {
         app.generation_workspace = true;
         let pixels = image::RgbaImage::from_fn(3, 2, |x,y| image::Rgba([(x+y*3) as u8,20,30,127]));
         let texture = ctx.load_texture("rotate_test",ColorImage::from_rgba_unmultiplied([3,2],pixels.as_raw()),TextureOptions::LINEAR);
-        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:pixels.clone(),texture,seed:12 });
+        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:Arc::new(pixels.clone()),texture,seed:12 });
         app.ensure_workspace(&ctx);
         app.selection_mask = Some(masking::SelectionMask::from_pixels(3,2,vec![255,0,0,0,0,0]).unwrap());
         app.rotate_workspace_version(&ctx, true);
@@ -8561,7 +8608,7 @@ mod workspace_tests {
         assert_eq!(app.generation_gallery[1].pixels.dimensions(), (2,3));
         app.generation_selected = 0;
         for _ in 0..3 { app.rotate_workspace_version(&ctx, true); }
-        assert_eq!(app.generation_gallery[0].pixels, pixels);
+        assert_eq!(app.generation_gallery[0].pixels.as_ref(), &pixels);
         assert_eq!(app.generation_selected, 0);
         assert_eq!(app.generation_gallery.len(), 2);
         assert_eq!(app.generation_compare_index, 0);
@@ -8574,7 +8621,7 @@ mod workspace_tests {
         for n in 0..2 {
             let pixels=image::RgbaImage::from_pixel(2,1,image::Rgba([40+n,40,40,255]));
             let texture=ctx.load_texture(format!("test_{n}"),ColorImage::from_rgba_unmultiplied([2,1],pixels.as_raw()),TextureOptions::LINEAR);
-            app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+            app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:Arc::new(pixels),texture,seed:0});
         }
         app.ensure_workspace(&ctx);
         app.exposure=1.0;
@@ -8605,7 +8652,7 @@ mod workspace_tests {
         for value in [40,80] {
             let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([value,value,value,255]));
             let texture=ctx.load_texture(format!("compare_visibility_{value}"),ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
-            app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+            app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:Arc::new(pixels),texture,seed:0});
         }
         app.generation_workspace=true;
         app.bind_workspace_editor(&ctx);
@@ -8634,7 +8681,7 @@ mod workspace_tests {
         for n in 0..2 {
             let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([n*100,40,40,255]));
             let texture=ctx.load_texture(format!("compare_test_{n}"),ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
-            app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+            app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:Arc::new(pixels),texture,seed:0});
         }
         app.generation_workspace=true;
         app.generation_compare=true;
@@ -8676,7 +8723,7 @@ mod workspace_tests {
             let texture=ctx.load_texture(format!("remove_{n}"),ColorImage::from_rgba_unmultiplied([2,1],pixels.as_raw()),TextureOptions::LINEAR);
             let mut settings=settings_from_json(&serde_json::json!({}));
             settings.refine_parent=if n>0 {Some(n as usize-1)} else {None};
-            app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels,texture,seed:n as u64});
+            app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed:n as u64});
         }
         app.generation_selected=2;app.generation_compare_index=1;app.generation_compare=true;
         app.bind_workspace_editor(&ctx);
@@ -8705,7 +8752,7 @@ mod workspace_tests {
         app.generation_prompt="Fixture initial prompt".into();
         let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([40,40,40,255]));
         let texture=ctx.load_texture("caption_fixture",ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
-        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:Arc::new(pixels),texture,seed:0});
         let input=||egui::RawInput {screen_rect:Some(egui::Rect::from_min_size(egui::Pos2::ZERO,egui::vec2(1000.0,700.0))),..Default::default()};
         let output=ctx.run(input(),|ctx| {egui::CentralPanel::default().show(ctx,|ui|app.show_generation_workspace(ui));});
         let captions:Vec<_>=output.shapes.iter().filter_map(|clipped|match &clipped.shape {
@@ -8731,7 +8778,7 @@ mod workspace_tests {
         let ctx=egui::Context::default();let mut app=PixelForge::default();
         let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([40,40,40,255]));
         let texture=ctx.load_texture("overlay_fixture",ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
-        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels,texture,seed:0});
+        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({})),pixels:Arc::new(pixels),texture,seed:0});
         app.generation_workspace=true;app.bind_workspace_editor(&ctx);
         app.selection_mask=Some(masking::SelectionMask::from_pixels(32,32,vec![255;1024]).unwrap());
         app.refresh_selection_overlay(&ctx);
@@ -8779,7 +8826,7 @@ mod workspace_tests {
         let mut app=PixelForge::default();
         let pixels=image::RgbaImage::from_pixel(2,1,image::Rgba([40,40,40,255]));
         let texture=ctx.load_texture("saved_test",ColorImage::from_rgba_unmultiplied([2,1],pixels.as_raw()),TextureOptions::LINEAR);
-        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({"prompt":"Test"})),pixels,texture,seed:42});
+        app.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings:settings_from_json(&serde_json::json!({"prompt":"Test"})),pixels:Arc::new(pixels),texture,seed:42});
         app.generation_workspace=true;app.bind_workspace_editor(&ctx);
         app.exposure=1.0;
         app.selection_mask=Some(masking::SelectionMask::from_pixels(2,1,vec![255,0]).unwrap());
@@ -8884,7 +8931,7 @@ mod workspace_tests {
                 "refine_parent": parent,
                 "seed": seed,
             })),
-            pixels,
+            pixels: Arc::new(pixels),
             texture,
             seed: seed.into(),
         }
@@ -8950,7 +8997,7 @@ mod workspace_tests {
             .push(fixture_thumbnail(&ctx, 22, None));
         app.bind_workspace_editor(&ctx);
         app.exposure = 1.5;
-        tx.send(Ok((fixture_thumbnail(&ctx, 33, None).pixels, 33)))
+        tx.send(Ok((fixture_thumbnail(&ctx, 33, None).pixels.as_ref().clone(), 33)))
             .unwrap();
         app.poll_open_projects(&ctx);
         assert_eq!(app.active_tab, other);
@@ -9007,7 +9054,7 @@ mod workspace_tests {
             std::env::temp_dir().join(format!("pixelforge-photo-owner-{}", std::process::id()));
         std::fs::create_dir_all(&work_dir).unwrap();
         let ai_path = work_dir.join("result.png");
-        let pixels = fixture_thumbnail(&ctx, 91, None).pixels;
+        let pixels = fixture_thumbnail(&ctx, 91, None).pixels.as_ref().clone();
         pixels.save(&ai_path).unwrap();
         tx.send(Ok(ai_upscale::UpscaleResult {
             work_dir,
@@ -9307,11 +9354,90 @@ mod workspace_tests {
     }
 
     #[test]
+    fn studio_export_formats_decode_and_jpeg_converts_rgba_to_rgb() {
+        let pixels = image::RgbaImage::from_pixel(3, 2, image::Rgba([100, 40, 80, 127]));
+        for format in ExportFormat::ALL {
+            let bytes = format.encode(pixels.clone()).unwrap();
+            let decoded = image::load_from_memory(&bytes).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (3, 2));
+            if matches!(format, ExportFormat::Jpeg) {
+                assert_eq!(&bytes[..2], &[0xff, 0xd8]);
+                assert_eq!(decoded.color(), image::ColorType::Rgb8);
+            } else {
+                assert_eq!(decoded.into_rgba8(), pixels);
+            }
+        }
+    }
+
+    #[test]
+    fn batch_exports_selected_or_all_versions_and_preserves_existing_files() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.generation_gallery = (1..=3)
+            .map(|seed| fixture_thumbnail(&ctx, seed, None))
+            .collect();
+        app.thumbnail_selection = vec![2, 0];
+        app.bind_workspace_editor(&ctx);
+        app.exposure = 1.0;
+        app.capture_workspace_editor();
+
+        let format = ExportFormat::Jpeg;
+        assert_eq!(app.studio_batch_images(false, format).len(), 3);
+        let images = app.studio_batch_images(true, format);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].editor.global.exposure, 1.0);
+        assert!(Arc::ptr_eq(
+            &images[0].pixels,
+            &app.generation_gallery[0].pixels
+        ));
+        let first = images[0].filename.clone();
+        let second = images[1].filename.clone();
+
+        let folder =
+            std::env::temp_dir().join(format!("pixelforge-batch-export-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(&first), b"existing file").unwrap();
+        let mut progress = Vec::new();
+        write_studio_batch(&folder, images, format, |fraction| progress.push(fraction)).unwrap();
+        assert_eq!(progress, [0.5, 1.0]);
+        assert_eq!(
+            std::fs::read(folder.join(&first)).unwrap(),
+            b"existing file"
+        );
+        let suffixed = format!("{}_001.jpg", first.trim_end_matches(".jpg"));
+        for filename in [&suffixed, &second] {
+            let output = folder.join(filename);
+            let decoded = image::open(&output).unwrap();
+            assert_eq!((decoded.width(), decoded.height()), (2, 1));
+            std::fs::remove_file(output).unwrap();
+        }
+        std::fs::remove_file(folder.join(first)).unwrap();
+        std::fs::remove_dir(folder).unwrap();
+    }
+
+    #[test]
+    fn completed_batch_reports_count_without_a_disconnection_error() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let tx = app.begin_export();
+        tx.send(ExportEvent::Finished {
+            result: Ok(PathBuf::from("exports")),
+            count: 3,
+        })
+        .unwrap();
+        drop(tx);
+        app.poll_export(&ctx);
+        assert_eq!(app.status, "Exported 3 images to exports");
+        assert_eq!(app.export_result, Some(true));
+        assert!(!app.exporting);
+    }
+
+    #[test]
     fn imports_and_new_batches_use_the_destination_but_edits_follow_their_source() {
         let ctx = egui::Context::default();
         let mut app = PixelForge::default();
         app.create_thumbnail_group("Originals".into(), &[]);
-        app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 10, None).pixels);
+        app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 10, None).pixels.as_ref().clone());
         assert_eq!(app.generation_gallery[0].group, Some(0));
 
         app.create_thumbnail_group("New work".into(), &[]);
@@ -9326,12 +9452,12 @@ mod workspace_tests {
         let (tx, rx) = std::sync::mpsc::channel();
         app.generation_rx = Some(rx);
         app.thumbnail_destination = None;
-        tx.send(Ok((fixture_thumbnail(&ctx, 20, None).pixels, 20)))
+        tx.send(Ok((fixture_thumbnail(&ctx, 20, None).pixels.as_ref().clone(), 20)))
             .unwrap();
         app.poll_generation(&ctx);
         assert_eq!(app.generation_gallery[2].group, Some(1));
 
-        app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 30, None).pixels);
+        app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 30, None).pixels.as_ref().clone());
         app.thumbnail_destination = Some(1);
         let mut edit = fixture_thumbnail(&ctx, 31, Some(3));
         edit.group = app.thumbnail_destination;
@@ -9630,7 +9756,7 @@ mod workspace_tests {
         assert_ne!(app.active_tab, origin);
         assert!(cancel.load(std::sync::atomic::Ordering::Relaxed));
         assert!(
-            tx.send(Ok((fixture_thumbnail(&ctx, 1, None).pixels, 1)))
+            tx.send(Ok((fixture_thumbnail(&ctx, 1, None).pixels.as_ref().clone(), 1)))
                 .is_err()
         );
         app.poll_open_projects(&ctx);
