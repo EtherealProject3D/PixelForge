@@ -246,6 +246,11 @@ fn model_guide(keyword: &str) -> Option<Guide> {
             "score_9, score_8_up, score_7_up, solo, 1girl, adult woman, looking at viewer, upper body, green jacket, outdoors, soft morning light, realistic",
             "For a photographic look, try excluding illustration or cartoon if those styles appear.",
         ),
+        "ponydiffusionv6xl" => (
+            "Start with Pony score tags, then describe the subject, pose, framing, and medium with comma-separated tags.",
+            "score_9, score_8_up, score_7_up, solo, red fox, snowy pine forest, sunset, watercolor",
+            "Add short exclusions for details or styles you want to avoid.",
+        ),
         "cyberrealisticxl" => (
             "Describe the person and framing, then add a setting, light direction, and photographic details such as depth of field.",
             "Waist-up photograph of a carpenter in a woodshop, warm window light from the left, natural skin texture, softly blurred tools in the background.",
@@ -271,7 +276,7 @@ fn model_guide(keyword: &str) -> Option<Guide> {
             "A ceramic cup sits on a worn kitchen table beside a rain-streaked window. Cool daylight catches the glaze in a close-up photograph.",
             "",
         ),
-        "fluxklein4b" => (
+        "fluxklein4b" | "flux1-dev" => (
             "Describe the image in natural language. Put the subject and action first, then specify the setting, framing, and style.",
             "A cyclist in a yellow raincoat rides through a quiet city intersection at dusk. Frame the scene from street level with reflections across the wet pavement.",
             "",
@@ -282,10 +287,10 @@ fn model_guide(keyword: &str) -> Option<Guide> {
         structure,
         example,
         negative,
-        danbooru: keyword == "cyberrealisticpony",
+        danbooru: matches!(keyword, "cyberrealisticpony" | "ponydiffusionv6xl"),
         assist_profile: match keyword {
-            "cyberrealisticpony" => Profile::Pony,
-            "cyberrealistic_zit" | "fluxklein4b" => Profile::NaturalLanguage,
+            "cyberrealisticpony" | "ponydiffusionv6xl" => Profile::Pony,
+            "cyberrealistic_zit" | "fluxklein4b" | "flux1-dev" => Profile::NaturalLanguage,
             _ => Profile::General,
         },
     })

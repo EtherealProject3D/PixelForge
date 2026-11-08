@@ -1,4 +1,4 @@
-//! Shared curated model-library installer for SDXL checkpoints and Qwen bundles.
+//! Shared installer for curated ComfyUI checkpoints and model bundles.
 use std::{fs::{self, OpenOptions}, io::{Read, Write}, path::{Path, PathBuf}, sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}}, time::Duration};
 
 pub struct ModelFile {
@@ -23,7 +23,9 @@ impl Model {
     pub fn show_compatibility(&self, ui: &mut egui::Ui) {
         let disk_gb = self.files.iter().map(|file| file.size).sum::<u64>() as f64 / 1e9;
         ui.label(format!("Download size: about {disk_gb:.1} GB before reusing shared files."));
-        if self.bundle() {
+        if self.keyword == "flux1-dev" {
+            ui.label("Requires a ComfyUI backend with FLUX.1 and FP8 support. This checkpoint is distributed under the FLUX.1 Dev non-commercial license.");
+        } else if self.bundle() {
             let requirements = match self.keyword {
                 "fluxklein4b" => "Requires ComfyUI with the FLUX.2 text encoder and FP8 model loading.",
                 "qwen" | "qwen2511" => "Requires ComfyUI with Qwen image edit nodes, the Qwen text encoder, and FP8 model loading.",
@@ -50,6 +52,10 @@ pub const MODELS: &[Model] = &[
         files:&[ModelFile {directory:"checkpoints",file:"CyberRealisticXLPlay_V10.0_FP16.safetensors",url:"https://huggingface.co/cyberdelia/CyberRealisticXL/resolve/c04ae13b465d19763561a834d625a3d504a4f315/CyberRealisticXLPlay_V10.0_FP16.safetensors",size:6_938_041_288,min:6_938_041_288,max:6_938_041_288}]},
     Model {name:"CyberRealistic Pony v18 CoreShift fp16",keyword:"cyberrealisticpony",description:"Pony XL character realism; 30+ steps, CFG 5",page:"https://huggingface.co/cyberdelia/CyberRealisticPony",editing:false,generation:true,
         files:&[ModelFile {directory:"checkpoints",file:"CyberRealisticPony_V18.0_F16.safetensors",url:"https://huggingface.co/cyberdelia/CyberRealisticPony/resolve/main/CyberRealisticPony_V18.0_F16.safetensors",size:6940000000,min:5_000_000_000,max:12_000_000_000}]},
+    Model {name:"Pony Diffusion V6 XL",keyword:"ponydiffusionv6xl",description:"Pony XL illustration checkpoint. Start at 30 steps and CFG 5.",page:"https://huggingface.co/AstraliteHeart/pony-diffusion-v6",editing:false,generation:true,
+        files:&[ModelFile {directory:"checkpoints",file:"ponyDiffusionV6XL_v6StartWithThisOne.safetensors",url:"https://huggingface.co/AstraliteHeart/pony-diffusion-v6/resolve/5ec9c05863255568f1b59753e3838107befaa712/v6.safetensors",size:6_938_041_050,min:6_938_041_050,max:6_938_041_050}]},
+    Model {name:"FLUX.1 Dev (FP8)",keyword:"flux1-dev",description:"Single-file FLUX.1 checkpoint with optional local LoRA support.",page:"https://huggingface.co/Comfy-Org/Flux-1-Dev",editing:false,generation:true,
+        files:&[ModelFile {directory:"checkpoints",file:"flux1-dev-fp8.safetensors",url:"https://huggingface.co/Comfy-Org/Flux-1-Dev/resolve/57bb73f19aa46d9111f2b7eeab62c3c3d09f2ced/flux1-dev-fp8.safetensors",size:17_246_524_772,min:17_246_524_772,max:17_246_524_772}]},
     Model {name:"RealVisXL V5 fp16",keyword:"realvis",description:"Natural photography, portraits and landscapes",page:"https://huggingface.co/SG161222/RealVisXL_V5.0",editing:false,generation:true,
         files:&[ModelFile {directory:"checkpoints",file:"RealVisXL_V5.0_fp16.safetensors",url:"https://huggingface.co/SG161222/RealVisXL_V5.0/resolve/main/RealVisXL_V5.0_fp16.safetensors",size:6940000000,min:5_000_000_000,max:12_000_000_000}]},
     Model {name:"Juggernaut XL v9",keyword:"juggernaut",description:"Detailed photography and cinematic imagery",page:"https://huggingface.co/RunDiffusion/Juggernaut-XL-v9",editing:false,generation:true,
