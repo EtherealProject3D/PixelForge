@@ -90,6 +90,42 @@ pub fn installed_files(model:&Model,root:&Path) -> usize {
     model.files.iter().filter(|file|valid_file(file,&root.join(file.directory).join(file.file))).count()
 }
 
+fn partial_download_size(file: &ModelFile, destination: &Path) -> Result<u64, String> {
+    let partial = destination.with_extension("safetensors.part");
+    match fs::symlink_metadata(&partial) {
+        Ok(metadata)
+            if file.sha256.is_some() && metadata.is_file() && metadata.len() <= file.max =>
+        {
+            Ok(metadata.len())
+        }
+        Ok(_) => Err(format!(
+            "Cannot safely resume {}. Move the partial file aside before retrying.",
+            partial.display()
+        )),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+pub fn resumable_bytes(model: &Model, root: &Path) -> u64 {
+    model
+        .files
+        .iter()
+        .map(|file| {
+            let destination = root.join(file.directory).join(file.file);
+            if destination.exists() {
+                return if valid_file(file, &destination) {
+                    Ok(0)
+                } else {
+                    Err("Invalid existing model".into())
+                };
+            }
+            partial_download_size(file, &destination)
+        })
+        .sum::<Result<u64, String>>()
+        .unwrap_or(0)
+}
+
 pub fn install(index:usize,root:PathBuf,progress:Arc<AtomicU64>,total:Arc<AtomicU64>,cancel:Arc<AtomicBool>) -> Result<PathBuf,String> {
     install_model(MODELS.get(index).ok_or("Unknown model")?,root,progress,total,cancel)
 }
@@ -116,24 +152,7 @@ fn install_model(
                 ));
             }
         } else {
-            let partial = path.with_extension("safetensors.part");
-            let offset = match fs::symlink_metadata(&partial) {
-                Ok(metadata)
-                    if file.sha256.is_some()
-                        && metadata.is_file()
-                        && metadata.len() <= file.max =>
-                {
-                    metadata.len()
-                }
-                Ok(_) => {
-                    return Err(format!(
-                        "Cannot safely resume {}. Move the partial file aside before retrying.",
-                        partial.display()
-                    ));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
-                Err(error) => return Err(error.to_string()),
-            };
+            let offset = partial_download_size(file, &path)?;
             remaining += file.size.saturating_sub(offset);
             missing.push(file);
         }
@@ -639,6 +658,26 @@ mod tests {
             generation: true,
             files,
         }
+    }
+
+    #[test]
+    fn library_reports_only_partials_that_can_be_resumed() {
+        let root = fixture();
+        let folder = root.join("checkpoints");
+        fs::create_dir(&folder).unwrap();
+        let model = verified_fixture("http://127.0.0.1:1/no-request");
+        let destination = folder.join(model.files[0].file);
+        let partial = destination.with_extension("safetensors.part");
+        assert_eq!(resumable_bytes(&model, &root), 0);
+        fs::write(&partial, b"da").unwrap();
+        assert_eq!(resumable_bytes(&model, &root), 2);
+        fs::write(&partial, b"too large").unwrap();
+        assert_eq!(resumable_bytes(&model, &root), 0);
+        fs::write(&partial, b"data").unwrap();
+        assert_eq!(resumable_bytes(&model, &root), 4);
+        fs::write(&destination, b"data").unwrap();
+        assert_eq!(resumable_bytes(&model, &root), 0);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

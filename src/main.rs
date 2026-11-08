@@ -1965,6 +1965,9 @@ impl PixelForge {
                     let present=self.install_folder.as_ref().map(|root|model_installer::installed_files(model,root)).unwrap_or(0);
                     let backend_model=(!model.bundle()).then(||self.generation_checkpoints.iter().find(|name|name.to_lowercase().contains(model.keyword)).cloned()).flatten();
                     let installed=present==model.files.len() || backend_model.is_some();
+                    let saved = if installed { 0 } else {
+                        self.install_folder.as_ref().map_or(0, |root| model_installer::resumable_bytes(model, root))
+                    };
                     ui.group(|ui| {
                         // Use the whole column instead of sizing each card to its text.
                         ui.set_width(ui.available_width());
@@ -1982,23 +1985,33 @@ impl PixelForge {
                                 self.edit_checkpoint=model.name.into();
                                 if model.name==ai_generation::QWEN_EDIT_2511 {self.qwen_steps=40;}
                             }
-                        } else if ui.add_enabled(self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new("Download & Install")).clicked() {
-                            let folder=self.install_folder.clone().or_else(||rfd::FileDialog::new().set_title("Select the ComfyUI models folder").pick_folder());
-                            if let Some(folder)=folder {
-                                let folder=if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder};
-                                self.install_folder=Some(folder.clone());
-                                self.install_cancel.store(false,std::sync::atomic::Ordering::Relaxed);
-                                self.install_progress.store(0,std::sync::atomic::Ordering::Relaxed);
-                                self.install_total.store(0,std::sync::atomic::Ordering::Relaxed);
-                                let progress=self.install_progress.clone();let total=self.install_total.clone();let cancel=self.install_cancel.clone();
-                                let (tx,rx)=std::sync::mpsc::channel();self.install_rx=Some(rx);
-                                self.install_model_index=Some(index);
-                                self.install_status=format!("Downloading {}…",model.name);
-                                let repaint=ui.ctx().clone();
-                                std::thread::spawn(move || {
-                                    let _=tx.send(model_installer::install(index,folder,progress,total,cancel));
-                                    repaint.request_repaint();
-                                });
+                        } else {
+                            let action = if saved > 0 { "Continue Download" } else { "Download & Install" };
+                            if saved > 0 && !(self.install_rx.is_some() && self.install_model_index == Some(index)) {
+                                crate::interaction::label(ui, format!("{:.2} GB already saved", saved as f64 / 1e9));
+                            }
+                            if ui.add_enabled(self.install_rx.is_none()&&!self.dependency_manager.busy(),egui::Button::new(action)).clicked() {
+                                let folder=self.install_folder.clone().or_else(||rfd::FileDialog::new().set_title("Select the ComfyUI models folder").pick_folder());
+                                if let Some(folder)=folder {
+                                    let folder=if folder.file_name().is_some_and(|n|n=="checkpoints") {folder.parent().unwrap_or(&folder).to_path_buf()} else {folder};
+                                    self.install_folder=Some(folder.clone());
+                                    self.install_cancel.store(false,std::sync::atomic::Ordering::Relaxed);
+                                    self.install_progress.store(0,std::sync::atomic::Ordering::Relaxed);
+                                    self.install_total.store(0,std::sync::atomic::Ordering::Relaxed);
+                                    let progress=self.install_progress.clone();let total=self.install_total.clone();let cancel=self.install_cancel.clone();
+                                    let (tx,rx)=std::sync::mpsc::channel();self.install_rx=Some(rx);
+                                    self.install_model_index=Some(index);
+                                    self.install_status = if saved > 0 {
+                                        format!("Continuing {}…", model.name)
+                                    } else {
+                                        format!("Downloading {}…", model.name)
+                                    };
+                                    let repaint=ui.ctx().clone();
+                                    std::thread::spawn(move || {
+                                        let _=tx.send(model_installer::install(index,folder,progress,total,cancel));
+                                        repaint.request_repaint();
+                                    });
+                                }
                             }
                         }
                         if present>0 || backend_model.is_some() {
