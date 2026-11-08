@@ -824,6 +824,7 @@ fn install_stage(
 
 pub struct Manager {
     pub open: bool,
+    pub diagnostics_open: bool,
     pub rows: Vec<Status>,
     pub message: String,
     pub transfer: Transfer,
@@ -841,6 +842,7 @@ impl Default for Manager {
     fn default() -> Self {
         Self {
             open: false,
+            diagnostics_open: false,
             rows: Vec::new(),
             message: String::new(),
             transfer: Transfer::default(),
@@ -949,31 +951,30 @@ impl Manager {
         Ok(())
     }
 
-    pub fn show(
+    pub fn show_diagnostics(
         &mut self,
         ctx: &egui::Context,
-        models: Option<PathBuf>,
-        known: Vec<String>,
         workspace_busy: bool,
-        show_optional_dependencies: impl FnOnce(&mut egui::Ui),
+        connection_status: &str,
+        can_connect: bool,
     ) -> bool {
-        if !self.open {
+        if !self.diagnostics_open {
             return false;
         }
-        let mut open = self.open;
-        let mut library = false;
-        let mut action = None;
-        let mut refresh = false;
-        egui::Window::new("Setup and Maintenance").collapsible(false).open(&mut open).default_width(650.0).default_height(740.0).default_pos(ctx.screen_rect().center()-egui::vec2(325.0,370.0)).resizable(true).vscroll(true)
-            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-            .show(ctx,|ui| {
-            ui.heading("PixelForge setup and maintenance");
-            crate::interaction::label(ui,"Install missing components here. Updates use separate folders and keep the previous installation for rollback. Your existing ComfyUI Desktop setup is left untouched.");
-            ui.horizontal_wrapped(|ui| {
-                if ui.add_enabled(!self.busy(),egui::Button::new("Refresh Status")).clicked() {refresh=true;}
-                if ui.button("Open Model Library").clicked() {library=true;}
-            });
-            ui.collapsing("GPU compatibility and backend selection", |ui| {
+        let mut open = self.diagnostics_open;
+        let mut connect = false;
+        egui::Window::new("Setup & Diagnostics")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(590.0)
+            .default_height(600.0)
+            .vscroll(true)
+            .show(ctx, |ui| {
+                if ui.add_enabled(can_connect && !self.busy() && !workspace_busy, egui::Button::new("Connect / Refresh Models")).clicked() {
+                    connect = true;
+                }
+                crate::interaction::label(ui, connection_status);
+                ui.separator();
                 if let Err(e)=self.backend.ui(ui,!self.busy()&&!workspace_busy) {self.message=e;}
                 if ui.add_enabled(!self.busy()&&!workspace_busy,egui::Button::new("Stop PixelForge-owned backend")).clicked() {
                     crate::ai_generation::stop_managed_backend();
@@ -1025,6 +1026,34 @@ impl Manager {
                     }
                 }
                 if let Some(path)=crate::profile::settings_root() {crate::interaction::label(ui,format!("Startup log: {}",path.join("backend.log").display()));}
+                crate::interaction::label(ui, &self.message);
+            });
+        self.diagnostics_open = open;
+        connect
+    }
+
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        models: Option<PathBuf>,
+        known: Vec<String>,
+        workspace_busy: bool,
+        show_optional_dependencies: impl FnOnce(&mut egui::Ui),
+    ) -> bool {
+        if !self.open {
+            return false;
+        }
+        let mut open = self.open;
+        let mut library = false;
+        let mut action = None;
+        let mut refresh = false;
+        egui::Window::new("Dependencies").collapsible(false).open(&mut open).default_width(650.0).default_height(740.0).default_pos(ctx.screen_rect().center()-egui::vec2(325.0,370.0)).resizable(true).vscroll(true)
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+            .show(ctx,|ui| {
+            crate::interaction::label(ui,"Install missing components here. Updates use separate folders and keep the previous installation for rollback. Your existing ComfyUI Desktop setup is left untouched.");
+            ui.horizontal_wrapped(|ui| {
+                if ui.add_enabled(!self.busy(),egui::Button::new("Refresh Status")).clicked() {refresh=true;}
+                if ui.button("Open Model Library").clicked() {library=true;}
             });
             crate::interaction::label(ui,"ComfyUI portable hardware (for an explicitly requested install / update):");
             let hardware=[("nvidia","NVIDIA RTX (recommended)"),("nvidia_cu126","GTX 10-series / older — CUDA 12.6, unverified"),("amd","AMD"),("intel","Intel")];

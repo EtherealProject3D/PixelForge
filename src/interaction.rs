@@ -615,6 +615,31 @@ fn record(ui: &Ui, id: Id, text: &str, state: &egui::text_edit::TextEditState) {
         });
     }
 }
+// egui 0.32 moves the insertion point on any pointer press, including a
+// secondary press. Restore the selection before opening the editor menu.
+pub fn secondary_selection(ui: &Ui, id: Id) -> Option<egui::text::CCursorRange> {
+    if !ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Secondary)) {
+        return None;
+    }
+    egui::text_edit::TextEditState::load(ui.ctx(), id)?
+        .cursor
+        .char_range()
+        .filter(|range| !range.is_empty())
+}
+
+pub fn restore_secondary_selection(
+    ui: &Ui,
+    output: &mut egui::text_edit::TextEditOutput,
+    selection: Option<egui::text::CCursorRange>,
+) {
+    if let Some(selection) = selection.filter(|_| output.response.contains_pointer()) {
+        output.state.cursor.set_char_range(Some(selection));
+        output.state.clone().store(ui.ctx(), output.response.id);
+        output.response.request_focus();
+        ui.ctx().request_repaint();
+    }
+}
+
 pub fn text_menu(
     ui: &Ui,
     response: &Response,
@@ -626,6 +651,7 @@ pub fn text_menu(
     response.context_menu(|ui| {
         let frame = ui.ctx().cumulative_frame_nr();
         ui.ctx().data_mut(|d| {
+            d.remove::<Readonly>(Id::new("pf_readonly"));
             d.insert_temp(
                 Id::new("pf_text_target"),
                 Target {
@@ -658,7 +684,10 @@ pub fn text_menu(
     });
 }
 pub fn singleline(ui: &mut Ui, text: &mut String) -> Response {
-    let output = egui::TextEdit::singleline(&mut *text).show(ui);
+    let id = ui.next_auto_id();
+    let selection = secondary_selection(ui, id);
+    let mut output = egui::TextEdit::singleline(&mut *text).id(id).show(ui);
+    restore_secondary_selection(ui, &mut output, selection);
     text_menu(ui, &output.response, text, &output.state, |_| {});
     output.response
 }

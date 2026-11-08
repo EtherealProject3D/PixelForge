@@ -15,6 +15,8 @@ pub struct Request {
     pub source: Option<image::RgbaImage>,
     pub denoise: f32,
     pub mask: Option<Vec<u8>>,
+    pub lora: Option<String>,
+    pub lora_strength: f32,
 }
 
 pub const QWEN_EDIT: &str = "Qwen-Image-Edit 2509 (FP8)";
@@ -32,7 +34,13 @@ const QWEN_VAE: &str = "qwen_image_vae.safetensors";
 
 pub fn is_qwen(model:&str)->bool {model==QWEN_EDIT || model==QWEN_EDIT_2511}
 pub fn is_instruction_model(model:&str)->bool {is_qwen(model)||model==FLUX_KLEIN}
-pub fn ignores_negative(model:&str)->bool {model==FLUX_KLEIN || model==Z_IMAGE}
+pub fn is_flux1_dev(model: &str) -> bool {
+    model.rsplit(['/', '\\']).next().is_some_and(|file| {
+        let file = file.to_ascii_lowercase();
+        file == "flux1-dev-fp8.safetensors" || file == "flux1-dev.safetensors"
+    })
+}
+pub fn ignores_negative(model:&str)->bool {model==FLUX_KLEIN || model==Z_IMAGE || is_flux1_dev(model)}
 
 fn z_image_workflow(prompt:&str,seed:u64,steps:u32,width:u32,height:u32)->Value {
     json!({
@@ -51,7 +59,7 @@ fn z_image_workflow(prompt:&str,seed:u64,steps:u32,width:u32,height:u32)->Value 
 
 fn validate_z_image_nodes(info:&Value)->Result<(),String> {
     for node in ["UNETLoader","CLIPLoader","VAELoader","EmptySD3LatentImage","ModelSamplingAuraFlow","ConditioningZeroOut","CLIPTextEncode","KSampler","VAEDecode","SaveImage"] {
-        if info.get(node).is_none() {return Err(format!("Z-Image Turbo needs ComfyUI node {node}. Update ComfyUI from Setup and Maintenance."));}
+        if info.get(node).is_none() {return Err(format!("Z-Image Turbo needs ComfyUI node {node}. Update ComfyUI from Setup > Dependencies."));}
     }
     for (node,input,value) in [("UNETLoader","unet_name",Z_IMAGE_UNET),("CLIPLoader","clip_name",FLUX_CLIP),("VAELoader","vae_name","ae.safetensors"),("CLIPLoader","type","lumina2"),("KSampler","sampler_name","res_multistep"),("KSampler","scheduler","simple")] {
         if !info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|name.as_str()==Some(value))) {
@@ -173,7 +181,7 @@ fn flux_workflow(filename:Option<&str>,prompt:&str,seed:u64,steps:u32,width:u32,
 fn validate_flux_nodes(info:&Value,editing:bool)->Result<(),String> {
     let mut required=vec!["UNETLoader","CLIPLoader","VAELoader","EmptyFlux2LatentImage","Flux2Scheduler","KSamplerSelect","RandomNoise","CFGGuider","SamplerCustomAdvanced","ConditioningZeroOut"];
     if editing {required.extend(["ReferenceLatent","ImageScaleToTotalPixels","GetImageSize","VAEEncode","LoadImage"]);}
-    for node in required {if info.get(node).is_none() {return Err(format!("FLUX Klein needs ComfyUI node {node}. Update ComfyUI from Setup and Maintenance before using this model."));}}
+    for node in required {if info.get(node).is_none() {return Err(format!("FLUX Klein needs ComfyUI node {node}. Update ComfyUI from Setup > Dependencies before using this model."));}}
     for (node,input,file,folder) in [("UNETLoader","unet_name",FLUX_UNET,"diffusion_models"),("CLIPLoader","clip_name",FLUX_CLIP,"text_encoders"),("VAELoader","vae_name",FLUX_VAE,"vae")] {
         if !info.pointer(&format!("/{node}/input/required/{input}/0")).and_then(Value::as_array).is_some_and(|names|names.iter().any(|name|name.as_str()==Some(file))) {
             return Err(format!("FLUX Klein file missing: models/{folder}/{file}. Install its bundle in Model Library and refresh ComfyUI."));
@@ -198,7 +206,7 @@ use std::sync::{Mutex, OnceLock};
 static MANAGED: OnceLock<Mutex<Option<Child>>> = OnceLock::new();
 fn managed() -> &'static Mutex<Option<Child>> { MANAGED.get_or_init(|| Mutex::new(None)) }
 
-pub const CPU_FALLBACK_HINT: &str = "Try with CPU in the Generate tab or select CPU in Setup and Maintenance.";
+pub const CPU_FALLBACK_HINT: &str = "Try with CPU in the Generate tab or select CPU in Setup > Setup & Diagnostics.";
 
 fn server_ready(processing: &str) -> Result<bool, String> {
     let stats = reqwest::blocking::Client::builder().no_proxy().timeout(Duration::from_secs(2)).build()
@@ -241,7 +249,7 @@ fn ensure_server_for(config: &crate::backend::Config) -> Result<(), String> {
             if runtime["cuda"].is_string() {
                 crate::compatibility::preflight(&runtime, &config.mode)?;
             } else if config.mode == "legacy" || config.mode == "modern" {
-                return Err("Selected NVIDIA backend has no CUDA runtime. Choose a matching package in Setup and Maintenance.".into());
+                return Err("Selected NVIDIA backend has no CUDA runtime. Choose a matching package in Setup > Setup & Diagnostics.".into());
             }
             if config.processing == "gpu" {
                 crate::compatibility::gpu_preflight(&runtime)?;
@@ -255,10 +263,11 @@ fn ensure_server_for(config: &crate::backend::Config) -> Result<(), String> {
         let settings = crate::profile::settings_root().ok_or("APPDATA unavailable")?;
         std::fs::create_dir_all(&settings).map_err(|e|e.to_string())?;
         let mut model_configs = Vec::new();
-        let models = crate::dependencies::root().join("models");
+        let models = crate::model_installer::chosen_models_folder()
+            .unwrap_or_else(crate::model_installer::recommended_models_folder);
         if models.is_dir() {
             let config = settings.join("extra-model-paths.yaml");
-            let yaml=serde_yaml::to_string(&serde_json::json!({"pixelforge":{"base_path":models,"checkpoints":"checkpoints","diffusion_models":"diffusion_models","text_encoders":"text_encoders","vae":"vae"}})).map_err(|e|e.to_string())?;
+            let yaml=serde_yaml::to_string(&serde_json::json!({"pixelforge":{"base_path":models,"checkpoints":"checkpoints","diffusion_models":"diffusion_models","text_encoders":"text_encoders","vae":"vae","loras":"loras"}})).map_err(|e|e.to_string())?;
             std::fs::write(&config,yaml).map_err(|e|e.to_string())?;
             model_configs.push(config);
         }
@@ -289,7 +298,7 @@ fn ensure_server_for(config: &crate::backend::Config) -> Result<(), String> {
             }
         }
     }
-    Err("ComfyUI did not become ready within 90 seconds. Inspect backend.log in the PixelForge profile and run GPU diagnostics in Setup and Maintenance.".into())
+    Err("ComfyUI did not become ready within 90 seconds. Inspect backend.log in the PixelForge profile and run GPU diagnostics in Setup > Setup & Diagnostics.".into())
 }
 
 pub fn stop_managed_backend() {
@@ -302,15 +311,61 @@ pub fn stop_managed_backend() {
 }
 
 
-pub fn checkpoints() -> Result<Vec<String>, String> {
+pub struct ModelCatalog {
+    pub checkpoints: Vec<String>,
+    pub loras: Vec<String>,
+}
+
+pub fn model_catalog() -> Result<ModelCatalog, String> {
     ensure_server()?;
-    let value: Value = client()?.get(format!("{BASE}/object_info/CheckpointLoaderSimple"))
-        .send().map_err(|e| format!("Cannot connect to local ComfyUI: {e}"))?
-        .error_for_status().map_err(|e| e.to_string())?
-        .json().map_err(|e| e.to_string())?;
-    let items = value.pointer("/CheckpointLoaderSimple/input/required/ckpt_name/0")
-        .and_then(Value::as_array).ok_or("ComfyUI did not return checkpoint names")?;
-    Ok(items.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+    let http = client()?;
+    let list = |node: &str, field: &str| -> Result<Vec<String>, String> {
+        let value: Value = http
+            .get(format!("{BASE}/object_info/{node}"))
+            .send()
+            .map_err(|e| format!("Cannot connect to local ComfyUI: {e}"))?
+            .error_for_status()
+            .map_err(|e| e.to_string())?
+            .json()
+            .map_err(|e| e.to_string())?;
+        let items = value
+            .pointer(&format!("/{node}/input/required/{field}/0"))
+            .and_then(Value::as_array)
+            .ok_or_else(|| format!("ComfyUI did not return {field} names"))?;
+        Ok(items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect())
+    };
+    Ok(ModelCatalog {
+        checkpoints: list("CheckpointLoaderSimple", "ckpt_name")?,
+        loras: list("LoraLoader", "lora_name").unwrap_or_default(),
+    })
+}
+
+fn configure_flux1_dev(workflow: &mut Value, request: &Request) {
+    workflow["4"]["class_type"] = json!("EmptySD3LatentImage");
+    workflow["5"]["inputs"]["cfg"] = json!(1.0);
+    workflow["5"]["inputs"]["scheduler"] = json!("simple");
+    workflow["11"] = json!({"class_type":"FluxGuidance","inputs":{
+        "conditioning":["2",0], "guidance": request.cfg
+    }});
+    workflow["12"] = json!({"class_type":"ConditioningZeroOut","inputs":{"conditioning":["2",0]}});
+    workflow["5"]["inputs"]["positive"] = json!(["11", 0]);
+    workflow["5"]["inputs"]["negative"] = json!(["12", 0]);
+    workflow
+        .as_object_mut()
+        .expect("workflow is an object")
+        .remove("3");
+    if let Some(lora) = &request.lora {
+        workflow["13"] = json!({"class_type":"LoraLoader","inputs":{
+            "model":["1",0], "clip":["1",1], "lora_name":lora,
+            "strength_model":request.lora_strength, "strength_clip":request.lora_strength
+        }});
+        workflow["2"]["inputs"]["clip"] = json!(["13", 1]);
+        workflow["5"]["inputs"]["model"] = json!(["13", 0]);
+    }
 }
 
 struct ProgressStop(Arc<AtomicBool>);
@@ -328,8 +383,79 @@ mod dimension_tests {
         for (w,h) in [(1023,576),(1024,250),(4097,1024)] {assert!(!super::valid_dimensions(w,h));}
     }
 }
-pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sync::atomic::AtomicU32>) -> Result<image::RgbaImage, String> {
-    ensure_server()?;
+// A local mask gets its own working canvas so a small correction retains detail.
+struct InpaintRegion {
+    original: image::RgbaImage,
+    x: u32,
+    y: u32,
+}
+
+fn prepare_inpaint(request: &mut Request) -> Result<Option<InpaintRegion>, String> {
+    let Some(mask) = request.mask.as_ref() else {
+        return Ok(None);
+    };
+    let source = request
+        .source
+        .as_ref()
+        .ok_or("Inpainting requires a source image")?;
+    let (width, height) = source.dimensions();
+    if mask.len() != width as usize * height as usize {
+        return Err("Inpainting mask dimensions do not match the source image".into());
+    }
+    let mask =
+        image::GrayImage::from_raw(width, height, mask.clone()).ok_or("Invalid inpainting mask")?;
+    let mut bounds = None;
+    for (x, y, _) in mask.enumerate_pixels().filter(|(_, _, pixel)| pixel[0] > 0) {
+        let [left, top, right, bottom] = bounds.unwrap_or([x, y, x + 1, y + 1]);
+        bounds = Some([left.min(x), top.min(y), right.max(x + 1), bottom.max(y + 1)]);
+    }
+    let [left, top, right, bottom] =
+        bounds.ok_or("Paint an area to edit before starting inpainting")?;
+
+    if is_instruction_model(&request.checkpoint) || request.checkpoint == Z_IMAGE {
+        return Ok(None); // Reference-based editors need the full source context.
+    }
+
+    let padding = ((right - left).max(bottom - top) / 4).max(32);
+    let crop_axis = |start: u32, end: u32, limit: u32| {
+        let size = (end - start)
+            .saturating_add(padding.saturating_mul(2))
+            .max(256)
+            .min(limit);
+        let start = start
+            .saturating_sub((size - (end - start)) / 2)
+            .min(limit - size);
+        (start, size)
+    };
+    let (x, crop_width) = crop_axis(left, right, width);
+    let (y, crop_height) = crop_axis(top, bottom, height);
+    if (crop_width, crop_height) == (width, height) {
+        return Ok(None);
+    }
+
+    let target = request.width.max(request.height).min(1024);
+    let scale = f64::from(target) / f64::from(crop_width.max(crop_height));
+    let dimension = |size| ((f64::from(size) * scale / 16.0).round() as u32 * 16).clamp(256, 1024);
+    request.width = dimension(crop_width);
+    request.height = dimension(crop_height);
+    let patch = image::imageops::crop_imm(source, x, y, crop_width, crop_height).to_image();
+    let original_source = request
+        .source
+        .replace(patch)
+        .expect("validated inpainting source");
+    request.mask = Some(
+        image::imageops::crop_imm(&mask, x, y, crop_width, crop_height)
+            .to_image()
+            .into_raw(),
+    );
+    Ok(Some(InpaintRegion {
+        original: original_source,
+        x,
+        y,
+    }))
+}
+
+pub fn generate(mut request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sync::atomic::AtomicU32>) -> Result<image::RgbaImage, String> {
     if request.prompt.trim().is_empty() { return Err("Enter a generation prompt".into()); }
     if request.checkpoint.trim().is_empty() { return Err("Select a local checkpoint".into()); }
     if !valid_dimensions(request.width,request.height) {
@@ -337,6 +463,8 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
     }
     if cancel.load(Ordering::Relaxed) { return Err("Generation cancelled".into()); }
     if !(1..=100).contains(&request.steps) {return Err("Steps must be between 1 and 100".into());}
+    let mut region = prepare_inpaint(&mut request)?;
+    ensure_server()?;
     let qwen = is_qwen(&request.checkpoint);
     let flux=request.checkpoint==FLUX_KLEIN;
     let z_image=request.checkpoint==Z_IMAGE;
@@ -366,6 +494,15 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
         "6": {"class_type":"VAEDecode","inputs":{"samples":["5",0],"vae":["1",2]}},
         "7": {"class_type":"SaveImage","inputs":{"filename_prefix":"PixelForge","images":["6",0]}}
     });
+    if is_flux1_dev(&request.checkpoint) {
+        configure_flux1_dev(&mut workflow, &request);
+    } else if request.checkpoint.rsplit(['/', '\\']).next().is_some_and(|file| {
+        file.eq_ignore_ascii_case("ponyDiffusionV6XL_v6StartWithThisOne.safetensors")
+    }) {
+        workflow["11"] = json!({"class_type":"CLIPSetLastLayer","inputs":{"clip":["1",1],"stop_at_clip_layer":-2}});
+        workflow["2"]["inputs"]["clip"] = json!(["11",0]);
+        workflow["3"]["inputs"]["clip"] = json!(["11",0]);
+    }
     if flux {workflow=flux_workflow(None,&request.prompt,request.seed,request.steps,request.width,request.height);}
     if z_image {workflow=z_image_workflow(&request.prompt,request.seed,request.steps,request.width,request.height);}
     let http = client()?;
@@ -381,11 +518,15 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
             }
             let original_mask = image::GrayImage::from_raw(source.width(),source.height(),mask.clone())
                 .ok_or("Invalid inpainting mask dimensions")?;
-            let resized_mask = image::imageops::resize(&original_mask,request.width,request.height,image::imageops::FilterType::Nearest);
-            // Qwen needs the intact reference image; its selection is composited locally.
+            // Keep the intact reference for instruction models. ComfyUI's inpaint
+            // encoder rounds its input mask, so send binary coverage there and
+            // retain the original soft mask for local compositing.
             if !qwen && !flux {
-                for (x,y,pixel) in resized.enumerate_pixels_mut() {
-                    pixel[3] = 255u8.saturating_sub(resized_mask.get_pixel(x,y)[0]);
+                let resized_mask = image::imageops::resize(
+                    &original_mask, request.width, request.height, image::imageops::FilterType::Triangle,
+                );
+                for (x, y, pixel) in resized.enumerate_pixels_mut() {
+                    pixel[3] = if resized_mask.get_pixel(x, y)[0] > 0 { 0 } else { 255 };
                 }
             }
         }
@@ -499,7 +640,12 @@ pub fn generate(request: Request, cancel: Arc<AtomicBool>, progress: Arc<std::sy
                         .bytes().map_err(|e| e.to_string())?;
                     let output = image::load_from_memory(&bytes).map(|img| img.to_rgba8())
                         .map_err(|e| format!("Cannot decode generated image: {e}"))?;
-                    return finish_edit(output, request.source.as_ref(), request.mask.as_deref());
+                    let edited = finish_edit(output, request.source.as_ref(), request.mask.as_deref())?;
+                    if let Some(mut region) = region.take() {
+                        image::imageops::replace(&mut region.original, &edited, i64::from(region.x), i64::from(region.y));
+                        return Ok(region.original);
+                    }
+                    return Ok(edited);
                 }
             }
             if job.get("outputs").is_some() { return Err("ComfyUI finished without a saved image".into()); }
@@ -630,6 +776,99 @@ mod local_model_tests {
 #[cfg(test)]
 mod selection_edit_tests {
     use super::*;
+    fn inpaint_fixture(checkpoint: &str) -> Request {
+        let mut source = image::RgbaImage::from_pixel(640, 384, image::Rgba([135, 185, 220, 255]));
+        let mut mask = vec![0; 640 * 384];
+        for y in 82..150 {
+            for x in 42..104 {
+                source.put_pixel(x, y, image::Rgba([225, 35, 25, 255]));
+                mask[y as usize * 640 + x as usize] = 255;
+            }
+        }
+        Request {
+            checkpoint: checkpoint.into(),
+            prompt: "A clean light blue painted surface, even color and natural daylight".into(),
+            negative: "red object, red patch".into(),
+            width: 640,
+            height: 384,
+            steps: 14,
+            cfg: 5.0,
+            seed: 42,
+            source: Some(source),
+            denoise: 0.95,
+            mask: Some(mask),
+            lora: None,
+            lora_strength: 1.0,
+        }
+    }
+
+    #[test]
+    fn small_inpaint_mask_gets_a_padded_crop_and_valid_working_dimensions() {
+        let mut request = inpaint_fixture("sd_xl_base_1.0.safetensors");
+        let region = prepare_inpaint(&mut request).unwrap().unwrap();
+        let patch = request.source.as_ref().unwrap();
+        assert_eq!(region.original.dimensions(), (640, 384));
+        assert_eq!(patch.dimensions(), (256, 256));
+        assert_eq!(
+            request
+                .mask
+                .as_ref()
+                .unwrap()
+                .iter()
+                .filter(|&&value| value > 0)
+                .count(),
+            62 * 68
+        );
+        assert!(valid_dimensions(request.width, request.height));
+        assert_eq!((request.width, request.height), (640, 640));
+
+        let mut reference_edit = inpaint_fixture(FLUX_KLEIN);
+        assert!(prepare_inpaint(&mut reference_edit).unwrap().is_none());
+        assert_eq!(reference_edit.source.unwrap().dimensions(), (640, 384));
+    }
+
+    #[test]
+    fn flux1_routes_local_lora_and_distilled_guidance_through_sampler() {
+        let mut request = inpaint_fixture("flux1-dev-fp8.safetensors");
+        request.cfg = 3.5;
+        request.lora = Some("style.safetensors".into());
+        request.lora_strength = 0.7;
+        let mut workflow = json!({"1":{},"2":{"inputs":{}},"3":{},"4":{},"5":{"inputs":{}}});
+        configure_flux1_dev(&mut workflow, &request);
+        assert_eq!(workflow["4"]["class_type"], "EmptySD3LatentImage");
+        assert_eq!(workflow["5"]["inputs"]["cfg"], 1.0);
+        assert_eq!(workflow["11"]["inputs"]["guidance"], 3.5);
+        assert_eq!(workflow["13"]["inputs"]["lora_name"], "style.safetensors");
+        assert_eq!(workflow["2"]["inputs"]["clip"], json!(["13", 1]));
+        assert_eq!(workflow["5"]["inputs"]["model"], json!(["13", 0]));
+        assert!(workflow.get("3").is_none());
+    }
+
+    #[test]
+    #[ignore = "Requires a local ComfyUI backend, an installed SDXL Base checkpoint, and GPU time"]
+    fn local_inpaint_preserves_every_pixel_outside_the_mask() {
+        let request = inpaint_fixture("sd_xl_base_1.0.safetensors");
+        let source = request.source.clone().unwrap();
+        let mask = request.mask.clone().unwrap();
+        let result = generate(
+            request,
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(std::sync::atomic::AtomicU32::new(0)),
+        );
+        stop_managed_backend();
+        let edited = result.unwrap();
+        assert_eq!(edited.dimensions(), source.dimensions());
+        let mut changed = 0;
+        for ((before, after), selected) in source.pixels().zip(edited.pixels()).zip(mask) {
+            if selected == 0 {
+                assert_eq!(before, after);
+            } else if before != after {
+                changed += 1;
+            }
+        }
+        assert!(changed > 100, "expected the selected object to change");
+    }
+
     #[test]
     fn selection_composites_exact_originals_and_feathered_edges_at_source_size() {
         let source=image::RgbaImage::from_pixel(3,1,image::Rgba([20,40,60,80]));

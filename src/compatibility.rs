@@ -135,7 +135,7 @@ pub fn gpu_preflight(value: &Value) -> Result<(), String> {
 
 pub fn preflight(value: &Value, mode: &str) -> Result<(), String> {
     if !value["available"].as_bool().unwrap_or(false) {
-        return Err("CUDA unavailable in the selected Python runtime. Check NVIDIA driver and choose a matching ComfyUI package in Setup and Maintenance. No packages were changed.".into());
+        return Err("CUDA unavailable in the selected Python runtime. Check NVIDIA driver and choose a matching ComfyUI package in Setup > Dependencies. No packages were changed.".into());
     }
     let device = selected_device(value).ok_or("No selected CUDA device reported")?;
     let cap = (
@@ -148,10 +148,10 @@ pub fn preflight(value: &Value, mode: &str) -> Result<(), String> {
         return Err("Legacy backend is for GTX 10-series and older GPUs. Select Auto / Modern for RTX hardware; existing packages were preserved.".into());
     }
     if mode == "modern" && legacy(cap) {
-        return Err("This GPU needs the legacy CUDA 12.6 ComfyUI package. Choose Legacy in Setup and Maintenance. Actual GTX 1080 generation remains unverified.".into());
+        return Err("This GPU needs the legacy CUDA 12.6 ComfyUI package. Choose Legacy in Setup > Setup & Diagnostics. Actual GTX 1080 generation remains unverified.".into());
     }
     if legacy(cap) && value["cuda"].as_str() != Some("12.6") {
-        return Err("GTX 10-series needs a compatible CUDA 12.6 PyTorch build. Register a separate legacy ComfyUI portable folder in Setup and Maintenance. Do not upgrade your working environment in place.".into());
+        return Err("GTX 10-series needs a compatible CUDA 12.6 PyTorch build. Register a separate legacy ComfyUI portable folder in Setup > Setup & Diagnostics. Do not upgrade your working environment in place.".into());
     }
     if value["kernel_test"].as_str() != Some("passed") {
         return Err(actionable(
@@ -175,16 +175,16 @@ pub fn actionable(raw: &str) -> String {
         || lower.contains("invalid device function")
         || lower.contains("not compatible with the current pytorch")
     {
-        "GPU architecture is unsupported by this PyTorch build. Open Setup and Maintenance and run diagnostics. GTX 10-series needs a separate legacy CUDA 12.6 backend; RTX uses the modern backend."
+        "GPU architecture is unsupported by this PyTorch build. Open Setup > Setup & Diagnostics and run diagnostics. GTX 10-series needs a separate legacy CUDA 12.6 backend; RTX uses the modern backend."
     } else if lower.contains("driver") || lower.contains("cuda initialization") {
-        "CUDA driver initialization failed. Update the NVIDIA driver from NVIDIA, restart Windows, and recheck Setup and Maintenance. The CUDA version reported by nvidia-smi is the driver limit, not the installed PyTorch runtime."
+        "CUDA driver initialization failed. Update the NVIDIA driver from NVIDIA, restart Windows, and recheck Setup > Setup & Diagnostics. The CUDA version reported by nvidia-smi is the driver limit, not the installed PyTorch runtime."
     } else if lower.contains("fp8")
         || lower.contains("bfloat16")
         || lower.contains("not implemented for 'half'")
     {
         "This model or precision needs newer GPU features. On legacy GPUs try an FP32/FP16 checkpoint with the legacy backend; FP8 models may require modern hardware."
     } else {
-        "Open Setup and Maintenance > Run GPU diagnostics and inspect the backend log. Check model requirements and the selected ComfyUI environment."
+        "Open Setup > Setup & Diagnostics > Run GPU diagnostics and inspect the backend log. Check model requirements and the selected ComfyUI environment."
     };
     format!(
         "{advice}\nTechnical detail: {}",

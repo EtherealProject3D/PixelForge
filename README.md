@@ -6,9 +6,9 @@
 
 PixelForge is a Windows desktop image studio that brings local AI generation, conversational editing, photo restoration, and traditional adjustments into one workspace. Generate an image or import a photograph, make changes, and compare every result without switching between separate viewers.
 
-**Version 0.6.5 · Windows x64 · Rust + egui · Local ComfyUI**
+**Version 0.6.6 · Windows x64 · Rust + egui · Local ComfyUI**
 
-[Download v0.6.5](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.5) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
+[Download v0.6.6](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.6) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
 
 ## One workspace, from first image to final export
 
@@ -76,22 +76,22 @@ Downloads are substantial: SDXL checkpoints are typically about 7 GB each, FLUX 
 
 Models and third-party engines are downloaded separately and remain subject to their publishers' licenses and terms. No cloud generation service or API key is required by the bundled workflows.
 
-## What's new in v0.6.5
+## What's new in v0.6.6
 
-- Quick Assist and optional local AI Assist help revise drafts in the Prompt Guide scratchpad.
-- Model Library has its own window, model categories, and compatibility notes.
-- Setup and Maintenance adds Ollama setup, a CPU fallback for ComfyUI, and improved GPU diagnostics.
-- Floating windows remember their layouts, and PixelForge has a new blue and teal icon.
+- Open multiple projects with separate image histories and job results.
+- Organize the filmstrip with collapsible groups, drag and drop, and stable version names.
+- Batch export thumbnails, export JPEGs, and continue interrupted model downloads.
+- Find diagnostics, dependencies, and models in separate Setup windows.
 
-See the [v0.6.5 release notes](docs/RELEASE_NOTES_v0.6.5.md) for details.
+See the [v0.6.6 release notes](docs/RELEASE_NOTES_v0.6.6.md) for details.
 
 ## Getting started on Windows
 
-1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.5): **PixelForge-v0.6.5-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.5-windows-x64.zip** for portable use.
+1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.6): **PixelForge-v0.6.6-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.6-windows-x64.zip** for portable use.
 2. The installer defaults to **Program Files\Pixel Forge**, adds a Start menu entry, and offers an optional desktop shortcut. Alternatively, extract the portable ZIP into a writable folder and open **PixelForge.exe**. Neither download requires Rust.
-3. Open **Dependencies → Setup and Maintenance** to check and install the components needed by your tools. Missing required components highlight that menu item.
+3. Open **Setup → Dependencies** to check and install the components needed by your tools. Missing required components highlight that menu item.
 4. For generation/editing, connect a compatible local ComfyUI Desktop installation or install PixelForge's managed portable backend.
-5. In **Generate → Model Library**, choose the models folder if prompted, install a model, and refresh installed models.
+5. In **Setup → Model Library**, use the recommended folder or choose a custom one, install a model, and refresh installed models.
 6. Generate or import an image. Use **AI Tools** for restoration, **Changes prompt** for edits, and **Compare** to evaluate results.
 7. Save a `.pxf` project to retain history, or export a finished image.
 
@@ -104,7 +104,7 @@ See the [v0.6.5 release notes](docs/RELEASE_NOTES_v0.6.5.md) for details.
 
 ### Dependency management
 
-The **Setup and Maintenance** window reports status and offers supported install, update, and rollback actions for managed ComfyUI, Waifu2x, Real-ESRGAN, the NAFNet model, and its Python runtime. Managed updates use separate versions and activate after validation. GPU drivers remain vendor-managed; existing external installations are not replaced.
+The **Dependencies** window reports status and offers supported install, update, and rollback actions for managed ComfyUI, Waifu2x, Real-ESRGAN, the NAFNet model, and its Python runtime. Managed updates use separate versions and activate after validation. GPU drivers remain vendor-managed; existing external installations are not replaced.
 
 ### App updates (v0.6.1 onward)
 
@@ -123,7 +123,7 @@ Install Git, Rust stable, and Visual Studio C++ build tools with the Windows SDK
 ```powershell
 git clone https://github.com/EtherealProject3D/PixelForge.git
 Set-Location PixelForge
-git switch --detach v0.6.5
+git switch --detach v0.6.6
 cargo test --locked
 cargo run --locked --release
 ```
@@ -141,6 +141,6 @@ Close PixelForge before rebuilding its executable. Source checkouts include `scr
 
 ## Release notes and support
 
-Read [What's new in v0.6.5](docs/RELEASE_NOTES_v0.6.5.md) for the release overview and validation limits. Windows automated tests cover processing helpers, AI workflow construction, version/selection state, comparison interactions, and project round trips. GPU speed and restoration quality vary by model and photo.
+Read [What's new in v0.6.6](docs/RELEASE_NOTES_v0.6.6.md) for the release overview and validation limits. Windows automated tests cover processing helpers, AI workflow construction, version/selection state, comparison interactions, and project round trips. GPU speed and restoration quality vary by model and photo.
 
 When [reporting an issue](https://github.com/EtherealProject3D/PixelForge/issues), include the version, GPU, model, operation, image dimensions, and exact error. Only attach photos you are comfortable sharing publicly.

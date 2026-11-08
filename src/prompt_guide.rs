@@ -246,6 +246,11 @@ fn model_guide(keyword: &str) -> Option<Guide> {
             "score_9, score_8_up, score_7_up, solo, 1girl, adult woman, looking at viewer, upper body, green jacket, outdoors, soft morning light, realistic",
             "For a photographic look, try excluding illustration or cartoon if those styles appear.",
         ),
+        "ponydiffusionv6xl" => (
+            "Start with Pony score tags, then describe the subject, pose, framing, and medium with comma-separated tags.",
+            "score_9, score_8_up, score_7_up, solo, red fox, snowy pine forest, sunset, watercolor",
+            "Add short exclusions for details or styles you want to avoid.",
+        ),
         "cyberrealisticxl" => (
             "Describe the person and framing, then add a setting, light direction, and photographic details such as depth of field.",
             "Waist-up photograph of a carpenter in a woodshop, warm window light from the left, natural skin texture, softly blurred tools in the background.",
@@ -271,7 +276,7 @@ fn model_guide(keyword: &str) -> Option<Guide> {
             "A ceramic cup sits on a worn kitchen table beside a rain-streaked window. Cool daylight catches the glaze in a close-up photograph.",
             "",
         ),
-        "fluxklein4b" => (
+        "fluxklein4b" | "flux1-dev" => (
             "Describe the image in natural language. Put the subject and action first, then specify the setting, framing, and style.",
             "A cyclist in a yellow raincoat rides through a quiet city intersection at dusk. Frame the scene from street level with reflections across the wet pavement.",
             "",
@@ -282,10 +287,10 @@ fn model_guide(keyword: &str) -> Option<Guide> {
         structure,
         example,
         negative,
-        danbooru: keyword == "cyberrealisticpony",
+        danbooru: matches!(keyword, "cyberrealisticpony" | "ponydiffusionv6xl"),
         assist_profile: match keyword {
-            "cyberrealisticpony" => Profile::Pony,
-            "cyberrealistic_zit" | "fluxklein4b" => Profile::NaturalLanguage,
+            "cyberrealisticpony" | "ponydiffusionv6xl" => Profile::Pony,
+            "cyberrealistic_zit" | "fluxklein4b" | "flux1-dev" => Profile::NaturalLanguage,
             _ => Profile::General,
         },
     })
@@ -498,6 +503,7 @@ impl PromptGuide {
                             &mut self.assist,
                             &mut self.local_assist,
                             &mut self.scratchpad.draft,
+                            prompt,
                             checkpoint,
                             guide.assist_profile,
                         );
@@ -735,6 +741,7 @@ fn show_assist(
     preview: &mut Option<AssistPreview>,
     local: &mut LocalAssist,
     draft: &mut String,
+    initial_prompt: &mut String,
     checkpoint: &str,
     profile: Profile,
 ) {
@@ -826,7 +833,7 @@ fn show_assist(
         local.show_status(ui);
         if local.models.is_empty() && local.pending.is_none() {
             ui.small(
-                "Set up Ollama in Setup and Maintenance, then download a local text model in Model Library.",
+                "Set up Ollama in Setup > Dependencies, then download a local text model in Model Library.",
             );
         }
     }
@@ -854,13 +861,25 @@ fn show_assist(
 
     let close = ui
         .horizontal_wrapped(|ui| {
-            let can_apply =
-                !stale && !assist.suggestion.trim().is_empty() && assist.suggestion != *draft;
+            let ready = !stale && !assist.suggestion.trim().is_empty();
             let applied = ui
-                .add_enabled(can_apply, egui::Button::new("Apply to Scratchpad"))
+                .add_enabled(
+                    ready && assist.suggestion != *draft,
+                    egui::Button::new("Apply to Scratchpad"),
+                )
                 .clicked();
             if applied {
                 draft.clone_from(&assist.suggestion);
+            }
+            if ui
+                .add_enabled(
+                    ready && assist.suggestion != *initial_prompt,
+                    egui::Button::new("Transfer Suggestion to Initial Prompt"),
+                )
+                .on_hover_text("Replace Initial Prompt with this suggestion and keep the Scratchpad draft.")
+                .clicked()
+            {
+                initial_prompt.clone_from(&assist.suggestion);
             }
             ui.button("Close Preview").clicked() || applied
         })
@@ -1414,6 +1433,63 @@ fn show_guide(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assist_can_transfer_to_initial_prompt_without_changing_the_scratchpad() {
+        let ctx = egui::Context::default();
+        let mut draft = "Original scratchpad draft".to_owned();
+        let mut initial_prompt = "Previous initial prompt".to_owned();
+        let mut preview = Some(AssistPreview {
+            source: draft.clone(),
+            suggestion: "Edited AI suggestion".into(),
+        });
+        let mut local = LocalAssist::default();
+        let mut frame = |events| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        show_assist(
+                            ui,
+                            &mut preview,
+                            &mut local,
+                            &mut draft,
+                            &mut initial_prompt,
+                            "SDXL",
+                            Profile::General,
+                        );
+                    });
+                },
+            )
+        };
+        let output = frame(vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text)
+                    if text.galley.job.text == "Transfer Suggestion to Initial Prompt" =>
+                {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("transfer button");
+        let click = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(pos), click(true)]);
+        frame(vec![click(false)]);
+        assert_eq!(draft, "Original scratchpad draft");
+        assert_eq!(initial_prompt, "Edited AI suggestion");
+        assert_eq!(preview.unwrap().suggestion, "Edited AI suggestion");
+    }
 
     #[test]
     fn ai_assist_previews_only_results_for_the_current_draft_and_checkpoint() {
