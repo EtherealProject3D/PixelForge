@@ -2948,6 +2948,7 @@ dependencies = [
  "raw-window-handle",
  "reqwest",
  "rfd",
+ "ring",
  "serde_json",
  "serde_yaml",
  "tungstenite",
