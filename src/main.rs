@@ -580,6 +580,7 @@ struct PixelForge {
     thumbnail_groups: Vec<ThumbnailGroup>,
     ungrouped_collapsed: bool,
     ungrouped_position: usize,
+    thumbnail_destination: Option<usize>,
     group_dialog: Option<GroupDialog>,
     thumbnail_selection: Vec<usize>,
     thumbnail_strip_overflows: bool,
@@ -593,6 +594,7 @@ struct PixelForge {
     refinement_mask: Vec<u8>,
     refinement_mask_texture: Option<TextureHandle>,
     generation_batch_settings: Option<GenerationSettings>,
+    generation_batch_group: Option<usize>,
     generation_selected: usize,
     generation_compare: bool,
     generation_compare_position: f32,
@@ -810,6 +812,7 @@ impl Default for PixelForge {
             thumbnail_groups: Vec::new(),
             ungrouped_collapsed: false,
             ungrouped_position: 0,
+            thumbnail_destination: None,
             group_dialog: None,
             thumbnail_selection: Vec::new(),
             thumbnail_strip_overflows: false,
@@ -823,6 +826,7 @@ impl Default for PixelForge {
             refinement_mask: Vec::new(),
             refinement_mask_texture: None,
             generation_batch_settings: None,
+            generation_batch_group: None,
             generation_selected: 0,
             generation_compare: false,
             generation_compare_position: 0.5,
@@ -1253,6 +1257,7 @@ impl PixelForge {
         } else {
             format!("{}, {}", self.generation_prompt, style)
         };
+        self.generation_batch_group = self.thumbnail_destination;
         self.generation_batch_settings = Some(GenerationSettings {
             lora: lora.clone(),
             lora_strength: self.generation_lora_strength,
@@ -1422,7 +1427,7 @@ impl PixelForge {
                 self.blank_project = false;
                 self.append_thumbnail(GeneratedItem {
                     version_number: 0,
-                    group: None,
+                    group: self.generation_batch_group,
                     editor: studio::EditorState::default(),
                     settings,
                     pixels: image,
@@ -2213,6 +2218,7 @@ impl PixelForge {
         current_json["next_thumbnail_number"] = serde_json::json!(self.next_thumbnail_number);
         current_json["ungrouped_collapsed"] = serde_json::json!(self.ungrouped_collapsed);
         current_json["ungrouped_position"] = serde_json::json!(self.ungrouped_position);
+        current_json["thumbnail_destination"] = serde_json::json!(self.thumbnail_destination);
         current_json["thumbnail_groups"] =
             serde_json::json!(self.thumbnail_groups.iter()
             .map(|group| serde_json::json!({"name": group.name, "collapsed": group.collapsed}))
@@ -2273,6 +2279,10 @@ impl PixelForge {
         self.ungrouped_position = project.current["ungrouped_position"].as_u64()
             .and_then(|position| usize::try_from(position).ok())
             .unwrap_or(0).min(self.thumbnail_groups.len());
+        self.thumbnail_destination = project.current["thumbnail_destination"]
+            .as_u64()
+            .and_then(|index| usize::try_from(index).ok())
+            .filter(|&index| index < self.thumbnail_groups.len());
         let gallery: Vec<GeneratedItem> = project
             .items
             .into_iter()
@@ -2353,16 +2363,71 @@ impl PixelForge {
         );
         self.generation_selected=project.selected.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare_index=project.compare_index.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare=project.compare && self.generation_gallery.len()>1;self.generation_project_path=Some(path.to_path_buf());self.generation_workspace=true;self.generation_status=format!("Opened {} ({} images)",path.display(),self.generation_gallery.len());
     }
-    fn import_generation_images(&mut self,ctx:&egui::Context) {
-        if let Some(paths)=rfd::FileDialog::new().add_filter("Images",&["png","jpg","jpeg","webp"]).pick_files() {
-            let mut count=0;
-            for path in paths {match image::open(&path) {
-                Ok(image)=>{let pixels=image.to_rgba8();let size=[pixels.width() as usize,pixels.height() as usize];let texture=ctx.load_texture(format!("import_{}_{}",self.generation_gallery.len(),count),ColorImage::from_rgba_unmultiplied(size,pixels.as_raw()),TextureOptions::LINEAR);let settings=GenerationSettings {lora:None,lora_strength:1.0,prompt:String::new(),negative:String::new(),auto_negative:false,checkpoint:"Imported image".into(),style:0,ratio:0,custom_size:true,unlock_dimensions:true,resolution:0,dimension_step:32,width:pixels.width(),height:pixels.height(),steps:0,cfg:0.0,seed:0,refine_parent:None,refine_strength:None,refine_prompt:None,refine_masked:false};self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor: studio::EditorState::default(),settings,pixels,texture,seed:0});self.generation_selected=self.generation_gallery.len()-1;count+=1;},
-                Err(e)=>self.generation_status=format!("Import failed: {e}"),
-            }}
-            if count>0 {self.project_dirty=true;self.generation_status=format!("Imported {count} image(s)");}
+    fn import_generation_images(&mut self, ctx: &egui::Context) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("Images", &["png", "jpg", "jpeg", "webp"])
+            .pick_files()
+        {
+            let mut count = 0;
+            for path in paths {
+                match image::open(&path) {
+                    Ok(image) => {
+                        self.append_imported_thumbnail(ctx, image.to_rgba8());
+                        count += 1;
+                    }
+                    Err(error) => self.generation_status = format!("Import failed: {error}"),
+                }
+            }
+            if count > 0 {
+                self.generation_status = format!("Imported {count} image(s)");
+            }
         }
     }
+
+    fn append_imported_thumbnail(&mut self, ctx: &egui::Context, pixels: image::RgbaImage) {
+        let size = [pixels.width() as usize, pixels.height() as usize];
+        let texture = ctx.load_texture(
+            format!("import_{}", self.next_thumbnail_number),
+            ColorImage::from_rgba_unmultiplied(size, pixels.as_raw()),
+            TextureOptions::LINEAR,
+        );
+        let settings = GenerationSettings {
+            lora: None,
+            lora_strength: 1.0,
+            prompt: String::new(),
+            negative: String::new(),
+            auto_negative: false,
+            checkpoint: "Imported image".into(),
+            style: 0,
+            ratio: 0,
+            custom_size: true,
+            unlock_dimensions: true,
+            resolution: 0,
+            dimension_step: 32,
+            width: pixels.width(),
+            height: pixels.height(),
+            steps: 0,
+            cfg: 0.0,
+            seed: 0,
+            refine_parent: None,
+            refine_strength: None,
+            refine_prompt: None,
+            refine_masked: false,
+        };
+        self.append_thumbnail(GeneratedItem {
+            version_number: 0,
+            group: self.thumbnail_destination,
+            editor: studio::EditorState::default(),
+            settings,
+            pixels,
+            texture,
+            seed: 0,
+        });
+        self.blank_project = false;
+        self.generation_selected = self.generation_gallery.len() - 1;
+        self.project_dirty = true;
+    }
+
     fn export_generation_selected(&mut self,format:image::ImageFormat,ext:&str) {
         self.capture_workspace_editor();
         let Some(item)=self.generation_gallery.get(self.generation_selected) else {return};
@@ -2416,11 +2481,6 @@ impl PixelForge {
                 if ui.button("Cancel").clicked() { self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
             });
         }
-        let status = if self.generation_status.is_empty() {
-            &self.generation_models_status
-        } else {
-            &self.generation_status
-        };
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.small_button("+ New Group").clicked() {
@@ -2430,11 +2490,42 @@ impl PixelForge {
                         thumbnails: self.thumbnail_selection.clone(),
                     });
                 }
+                self.show_thumbnail_destination(ui);
+                let status = if self.generation_status.is_empty() {
+                    &self.generation_models_status
+                } else {
+                    &self.generation_status
+                };
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     crate::interaction::small(ui, status);
                 });
             });
         });
+    }
+
+    fn show_thumbnail_destination(&mut self, ui: &mut egui::Ui) {
+        let mut destination = self.thumbnail_destination;
+        let current = destination.map_or("Ungrouped", |index| {
+            self.thumbnail_groups[index].name.as_str()
+        });
+        egui::ComboBox::from_id_salt(("thumbnail_destination", self.active_tab))
+            .width(150.0)
+            .truncate()
+            .selected_text(format!("Add to: {current}"))
+            .show_ui(ui, |ui| {
+                for group in self.thumbnail_group_order() {
+                    let name = group.map_or("Ungrouped", |index| {
+                        self.thumbnail_groups[index].name.as_str()
+                    });
+                    ui.selectable_value(&mut destination, group, name);
+                }
+            })
+            .response
+            .on_hover_text("Destination for new generations and imported images");
+        if self.thumbnail_destination != destination {
+            self.thumbnail_destination = destination;
+            self.project_dirty = true;
+        }
     }
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
@@ -2857,6 +2948,13 @@ impl PixelForge {
     }
 
     fn append_thumbnail(&mut self, mut item: GeneratedItem) {
+        if let Some(parent) = item
+            .settings
+            .refine_parent
+            .and_then(|index| self.generation_gallery.get(index))
+        {
+            item.group = parent.group;
+        }
         item.version_number = self.next_thumbnail_number;
         self.next_thumbnail_number = self.next_thumbnail_number.saturating_add(1);
         self.generation_gallery.push(item);
@@ -2983,6 +3081,7 @@ impl PixelForge {
             collapsed: false,
         });
         self.move_thumbnails(thumbnails, Some(group), self.generation_gallery.len());
+        self.thumbnail_destination = Some(group);
         self.project_dirty = true;
     }
 
@@ -3025,6 +3124,7 @@ impl PixelForge {
         for item in &mut self.generation_gallery {
             item.group = item.group.map(|index| new_indices[index]);
         }
+        self.thumbnail_destination = self.thumbnail_destination.map(|index| new_indices[index]);
         match &mut self.group_dialog {
             Some(GroupDialog::Name {
                 group: Some(index), ..
@@ -3050,13 +3150,15 @@ impl PixelForge {
         }
         self.thumbnail_groups.remove(group);
         self.ungrouped_position -= usize::from(group < self.ungrouped_position);
+        let remap = |membership| match membership {
+            Some(index) if index == group => None,
+            Some(index) if index > group => Some(index - 1),
+            other => other,
+        };
         for item in &mut self.generation_gallery {
-            item.group = match item.group {
-                Some(index) if index == group => None,
-                Some(index) if index > group => Some(index - 1),
-                other => other,
-            };
+            item.group = remap(item.group);
         }
+        self.thumbnail_destination = remap(self.thumbnail_destination);
         self.project_dirty = true;
     }
 
@@ -3100,6 +3202,7 @@ impl PixelForge {
         if let Some(mut group) = named_group {
             group.collapsed = false;
             self.thumbnail_groups.push(group);
+            self.thumbnail_destination = Some(0);
         }
         self.blank_project = false;
         self.generation_workspace = true;
@@ -3331,6 +3434,8 @@ impl PixelForge {
                         let frame = {
                             let border = if preview.is_some_and(|(target, _)| target == group) {
                                 egui::Color32::LIGHT_BLUE
+                            } else if self.thumbnail_destination == group {
+                                ui.visuals().selection.stroke.color
                             } else {
                                 ui.visuals().widgets.noninteractive.fg_stroke.color
                             };
@@ -9199,6 +9304,62 @@ mod workspace_tests {
             assert_eq!(app.generation_gallery[0].group, Some(0));
             assert!(app.project_dirty);
         }
+    }
+
+    #[test]
+    fn imports_and_new_batches_use_the_destination_but_edits_follow_their_source() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.create_thumbnail_group("Originals".into(), &[]);
+        app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 10, None).pixels);
+        assert_eq!(app.generation_gallery[0].group, Some(0));
+
+        app.create_thumbnail_group("New work".into(), &[]);
+        app.bind_workspace_editor(&ctx);
+        app.keep_workspace_version(&ctx, "Manual edits");
+        assert_eq!(app.generation_gallery[1].group, Some(0));
+        assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(0));
+
+        app.generation_batch_group = app.thumbnail_destination;
+        app.generation_batch_settings = Some(fixture_thumbnail(&ctx, 20, None).settings);
+        app.generation_running = true;
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.generation_rx = Some(rx);
+        app.thumbnail_destination = None;
+        tx.send(Ok((fixture_thumbnail(&ctx, 20, None).pixels, 20)))
+            .unwrap();
+        app.poll_generation(&ctx);
+        assert_eq!(app.generation_gallery[2].group, Some(1));
+
+        app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 30, None).pixels);
+        app.thumbnail_destination = Some(1);
+        let mut edit = fixture_thumbnail(&ctx, 31, Some(3));
+        edit.group = app.thumbnail_destination;
+        app.append_thumbnail(edit);
+        assert_eq!(app.generation_gallery[4].group, None);
+    }
+
+    #[test]
+    fn saved_destination_follows_group_reordering_and_resets_on_deletion() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.create_thumbnail_group("Drafts".into(), &[]);
+        app.create_thumbnail_group("Finals".into(), &[]);
+        app.move_thumbnail_group(Some(1), 0);
+        assert_eq!(app.thumbnail_destination, Some(0));
+        assert_eq!(app.thumbnail_groups[0].name, "Finals");
+
+        let path =
+            std::env::temp_dir().join(format!("pixelforge-destination-{}.pxf", std::process::id()));
+        app.generation_project_path = Some(path.clone());
+        app.save_generation_project(false);
+        let mut reopened = PixelForge::default();
+        reopened.open_generation_project(&path, &ctx);
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(reopened.thumbnail_destination, Some(0));
+        assert_eq!(reopened.thumbnail_groups[0].name, "Finals");
+        reopened.delete_thumbnail_group(0, true);
+        assert_eq!(reopened.thumbnail_destination, None);
     }
 
     #[test]
