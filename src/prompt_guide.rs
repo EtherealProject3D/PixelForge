@@ -503,6 +503,7 @@ impl PromptGuide {
                             &mut self.assist,
                             &mut self.local_assist,
                             &mut self.scratchpad.draft,
+                            prompt,
                             checkpoint,
                             guide.assist_profile,
                         );
@@ -740,6 +741,7 @@ fn show_assist(
     preview: &mut Option<AssistPreview>,
     local: &mut LocalAssist,
     draft: &mut String,
+    initial_prompt: &mut String,
     checkpoint: &str,
     profile: Profile,
 ) {
@@ -859,13 +861,25 @@ fn show_assist(
 
     let close = ui
         .horizontal_wrapped(|ui| {
-            let can_apply =
-                !stale && !assist.suggestion.trim().is_empty() && assist.suggestion != *draft;
+            let ready = !stale && !assist.suggestion.trim().is_empty();
             let applied = ui
-                .add_enabled(can_apply, egui::Button::new("Apply to Scratchpad"))
+                .add_enabled(
+                    ready && assist.suggestion != *draft,
+                    egui::Button::new("Apply to Scratchpad"),
+                )
                 .clicked();
             if applied {
                 draft.clone_from(&assist.suggestion);
+            }
+            if ui
+                .add_enabled(
+                    ready && assist.suggestion != *initial_prompt,
+                    egui::Button::new("Transfer Suggestion to Initial Prompt"),
+                )
+                .on_hover_text("Replace Initial Prompt with this suggestion and keep the Scratchpad draft.")
+                .clicked()
+            {
+                initial_prompt.clone_from(&assist.suggestion);
             }
             ui.button("Close Preview").clicked() || applied
         })
@@ -1419,6 +1433,63 @@ fn show_guide(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assist_can_transfer_to_initial_prompt_without_changing_the_scratchpad() {
+        let ctx = egui::Context::default();
+        let mut draft = "Original scratchpad draft".to_owned();
+        let mut initial_prompt = "Previous initial prompt".to_owned();
+        let mut preview = Some(AssistPreview {
+            source: draft.clone(),
+            suggestion: "Edited AI suggestion".into(),
+        });
+        let mut local = LocalAssist::default();
+        let mut frame = |events| {
+            ctx.run(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| {
+                        show_assist(
+                            ui,
+                            &mut preview,
+                            &mut local,
+                            &mut draft,
+                            &mut initial_prompt,
+                            "SDXL",
+                            Profile::General,
+                        );
+                    });
+                },
+            )
+        };
+        let output = frame(vec![]);
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text)
+                    if text.galley.job.text == "Transfer Suggestion to Initial Prompt" =>
+                {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("transfer button");
+        let click = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(pos), click(true)]);
+        frame(vec![click(false)]);
+        assert_eq!(draft, "Original scratchpad draft");
+        assert_eq!(initial_prompt, "Edited AI suggestion");
+        assert_eq!(preview.unwrap().suggestion, "Edited AI suggestion");
+    }
 
     #[test]
     fn ai_assist_previews_only_results_for_the_current_draft_and_checkpoint() {
