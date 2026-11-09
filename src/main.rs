@@ -3132,7 +3132,7 @@ impl PixelForge {
         if collapsed {
             ui.painter().rect_filled(square, 0.0, color);
         } else {
-            ui.painter().rect_stroke(square, 0.0, egui::Stroke::new(1.0, color), egui::StrokeKind::Inside);
+            ui.painter().rect_stroke(square, 0.0, egui::Stroke::new(1.0_f32, color), egui::StrokeKind::Inside);
         }
         button
     }
