@@ -2671,26 +2671,12 @@ impl PixelForge {
                 if ui.button("Cancel").clicked() { self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
             });
         }
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("+ New Group").clicked() {
-                    self.group_dialog = Some(GroupDialog::Name {
-                        group: None,
-                        name: String::new(),
-                        thumbnails: self.thumbnail_selection.clone(),
-                    });
-                }
-                self.show_thumbnail_destination(ui);
-                let status = if self.generation_status.is_empty() {
-                    &self.generation_models_status
-                } else {
-                    &self.generation_status
-                };
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    crate::interaction::small(ui, status);
-                });
-            });
-        });
+        let status = if self.generation_status.is_empty() {
+            &self.generation_models_status
+        } else {
+            &self.generation_status
+        };
+        crate::interaction::small(ui, status);
     }
 
     fn selected_thumbnail_group(&self) -> Option<Option<usize>> {
@@ -2710,31 +2696,6 @@ impl PixelForge {
     fn thumbnail_group_for(&self, source: Option<usize>) -> Option<usize> {
         self.selected_thumbnail_group()
             .unwrap_or_else(|| source.and_then(|index| self.generation_gallery.get(index)?.group))
-    }
-
-    fn show_thumbnail_destination(&mut self, ui: &mut egui::Ui) {
-        let mut destination = self.selected_thumbnail_group();
-        let current = match destination {
-            None => "No group selected",
-            Some(None) => "Ungrouped",
-            Some(Some(index)) => self.thumbnail_groups[index].name.as_str(),
-        };
-        egui::ComboBox::from_id_salt(("thumbnail_destination", self.active_tab))
-            .width(150.0)
-            .truncate()
-            .selected_text(current)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut destination, None, "No group selected");
-                for group in self.thumbnail_group_order() {
-                    let name = group.map_or("Ungrouped", |index| {
-                        self.thumbnail_groups[index].name.as_str()
-                    });
-                    ui.selectable_value(&mut destination, Some(group), name);
-                }
-            })
-            .response
-            .on_hover_text("Click a group header to select it. Press Escape to clear the selection.");
-        self.select_thumbnail_group(destination);
     }
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
@@ -2895,11 +2856,9 @@ impl PixelForge {
                 crate::interaction::strong(ui, "Image Studio");
             }
             crate::interaction::label(ui, "Import an image, or choose Generate to create one.");
-            if !self.thumbnail_groups.is_empty() {
-                let spacer = (ui.available_height() - self.workspace_filmstrip_height(ui)).max(0.0);
-                ui.add_space(spacer);
-                self.show_workspace_filmstrip(ui);
-            }
+            let spacer = (ui.available_height() - self.workspace_filmstrip_height(ui)).max(0.0);
+            ui.add_space(spacer);
+            self.show_workspace_filmstrip(ui);
             return;
         }
         self.bind_workspace_editor(ui.ctx());
@@ -3642,6 +3601,12 @@ impl PixelForge {
             })
             .max_height(self.workspace_filmstrip_height(ui))
             .show(ui, |ui| {
+                // Register the background before the group and thumbnail controls.
+                let background = ui.interact(
+                    ui.clip_rect(),
+                    ui.id().with("filmstrip_background"),
+                    egui::Sense::click(),
+                );
                 ui.horizontal_top(|ui| {
                     for (position, group) in self.thumbnail_group_order().into_iter().enumerate() {
                         if position > 0 {
@@ -3881,6 +3846,16 @@ impl PixelForge {
                             };
                             hovered_drop = Some((group, before));
                         }
+                    }
+                });
+                background.context_menu(|ui| {
+                    if ui.add_enabled(!busy, egui::Button::new("New Group…")).clicked() {
+                        self.group_dialog = Some(GroupDialog::Name {
+                            group: None,
+                            name: String::new(),
+                            thumbnails: Vec::new(),
+                        });
+                        ui.close();
                     }
                 });
             });
@@ -9262,16 +9237,14 @@ mod workspace_tests {
     }
 
     #[test]
-    fn new_group_stays_in_the_footer_and_grouped_captions_fit_near_it() {
+    fn blank_filmstrip_menu_creates_an_empty_group_and_footer_buttons_are_absent() {
         let ctx = egui::Context::default();
         let mut app = PixelForge::default();
-        let frame = |app: &mut PixelForge| {
+        let frame = |app: &mut PixelForge, events| {
             ctx.run(
                 egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(800.0, 640.0),
-                    )),
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 640.0))),
+                    events,
                     ..Default::default()
                 },
                 |ctx| {
@@ -9283,51 +9256,37 @@ mod workspace_tests {
                 },
             )
         };
-        let label = |output: &egui::FullOutput, value: &str| {
-            output
-                .shapes
-                .iter()
-                .rev()
-                .find_map(|shape| match &shape.shape {
-                    egui::Shape::Text(text) if text.galley.job.text == value => Some((
-                        text.pos,
-                        text.pos.y + text.galley.size().y,
-                        shape.clip_rect.bottom(),
-                    )),
-                    _ => None,
-                })
-                .unwrap_or_else(|| {
-                    let painted: Vec<_> = output
-                        .shapes
-                        .iter()
-                        .filter_map(|shape| match &shape.shape {
-                            egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    panic!("Expected {value:?} in {painted:?}");
-                })
+        let button = |pos, pressed, button| egui::Event::PointerButton {
+            pos, pressed, button, modifiers: egui::Modifiers::NONE,
         };
-        frame(&mut app); // Let the bottom panel settle to its minimum height.
-        let empty = frame(&mut app);
-        let (empty_button, _, _) = label(&empty, "+ New Group");
-        app.thumbnail_groups.push(ThumbnailGroup {
-            name: "Drafts".into(),
-            collapsed: false,
-        });
-        let mut thumbnail = fixture_thumbnail(&ctx, 1, None);
-        thumbnail.group = Some(0);
-        app.generation_gallery.push(thumbnail);
-        let populated = frame(&mut app);
-        let (populated_button, _, _) = label(&populated, "+ New Group");
-        assert_eq!(empty_button, populated_button);
-        let (_, caption_bottom, clip_bottom) = label(&populated, "Version 1");
-        assert!(caption_bottom <= clip_bottom + 1.0);
-        let gap = populated_button.y - caption_bottom;
-        assert!(
-            gap < 25.0,
-            "Unexpected {gap:.1}-point gap after the caption"
-        );
+        let text = |output: &egui::FullOutput, value: &str| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == value => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+        };
+        frame(&mut app, vec![]);
+        let output = frame(&mut app, vec![]);
+        assert!(text(&output, "+ New Group").is_none());
+        assert!(text(&output, "No group selected").is_none());
+        let blank = Pos2::new(500.0, text(&output, "Ungrouped (0)").unwrap().y + 25.0);
+        frame(&mut app, vec![
+            egui::Event::PointerMoved(blank),
+            button(blank, true, egui::PointerButton::Secondary),
+        ]);
+        frame(&mut app, vec![button(blank, false, egui::PointerButton::Secondary)]);
+        let output = frame(&mut app, vec![]);
+        let item = text(&output, "New Group…").expect("blank filmstrip menu");
+        frame(&mut app, vec![
+            egui::Event::PointerMoved(item),
+            button(item, true, egui::PointerButton::Primary),
+        ]);
+        frame(&mut app, vec![button(item, false, egui::PointerButton::Primary)]);
+        assert!(matches!(app.group_dialog, Some(GroupDialog::Name {
+            group: None, ref name, ref thumbnails,
+        }) if name.is_empty() && thumbnails.is_empty()));
     }
 
     #[test]
