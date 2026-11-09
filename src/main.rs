@@ -4472,6 +4472,36 @@ impl PixelForge {
             });
     }
 
+    fn can_save_project(&self) -> bool {
+        (self.generation_workspace || self.original_pixels.is_some()) && !self.exporting
+    }
+
+    fn handle_save_shortcut(&mut self, ctx: &egui::Context) {
+        let save = ctx.input_mut(|input| {
+            let mut save = false;
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key: egui::Key::S,
+                    pressed: true,
+                    repeat,
+                    modifiers,
+                    ..
+                } = event
+                    && modifiers.matches_exact(egui::Modifiers::CTRL)
+                {
+                    save |= !repeat;
+                    false
+                } else {
+                    true
+                }
+            });
+            save
+        });
+        if save && self.can_save_project() {
+            self.save_project(false);
+        }
+    }
+
     fn save_project(&mut self, save_as: bool) {
         // Exit confirmation must use the same project and existing path as File > Save.
         if self.generation_workspace {
@@ -7997,6 +8027,8 @@ impl eframe::App for PixelForge {
         self.dependency_manager.poll(ctx,self.install_folder.clone(),self.generation_checkpoints.clone());
         self.ensure_workspace(ctx);
 
+        self.handle_save_shortcut(ctx);
+
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             let bar=ui.available_rect_before_wrap();
             let title=ui.painter().layout_no_wrap("Pixel Forge".into(),egui::TextStyle::Button.resolve(ui.style()),ui.visuals().text_color());
@@ -8023,14 +8055,14 @@ impl eframe::App for PixelForge {
 
                     ui.separator();
 
-                    let can_save = (self.generation_workspace || self.original_pixels.is_some()) && !self.exporting;
+                    let can_save = self.can_save_project();
 
                     if ui
-                        .add_enabled(can_save, egui::Button::new("Save Project"))
+                        .add_enabled(can_save, egui::Button::new("Save Project").shortcut_text("Ctrl+S"))
                         .clicked()
                     {
                         ui.close();
-                        if self.generation_workspace {self.save_generation_project(false);} else {self.save_project(false);}
+                        self.save_project(false);
                     }
 
                     if ui
@@ -8038,7 +8070,7 @@ impl eframe::App for PixelForge {
                         .clicked()
                     {
                         ui.close();
-                        if self.generation_workspace {self.save_generation_project(true);} else {self.save_project(true);}
+                        self.save_project(true);
                     }
 
                     ui.separator();
@@ -8780,6 +8812,38 @@ mod workspace_tests {
             std::fs::remove_file(path).unwrap();
         }
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn ctrl_s_saves_only_the_active_project() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.project_dirty = true;
+        app.create_blank_project_tab();
+        app.generation_gallery.push(fixture_thumbnail(&ctx, 42, None));
+        let path = std::env::temp_dir().join(format!("pixelforge-ctrl-s-{}.pxf", std::process::id()));
+        app.generation_project_path = Some(path.clone());
+        app.project_dirty = true;
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::S,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            assert!(app.interaction.begin_frame(ctx).is_empty());
+            app.handle_save_shortcut(ctx);
+        });
+
+        assert!(!app.project_dirty);
+        assert!(app.inactive_tabs[0].1.project_dirty);
+        assert_eq!(generation_project::load(&path).unwrap().items[0].seed, 42);
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
