@@ -678,6 +678,8 @@ struct PixelForge {
     group_dialog: Option<GroupDialog>,
     thumbnail_selection: Vec<usize>,
     thumbnail_strip_overflows: bool,
+    thumbnail_strip_hidden: bool,
+    tools_sidebar_hidden: bool,
     thumbnail_drop_preview: Option<(Option<usize>, usize)>,
     generation_project_path: Option<PathBuf>,
     refinement_source: Option<usize>,
@@ -912,6 +914,8 @@ impl Default for PixelForge {
             group_dialog: None,
             thumbnail_selection: Vec::new(),
             thumbnail_strip_overflows: false,
+            thumbnail_strip_hidden: false,
+            tools_sidebar_hidden: false,
             thumbnail_drop_preview: None,
             generation_project_path: None,
             refinement_source: None,
@@ -2856,7 +2860,7 @@ impl PixelForge {
                 crate::interaction::strong(ui, "Image Studio");
             }
             crate::interaction::label(ui, "Import an image, or choose Generate to create one.");
-            let spacer = (ui.available_height() - self.workspace_filmstrip_height(ui)).max(0.0);
+            let spacer = (ui.available_height() - self.filmstrip_reserved_height(ui)).max(0.0);
             ui.add_space(spacer);
             self.show_workspace_filmstrip(ui);
             return;
@@ -2924,7 +2928,7 @@ impl PixelForge {
         if self.crop.is_some() {
             let size = egui::vec2(
                 available.x,
-                (available.y - self.workspace_filmstrip_height(ui)).max(1.0),
+                (available.y - self.filmstrip_reserved_height(ui)).max(1.0),
             );
             if let Some(texture) = self.processed_texture.as_ref().or(self.texture.as_ref()) {
                 let texture = texture.id();
@@ -2944,7 +2948,7 @@ impl PixelForge {
             self.divider_dragging = false;
             let size = egui::vec2(
                 available.x,
-                (available.y - self.workspace_filmstrip_height(ui)).max(1.0),
+                (available.y - self.filmstrip_reserved_height(ui)).max(1.0),
             );
             let fit = (size.x / self.image_size[0].max(1) as f32)
                 .min(size.y / self.image_size[1].max(1) as f32);
@@ -2962,7 +2966,7 @@ impl PixelForge {
             return;
         }
         // Reserve only the filmstrip; image uses all remaining canvas space.
-        let viewer_height = (available.y - self.workspace_filmstrip_height(ui)).max(1.0);
+        let viewer_height = (available.y - self.filmstrip_reserved_height(ui)).max(1.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::click_and_drag(),
@@ -3094,6 +3098,75 @@ impl PixelForge {
             ui.painter().rect_stroke(square, 0.0, egui::Stroke::new(1.0_f32, color), egui::StrokeKind::Inside);
         }
         button
+    }
+
+    const PANEL_HANDLE_SIZE: f32 = 16.0;
+
+    fn filmstrip_reserved_height(&self, ui: &egui::Ui) -> f32 {
+        Self::PANEL_HANDLE_SIZE + ui.spacing().item_spacing.y
+            + if self.thumbnail_strip_hidden {
+                0.0
+            } else {
+                self.workspace_filmstrip_height(ui)
+            }
+    }
+
+    fn panel_handle(
+        ui: &mut egui::Ui,
+        divider: Rect,
+        horizontal: bool,
+        hidden: bool,
+        action: &str,
+    ) -> egui::Response {
+        let center = divider.center();
+        let (line, size, along, outward) = if horizontal {
+            (
+                [egui::pos2(divider.left(), center.y), egui::pos2(divider.right(), center.y)],
+                egui::vec2(42.0_f32.min(divider.width()), Self::PANEL_HANDLE_SIZE),
+                Vec2::X,
+                Vec2::Y,
+            )
+        } else {
+            (
+                [egui::pos2(center.x, divider.top()), egui::pos2(center.x, divider.bottom())],
+                egui::vec2(Self::PANEL_HANDLE_SIZE, 42.0_f32.min(divider.height())),
+                Vec2::Y,
+                Vec2::X,
+            )
+        };
+        let handle = Rect::from_center_size(center, size);
+        let response = ui
+            .interact(handle, ui.id().with("panel_handle"), Sense::click())
+            .on_hover_text(action)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), action)
+        });
+        let painter = ui.painter();
+        let style = ui.style().interact(&response);
+        painter.line_segment(line, ui.visuals().widgets.inactive.bg_stroke);
+        painter.rect(handle, 4.0, style.bg_fill, style.bg_stroke, egui::StrokeKind::Inside);
+        let direction = if hidden { -outward } else { outward };
+        let tip = center + direction * 2.5;
+        for end in [center - direction * 2.5 - along * 4.0, center - direction * 2.5 + along * 4.0] {
+            painter.line_segment([end, tip], style.fg_stroke);
+        }
+        response
+    }
+
+    fn show_tools_sidebar_handle(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("tools_sidebar_handle")
+            .exact_width(Self::PANEL_HANDLE_SIZE)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(theme::CANVAS))
+            .show(ctx, |ui| {
+                let action = if self.tools_sidebar_hidden { "Show sidebar" } else { "Hide sidebar" };
+                if Self::panel_handle(ui, ui.max_rect(), false, self.tools_sidebar_hidden, action).clicked() {
+                    self.tools_sidebar_hidden = !self.tools_sidebar_hidden;
+                    ctx.request_repaint();
+                }
+            });
     }
 
     fn workspace_filmstrip_height(&self, ui: &egui::Ui) -> f32 {
@@ -3547,6 +3620,19 @@ impl PixelForge {
         if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
             self.select_thumbnail_group(None);
         }
+        let hidden = self.thumbnail_strip_hidden;
+        let (divider, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), Self::PANEL_HANDLE_SIZE),
+            Sense::hover(),
+        );
+        let action = if hidden { "Show thumbnails" } else { "Hide thumbnails" };
+        if Self::panel_handle(ui, divider, true, hidden, action).clicked() {
+            self.thumbnail_strip_hidden = !hidden;
+            ui.ctx().request_repaint();
+        }
+        if hidden {
+            return;
+        }
         self.capture_workspace_editor();
         let mut remove_version = None;
         let mut rename_version = None;
@@ -3602,8 +3688,10 @@ impl PixelForge {
             .max_height(self.workspace_filmstrip_height(ui))
             .show(ui, |ui| {
                 // Register the background before the group and thumbnail controls.
+                let mut background_rect = ui.clip_rect();
+                background_rect.min.y = background_rect.top().max(ui.max_rect().top());
                 let background = ui.interact(
-                    ui.clip_rect(),
+                    background_rect,
                     ui.id().with("filmstrip_background"),
                     egui::Sense::click(),
                 );
@@ -4000,6 +4088,8 @@ impl PixelForge {
         std::mem::swap(&mut self.controls, &mut other.controls);
         std::mem::swap(&mut self.show_settings, &mut other.show_settings);
         std::mem::swap(&mut self.display, &mut other.display);
+        std::mem::swap(&mut self.thumbnail_strip_hidden, &mut other.thumbnail_strip_hidden);
+        std::mem::swap(&mut self.tools_sidebar_hidden, &mut other.tools_sidebar_hidden);
         std::mem::swap(&mut self.exit_allowed, &mut other.exit_allowed);
         std::mem::swap(&mut self.exit_confirmation, &mut other.exit_confirmation);
         std::mem::swap(&mut self.file_drops, &mut other.file_drops);
@@ -8062,10 +8152,12 @@ impl eframe::App for PixelForge {
             ui.painter().with_clip_rect(egui::Rect::from_min_max(egui::pos2(title_right+8.0,bar.top()),egui::pos2(controls_left,bar.top()+28.0))).text(egui::pos2(title_right+8.0,title_pos.y),egui::Align2::LEFT_TOP,version,egui::TextStyle::Small.resolve(ui.style()),ui.visuals().weak_text_color());
         });
         self.show_project_tabs(ctx);
-        egui::SidePanel::right(egui::Id::new(("tools", self.active_tab)))
+        let sidebar_hidden = self.tools_sidebar_hidden;
+        let sidebar = egui::SidePanel::right(egui::Id::new(("tools", self.active_tab)))
             .exact_width(360.0)
             .resizable(false)
-            .show(ctx, |ui| {
+            .show_separator_line(false);
+        let tools = |ui: &mut egui::Ui| {
                 // Sidebar sections and model controls are larger than canvas/status text.
                 for text in [egui::TextStyle::Body,egui::TextStyle::Button,egui::TextStyle::Small,egui::TextStyle::Monospace] {
                     if let Some(font)=ui.style_mut().text_styles.get_mut(&text) {font.size=16.0;}
@@ -8316,7 +8408,11 @@ impl eframe::App for PixelForge {
                         egui::pos2(sidebar_right, sidebar_scroll.inner_rect.bottom()));
                     ui.painter().rect_filled(track, 5, ui.visuals().extreme_bg_color);
                 }
-            });
+            };
+        if !sidebar_hidden {
+            sidebar.show(ctx, tools);
+        }
+        self.show_tools_sidebar_handle(ctx);
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             if self.generation_workspace {
                 ui.set_min_height(60.0);
@@ -9234,6 +9330,67 @@ mod workspace_tests {
         let portrait = PixelForge::thumbnail_image_size(egui::vec2(200.0, 300.0));
         assert!((portrait.y - (PixelForge::THUMBNAIL_HEIGHT - 6.0)).abs() < 0.01);
         assert!((portrait.y / portrait.x - 1.5).abs() < 0.001);
+    }
+
+    #[test]
+    fn workspace_handles_hide_and_restore_panels_and_follow_the_window_across_tabs() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let frame = |app: &mut PixelForge, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 640.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.show_tools_sidebar_handle(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| app.show_generation_workspace(ui));
+                },
+            )
+        };
+        let handle = |output: &egui::FullOutput, size| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if (rect.rect.size() - size).length() < 0.1 => {
+                    Some(rect.rect.center())
+                }
+                _ => None,
+            }).expect("panel handle")
+        };
+        let has_ungrouped = |output: &egui::FullOutput| {
+            output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.job.text == "Ungrouped (0)"))
+        };
+        let click = |app: &mut PixelForge, pos| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+            };
+            frame(app, vec![egui::Event::PointerMoved(pos), button(true)]);
+            frame(app, vec![button(false)]);
+            frame(app, vec![])
+        };
+        let output = frame(&mut app, vec![]);
+        assert!(has_ungrouped(&output));
+        let thumb_size = Vec2::new(42.0, PixelForge::PANEL_HANDLE_SIZE);
+        let open_handle = handle(&output, thumb_size);
+        let output = click(&mut app, open_handle);
+        assert!(app.thumbnail_strip_hidden);
+        assert!(!has_ungrouped(&output));
+        let restore_handle = handle(&output, thumb_size);
+        assert!(restore_handle.y > open_handle.y);
+
+        let side_size = Vec2::new(PixelForge::PANEL_HANDLE_SIZE, 42.0);
+        click(&mut app, handle(&output, side_size));
+        assert!(app.tools_sidebar_hidden);
+        app.create_blank_project_tab();
+        assert!(app.thumbnail_strip_hidden && app.tools_sidebar_hidden);
+
+        let output = frame(&mut app, vec![]);
+        let output = click(&mut app, handle(&output, thumb_size));
+        assert!(!app.thumbnail_strip_hidden);
+        assert!(has_ungrouped(&output));
+        click(&mut app, handle(&output, side_size));
+        assert!(!app.tools_sidebar_hidden);
     }
 
     #[test]
