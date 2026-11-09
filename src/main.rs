@@ -1217,7 +1217,7 @@ impl PixelForge {
             }
             queue.pop_front();
             if extension == "pxf" {
-                self.open_project_path(ctx, path);
+                self.open_project_path(ctx, &path);
             } else {
                 self.load_image_path(ctx, path);
             }
@@ -2364,10 +2364,21 @@ impl PixelForge {
             Err(e) => self.generation_status = format!("Save failed: {e}"),
         }
     }
-    fn open_generation_project(&mut self,path:&std::path::Path,ctx:&egui::Context) {
-        let project=match generation_project::load(path) {Ok(p)=>p,Err(e)=>{self.generation_status=format!("Open failed: {e}");return}};
+    fn open_generation_project(&mut self, path: &std::path::Path, ctx: &egui::Context) -> bool {
+        let project = match generation_project::load(path) {
+            Ok(project) => project,
+            Err(error) => {
+                self.generation_status = format!("Open failed: {error}");
+                return false;
+            }
+        };
         for item in &project.items {
-            if let Err(error)=studio::EditorState::from_json(&item.settings["editor"],item.pixels.width(),item.pixels.height()) {self.generation_status=format!("Open failed: {error}");return;}
+            if let Err(error) = studio::EditorState::from_json(
+                &item.settings["editor"], item.pixels.width(), item.pixels.height(),
+            ) {
+                self.generation_status = format!("Open failed: {error}");
+                return false;
+            }
         }
         self.create_project_tab();
         self.blank_project = false;
@@ -2475,6 +2486,7 @@ impl PixelForge {
                 .unwrap_or(1),
         );
         self.generation_selected=project.selected.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare_index=project.compare_index.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare=project.compare && self.generation_gallery.len()>1;self.generation_project_path=Some(path.to_path_buf());self.generation_workspace=true;self.generation_status=format!("Opened {} ({} images)",path.display(),self.generation_gallery.len());
+        true
     }
     fn import_generation_images(&mut self, ctx: &egui::Context) {
         if let Some(paths) = rfd::FileDialog::new()
@@ -3106,6 +3118,25 @@ impl PixelForge {
         size * (bounds.x / size.x).min(bounds.y / size.y)
     }
 
+    fn thumbnail_group_toggle(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
+        let height = ui.text_style_height(&egui::TextStyle::Button);
+        let action = if collapsed { "Expand group" } else { "Collapse group" };
+        let button = ui
+            .add(egui::Button::new("").small().min_size(egui::vec2(24.0, height)))
+            .on_hover_text(action);
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), action)
+        });
+        let color = ui.style().interact(&button).fg_stroke.color;
+        let square = Rect::from_center_size(button.rect.center(), Vec2::splat(9.0));
+        if collapsed {
+            ui.painter().rect_filled(square, 0.0, color);
+        } else {
+            ui.painter().rect_stroke(square, 0.0, egui::Stroke::new(1.0, color), egui::StrokeKind::Inside);
+        }
+        button
+    }
+
     fn workspace_filmstrip_height(&self, ui: &egui::Ui) -> f32 {
         let spacing = ui.spacing();
         let group_header =
@@ -3658,7 +3689,6 @@ impl PixelForge {
                                         (group.name.as_str(), group.collapsed)
                                     },
                                 );
-                                let arrow = if collapsed { "▸" } else { "▾" };
                                 let label = format!("{name} ({})", indices.len());
                                 let sense = if busy {
                                     egui::Sense::click()
@@ -3667,9 +3697,7 @@ impl PixelForge {
                                 };
                                 let (toggle, header) = ui
                                     .horizontal(|ui| {
-                                        let toggle = ui.small_button(arrow).on_hover_text(
-                                            if collapsed { "Expand group" } else { "Collapse group" },
-                                        );
+                                        let toggle = Self::thumbnail_group_toggle(ui, collapsed);
                                         let header = ui
                                             .add(egui::Button::new(&label).small().sense(sense)
                                                 .selected(self.selected_thumbnail_group() == Some(group)))
@@ -4491,26 +4519,58 @@ impl PixelForge {
     }
 
     fn open_project(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new().add_filter("PixelForge Project", &["pxf"]).pick_file() else {return};
-        self.open_project_path(ctx, path);
-    }
-
-    fn open_project_path(&mut self, ctx: &egui::Context, path: PathBuf) {
-        match generation_project::is_generation(&path) {
-            Ok(true) => {self.open_generation_project(&path,ctx);return;}
-            Ok(false) => {},
-            Err(e) => {self.status=format!("Project open failed: {e}");return;}
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("PixelForge Project", &["pxf"])
+            .pick_files()
+        {
+            self.open_project_paths(ctx, paths);
         }
-        self.open_editor_project_at(ctx, path);
     }
 
-    fn open_editor_project_at(&mut self, ctx: &egui::Context, path: PathBuf) {
+    fn open_project_paths(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        let multiple = paths.len() > 1;
+        let mut opened = 0;
+        let mut failed = Vec::new();
+        for path in paths {
+            if self.open_project_path(ctx, &path) {
+                opened += 1;
+            } else if multiple {
+                failed.push(
+                    path.file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        if multiple {
+            let mut message = format!("Opened {opened} project(s)");
+            if !failed.is_empty() {
+                message.push_str(&format!(". Could not open {}", failed.join(", ")));
+            }
+            self.status = message.clone();
+            self.generation_status = message;
+        }
+    }
+
+    fn open_project_path(&mut self, ctx: &egui::Context, path: &std::path::Path) -> bool {
+        match generation_project::is_generation(path) {
+            Ok(true) => self.open_generation_project(path, ctx),
+            Ok(false) => self.open_editor_project_at(ctx, path),
+            Err(error) => {
+                self.status = format!("Project open failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn open_editor_project_at(&mut self, ctx: &egui::Context, path: &std::path::Path) -> bool {
         // Load and validate before changing the current image.
-        let data = match project::load(&path) {
+        let data = match project::load(path) {
             Ok(data) => data,
             Err(err) => {
                 self.status = format!("Project open failed: {err}");
-                return;
+                return false;
             }
         };
 
@@ -4614,9 +4674,9 @@ impl PixelForge {
         self.selection_stroke_active = false;
         self.image_size = size;
         self.image_path = Some(PathBuf::from(data.image_name));
-        self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        self.file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-        self.project_path = Some(path.clone());
+        self.project_path = Some(path.to_path_buf());
         self.project_dirty = false;
 
         self.fit_pending = true;
@@ -4632,6 +4692,7 @@ impl PixelForge {
         self.refresh_selection_overlay(ctx);
 
         self.status = format!("Project opened: {}", path.display());
+        true
     }
     fn fit_image(&mut self, available: Vec2) {
         let w = self.image_size[0] as f32;
@@ -5718,6 +5779,20 @@ impl PixelForge {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
+    fn show_ai_result_strength(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        crate::interaction::label(ui, "AI Result Strength");
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 80.0).max(60.0);
+            if ui
+                .add_enabled(!self.ai_running, numeric::Slider::new(&mut self.ai_strength, 0.0..=1.0))
+                .changed()
+            {
+                self.refresh_ai_preview(ctx);
+            }
+        });
+        crate::interaction::label(ui, "Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
+    }
+
     fn show_ai_result(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         if !self.ai_show_result {
             return;
@@ -8129,38 +8204,7 @@ impl eframe::App for PixelForge {
 
                         } else {
                             self.show_photo_restoration(ui, ctx);
-                            ui.horizontal(|ui| {
-                                                            crate::interaction::label(ui,"AI Result Strength");
-
-                                                            ui.with_layout(
-                                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                                |ui| {
-                                                                    crate::interaction::label(ui,format!("{:.1}%", self.ai_strength * 100.0));
-                                                                },
-                                                            );
-                                                        });
-
-                                                        // egui Slider has its own internal width.
-                                                        // Set that width explicitly rather than
-                                                        // just enlarging its allocated rectangle.
-                                                        let old_slider_width = ui.spacing().slider_width;
-
-                                                        ui.spacing_mut().slider_width = (ui.available_width() - 20.0).max(80.0);
-
-                                                        if ui
-                                                            .add_enabled(!self.ai_running,
-                                                                numeric::Slider::new(&mut self.ai_strength, 0.0..=1.0)
-                                                                    .step_by(0.05)
-                                                                    .show_value(false),
-                                                            )
-                                                            .changed()
-                                                        {
-                                                            self.refresh_ai_preview(ctx);
-                                                        }
-
-                                                        ui.spacing_mut().slider_width = old_slider_width;
-
-                                                        crate::interaction::label(ui,"Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
+                            self.show_ai_result_strength(ui, ctx);
                             ui.separator();
                             theme::section(ui, "AI Upscaling");
                             ui.separator();
@@ -8629,6 +8673,76 @@ mod workspace_tests {
         assert_eq!(app.original_pixels.as_ref().unwrap().get_pixel(0,0)[0],100);
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn opening_multiple_projects_keeps_each_in_its_own_tab_and_reports_bad_files() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let original = app.active_tab;
+        app.project_dirty = true;
+        let root = std::env::temp_dir().join(format!("pixelforge-open-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = ["first.pxf", "unreadable.pxf", "last.pxf"].map(|name| root.join(name));
+        for (index, seed) in [(0, 12), (2, 34)] {
+            generation_project::save(&paths[index], &generation_project::GalleryProject {
+                items: vec![generation_project::GalleryImage {
+                    pixels: image::RgbaImage::from_pixel(2, 1, image::Rgba([seed, 0, 0, 255])),
+                    settings: serde_json::json!({}),
+                    seed: u64::from(seed),
+                }],
+                selected: 0, compare_index: 0, compare: false, current: serde_json::json!({}),
+            }).unwrap();
+        }
+        std::fs::write(&paths[1], b"invalid project").unwrap();
+
+        app.open_project_paths(&ctx, paths.to_vec());
+        assert_eq!(app.inactive_tabs.len(), 2);
+        assert_eq!(app.inactive_tabs[0].0, original);
+        assert!(app.inactive_tabs[0].1.project_dirty);
+        assert_eq!(app.inactive_tabs[1].1.generation_project_path.as_ref(), Some(&paths[0]));
+        assert_eq!(app.inactive_tabs[1].1.generation_gallery[0].seed, 12);
+        assert_eq!(app.generation_project_path.as_ref(), Some(&paths[2]));
+        assert_eq!(app.generation_gallery[0].seed, 34);
+        assert!(app.generation_status.contains("Opened 2 project(s)"));
+        assert!(app.generation_status.contains("unreadable.pxf"));
+
+        for path in paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn ai_result_strength_value_responds_to_mouse_wheel() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.ai_strength = 0.5;
+        let render = |app: &mut PixelForge, events| {
+            ctx.run(egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 400.0))),
+                events,
+                ..Default::default()
+            }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.show_ai_result_strength(ui, ctx));
+            })
+        };
+        let output = render(&mut app, vec![]);
+        let value = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == "50.0%" => {
+                Some(text.pos + text.galley.size() * 0.5)
+            }
+            _ => None,
+        }).expect("editable percentage");
+        render(&mut app, vec![
+            egui::Event::PointerMoved(value),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, 1.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        assert!((app.ai_strength - 0.51).abs() < 0.001, "{}", app.ai_strength);
+    }
+
     #[test]
     fn restoration_panel_renders_with_independent_prompt_and_model() {
         let ctx = egui::Context::default();
@@ -9588,13 +9702,27 @@ mod workspace_tests {
             modifiers: egui::Modifiers::NONE,
         };
         let output = frame(&mut app, vec![]);
-        let ungrouped = label(&output, "▾").unwrap();
+        let indicator = |output: &egui::FullOutput, filled: bool| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.size() == Vec2::splat(9.0)
+                        && (rect.fill != egui::Color32::TRANSPARENT) == filled =>
+                {
+                    Some(rect.rect.center())
+                }
+                _ => None,
+            })
+        };
+        let ungrouped = indicator(&output, false).unwrap();
         frame(
             &mut app,
             vec![egui::Event::PointerMoved(ungrouped), click(ungrouped, true)],
         );
         let output = frame(&mut app, vec![click(ungrouped, false)]);
         assert!(app.ungrouped_collapsed);
+        let output = frame(&mut app, vec![]);
+        assert_eq!(indicator(&output, true), Some(ungrouped));
+        assert!(label(&output, "Ungrouped (2)").is_some());
         assert!(label(&output, "Version 1").is_some());
         assert!(label(&output, "Version 2").is_none());
 
