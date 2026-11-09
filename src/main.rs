@@ -665,6 +665,7 @@ struct PixelForge {
     edit_checkpoint: String,
     conversation_draft: String,
     workspace_ai_parent: Option<usize>,
+    workspace_ai_group: Option<Option<usize>>,
     workspace_editor: Option<usize>,
     crop: Option<crop::Crop>,
     generation_gallery: Vec<GeneratedItem>,
@@ -673,6 +674,7 @@ struct PixelForge {
     ungrouped_collapsed: bool,
     ungrouped_position: usize,
     thumbnail_destination: Option<usize>,
+    thumbnail_ungrouped_selected: bool,
     group_dialog: Option<GroupDialog>,
     thumbnail_selection: Vec<usize>,
     thumbnail_strip_overflows: bool,
@@ -897,6 +899,7 @@ impl Default for PixelForge {
             edit_checkpoint: String::new(),
             conversation_draft: String::new(),
             workspace_ai_parent: None,
+            workspace_ai_group: None,
             workspace_editor: None,
             crop: None,
             generation_gallery: Vec::new(),
@@ -905,6 +908,7 @@ impl Default for PixelForge {
             ungrouped_collapsed: false,
             ungrouped_position: 0,
             thumbnail_destination: None,
+            thumbnail_ungrouped_selected: false,
             group_dialog: None,
             thumbnail_selection: Vec::new(),
             thumbnail_strip_overflows: false,
@@ -1349,7 +1353,7 @@ impl PixelForge {
         } else {
             format!("{}, {}", self.generation_prompt, style)
         };
-        self.generation_batch_group = self.thumbnail_destination;
+        self.generation_batch_group = self.thumbnail_group_for(self.refinement_source);
         self.generation_batch_settings = Some(GenerationSettings {
             lora: lora.clone(),
             lora_strength: self.generation_lora_strength,
@@ -1782,7 +1786,7 @@ impl PixelForge {
         settings.width=w;settings.height=h;settings.custom_size=true;
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("Crop at {x}, {y}: {w} × {h}"));
         let seed=item.seed;
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor,settings,pixels:Arc::new(pixels),texture,seed});
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:self.thumbnail_group_for(Some(parent)), editor,settings,pixels:Arc::new(pixels),texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.refinement_source=None;
@@ -1801,7 +1805,7 @@ impl PixelForge {
         settings.refine_prompt=Some(label.into());
         let texture=ctx.load_texture(format!("studio_snapshot_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
         let seed=item.seed;
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed});
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:self.thumbnail_group_for(settings.refine_parent), editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -1856,7 +1860,8 @@ impl PixelForge {
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("{label} · strength {:.0}%",self.ai_strength*100.0));
         settings.checkpoint=format!("AI Tools: {label}");settings.width=pixels.width();settings.height=pixels.height();settings.steps=0;settings.cfg=0.0;
         let texture=ctx.load_texture(format!("studio_ai_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed:0});
+        let group = self.workspace_ai_group.unwrap_or_else(|| self.thumbnail_group_for(Some(parent)));
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed:0});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -2324,6 +2329,7 @@ impl PixelForge {
         current_json["ungrouped_collapsed"] = serde_json::json!(self.ungrouped_collapsed);
         current_json["ungrouped_position"] = serde_json::json!(self.ungrouped_position);
         current_json["thumbnail_destination"] = serde_json::json!(self.thumbnail_destination);
+        current_json["thumbnail_ungrouped_selected"] = serde_json::json!(self.thumbnail_ungrouped_selected);
         current_json["thumbnail_groups"] =
             serde_json::json!(self.thumbnail_groups.iter()
             .map(|group| serde_json::json!({"name": group.name, "collapsed": group.collapsed}))
@@ -2388,6 +2394,8 @@ impl PixelForge {
             .as_u64()
             .and_then(|index| usize::try_from(index).ok())
             .filter(|&index| index < self.thumbnail_groups.len());
+        self.thumbnail_ungrouped_selected = self.thumbnail_destination.is_none()
+            && project.current["thumbnail_ungrouped_selected"].as_bool().unwrap_or(false);
         let gallery: Vec<GeneratedItem> = project
             .items
             .into_iter()
@@ -2673,29 +2681,48 @@ impl PixelForge {
         });
     }
 
+    fn selected_thumbnail_group(&self) -> Option<Option<usize>> {
+        self.thumbnail_destination
+            .map(Some)
+            .or_else(|| self.thumbnail_ungrouped_selected.then_some(None))
+    }
+
+    fn select_thumbnail_group(&mut self, selection: Option<Option<usize>>) {
+        if self.selected_thumbnail_group() != selection {
+            self.thumbnail_destination = selection.flatten();
+            self.thumbnail_ungrouped_selected = selection == Some(None);
+            self.project_dirty = true;
+        }
+    }
+
+    fn thumbnail_group_for(&self, source: Option<usize>) -> Option<usize> {
+        self.selected_thumbnail_group()
+            .unwrap_or_else(|| source.and_then(|index| self.generation_gallery.get(index)?.group))
+    }
+
     fn show_thumbnail_destination(&mut self, ui: &mut egui::Ui) {
-        let mut destination = self.thumbnail_destination;
-        let current = destination.map_or("Ungrouped", |index| {
-            self.thumbnail_groups[index].name.as_str()
-        });
+        let mut destination = self.selected_thumbnail_group();
+        let current = match destination {
+            None => "No group selected",
+            Some(None) => "Ungrouped",
+            Some(Some(index)) => self.thumbnail_groups[index].name.as_str(),
+        };
         egui::ComboBox::from_id_salt(("thumbnail_destination", self.active_tab))
             .width(150.0)
             .truncate()
-            .selected_text(format!("Add to: {current}"))
+            .selected_text(current)
             .show_ui(ui, |ui| {
+                ui.selectable_value(&mut destination, None, "No group selected");
                 for group in self.thumbnail_group_order() {
                     let name = group.map_or("Ungrouped", |index| {
                         self.thumbnail_groups[index].name.as_str()
                     });
-                    ui.selectable_value(&mut destination, group, name);
+                    ui.selectable_value(&mut destination, Some(group), name);
                 }
             })
             .response
-            .on_hover_text("Destination for new generations and imported images");
-        if self.thumbnail_destination != destination {
-            self.thumbnail_destination = destination;
-            self.project_dirty = true;
-        }
+            .on_hover_text("Click a group header to select it. Press Escape to clear the selection.");
+        self.select_thumbnail_group(destination);
     }
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
@@ -3118,13 +3145,6 @@ impl PixelForge {
     }
 
     fn append_thumbnail(&mut self, mut item: GeneratedItem) {
-        if let Some(parent) = item
-            .settings
-            .refine_parent
-            .and_then(|index| self.generation_gallery.get(index))
-        {
-            item.group = parent.group;
-        }
         item.version_number = self.next_thumbnail_number;
         self.next_thumbnail_number = self.next_thumbnail_number.saturating_add(1);
         self.generation_gallery.push(item);
@@ -3251,7 +3271,6 @@ impl PixelForge {
             collapsed: false,
         });
         self.move_thumbnails(thumbnails, Some(group), self.generation_gallery.len());
-        self.thumbnail_destination = Some(group);
         self.project_dirty = true;
     }
 
@@ -3295,6 +3314,9 @@ impl PixelForge {
             item.group = item.group.map(|index| new_indices[index]);
         }
         self.thumbnail_destination = self.thumbnail_destination.map(|index| new_indices[index]);
+        self.workspace_ai_group = self
+            .workspace_ai_group
+            .map(|group| group.map(|index| new_indices[index]));
         match &mut self.group_dialog {
             Some(GroupDialog::Name {
                 group: Some(index), ..
@@ -3329,6 +3351,7 @@ impl PixelForge {
             item.group = remap(item.group);
         }
         self.thumbnail_destination = remap(self.thumbnail_destination);
+        self.workspace_ai_group = self.workspace_ai_group.map(remap);
         self.project_dirty = true;
     }
 
@@ -3372,7 +3395,6 @@ impl PixelForge {
         if let Some(mut group) = named_group {
             group.collapsed = false;
             self.thumbnail_groups.push(group);
-            self.thumbnail_destination = Some(0);
         }
         self.blank_project = false;
         self.generation_workspace = true;
@@ -3532,6 +3554,9 @@ impl PixelForge {
     }
 
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.select_thumbnail_group(None);
+        }
         self.capture_workspace_editor();
         let mut remove_version = None;
         let mut rename_version = None;
@@ -3604,7 +3629,7 @@ impl PixelForge {
                         let frame = {
                             let border = if preview.is_some_and(|(target, _)| target == group) {
                                 egui::Color32::LIGHT_BLUE
-                            } else if self.thumbnail_destination == group {
+                            } else if self.selected_thumbnail_group() == Some(group) {
                                 ui.visuals().selection.stroke.color
                             } else {
                                 ui.visuals().widgets.noninteractive.fg_stroke.color
@@ -3634,10 +3659,24 @@ impl PixelForge {
                                     },
                                 );
                                 let arrow = if collapsed { "▸" } else { "▾" };
-                                let label = format!("{arrow} {name} ({})", indices.len());
-                                let sense = if busy { egui::Sense::click() } else { egui::Sense::click_and_drag() };
-                                let header = ui.add(egui::Button::new(&label).small().sense(sense))
-                                    .on_hover_text("Click to expand or collapse. Drag the header to reorder groups.");
+                                let label = format!("{name} ({})", indices.len());
+                                let sense = if busy {
+                                    egui::Sense::click()
+                                } else {
+                                    egui::Sense::click_and_drag()
+                                };
+                                let (toggle, header) = ui
+                                    .horizontal(|ui| {
+                                        let toggle = ui.small_button(arrow).on_hover_text(
+                                            if collapsed { "Expand group" } else { "Collapse group" },
+                                        );
+                                        let header = ui
+                                            .add(egui::Button::new(&label).small().sense(sense)
+                                                .selected(self.selected_thumbnail_group() == Some(group)))
+                                            .on_hover_text("Click to select this group. Drag to reorder groups.");
+                                        (toggle, header)
+                                    })
+                                    .inner;
                                 if !busy && header.drag_started_by(egui::PointerButton::Primary) {
                                     let origin = ui.input(|input| input.pointer.press_origin())
                                         .unwrap_or(header.rect.center());
@@ -3649,6 +3688,9 @@ impl PixelForge {
                                     });
                                 }
                                 if header.clicked() {
+                                    self.select_thumbnail_group(Some(group));
+                                }
+                                if toggle.clicked() {
                                     if let Some(index) = group {
                                         self.thumbnail_groups[index].collapsed = !collapsed;
                                     } else {
@@ -5331,6 +5373,7 @@ impl PixelForge {
         self.ai_cancel = cancel.clone();
         self.ai_rx = Some(rx);
         self.workspace_ai_parent=self.workspace_editor;
+        self.workspace_ai_group = Some(self.thumbnail_group_for(self.workspace_ai_parent));
         self.ai_running = true;
         self.ai_is_denoise = denoise;
         self.ai_restoration = restoration;
@@ -9057,6 +9100,10 @@ mod workspace_tests {
             .push(fixture_thumbnail(&ctx, 12, None));
         app.bind_workspace_editor(&ctx);
         app.workspace_ai_parent = Some(0);
+        app.create_thumbnail_group("Photo results".into(), &[]);
+        app.select_thumbnail_group(Some(Some(0)));
+        app.workspace_ai_group = Some(app.thumbnail_group_for(app.workspace_ai_parent));
+        app.select_thumbnail_group(None);
         app.ai_running = true;
         app.ai_strength = 1.0;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -9084,6 +9131,7 @@ mod workspace_tests {
         app.switch_project_tab(origin);
         assert_eq!(app.generation_gallery.len(), 2);
         assert_eq!(app.generation_gallery[1].pixels.get_pixel(0, 0)[0], 91);
+        assert_eq!(app.generation_gallery[1].group, Some(0));
         assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(0));
         assert_eq!(app.ai_variations.len(), 1);
     }
@@ -9446,17 +9494,19 @@ mod workspace_tests {
     }
 
     #[test]
-    fn imports_and_new_batches_use_the_destination_but_edits_follow_their_source() {
+    fn new_images_and_edits_use_the_selected_group_with_distinct_fallbacks() {
         let ctx = egui::Context::default();
         let mut app = PixelForge::default();
         app.create_thumbnail_group("Originals".into(), &[]);
+        app.select_thumbnail_group(Some(Some(0)));
         app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 10, None).pixels.as_ref().clone());
         assert_eq!(app.generation_gallery[0].group, Some(0));
 
         app.create_thumbnail_group("New work".into(), &[]);
+        app.select_thumbnail_group(Some(Some(1)));
         app.bind_workspace_editor(&ctx);
         app.keep_workspace_version(&ctx, "Manual edits");
-        assert_eq!(app.generation_gallery[1].group, Some(0));
+        assert_eq!(app.generation_gallery[1].group, Some(1));
         assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(0));
 
         app.generation_batch_group = app.thumbnail_destination;
@@ -9471,11 +9521,9 @@ mod workspace_tests {
         assert_eq!(app.generation_gallery[2].group, Some(1));
 
         app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 30, None).pixels.as_ref().clone());
-        app.thumbnail_destination = Some(1);
-        let mut edit = fixture_thumbnail(&ctx, 31, Some(3));
-        edit.group = app.thumbnail_destination;
-        app.append_thumbnail(edit);
-        assert_eq!(app.generation_gallery[4].group, None);
+        assert_eq!(app.thumbnail_group_for(Some(0)), Some(0));
+        app.select_thumbnail_group(Some(None));
+        assert_eq!(app.thumbnail_group_for(Some(0)), None);
     }
 
     #[test]
@@ -9484,6 +9532,7 @@ mod workspace_tests {
         let mut app = PixelForge::default();
         app.create_thumbnail_group("Drafts".into(), &[]);
         app.create_thumbnail_group("Finals".into(), &[]);
+        app.select_thumbnail_group(Some(Some(1)));
         app.move_thumbnail_group(Some(1), 0);
         assert_eq!(app.thumbnail_destination, Some(0));
         assert_eq!(app.thumbnail_groups[0].name, "Finals");
@@ -9539,7 +9588,7 @@ mod workspace_tests {
             modifiers: egui::Modifiers::NONE,
         };
         let output = frame(&mut app, vec![]);
-        let ungrouped = label(&output, "Ungrouped").unwrap();
+        let ungrouped = label(&output, "▾").unwrap();
         frame(
             &mut app,
             vec![egui::Event::PointerMoved(ungrouped), click(ungrouped, true)],
@@ -9550,7 +9599,19 @@ mod workspace_tests {
         assert!(label(&output, "Version 2").is_none());
 
         let drafts = label(&output, "Drafts").unwrap();
-        let target = ungrouped - egui::vec2(15.0, 0.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(drafts), click(drafts, true)]);
+        frame(&mut app, vec![click(drafts, false)]);
+        assert_eq!(app.selected_thumbnail_group(), Some(Some(0)));
+        assert!(!app.thumbnail_groups[0].collapsed);
+        frame(&mut app, vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(app.selected_thumbnail_group(), None);
+        let target = ungrouped;
         frame(
             &mut app,
             vec![egui::Event::PointerMoved(drafts), click(drafts, true)],

@@ -116,33 +116,89 @@ impl UserTags {
         }
     }
 
+    fn contains(&self, tag: &str) -> bool {
+        COMMON_TAGS
+            .iter()
+            .flat_map(|(_, tags)| tags.iter().copied())
+            .chain(self.saved.values().flatten().map(String::as_str))
+            .any(|candidate| same_tag(candidate, tag))
+    }
+
+    fn add(&mut self, category: &str, tag: &str) -> bool {
+        let tag = tag.trim();
+        if tag.is_empty() || tag.contains(['\r', '\n']) || tag_slots(tag) != [0..tag.len()] {
+            self.error = "Enter one tag at a time.".into();
+            return false;
+        }
+        if self.contains(tag) {
+            self.error = "That tag is already in the library.".into();
+            return false;
+        }
+        let mut tags = self.saved.clone();
+        tags.entry(category.to_owned())
+            .or_default()
+            .push(tag.to_owned());
+        self.save(tags)
+    }
+
     fn show(&mut self, ui: &mut egui::Ui, prompt: &mut String) {
         let mut remove = None;
+        let mut drop = None;
+        let row_width = ui.available_width();
         for (heading, tags) in COMMON_TAGS {
-            ui.strong(*heading);
-            ui.horizontal_wrapped(|ui| {
-                for tag in *tags {
-                    tag_button(ui, prompt, tag);
-                }
-                if let Some(saved) = self.saved.get(*heading) {
-                    for (index, tag) in saved.iter().enumerate() {
-                        ui.push_id((heading, index), |ui| {
-                            let response = tag_button(ui, prompt, tag);
-                            response.context_menu(|ui| {
-                                if ui.button("Remove").clicked() {
-                                    remove = Some((*heading, index));
-                                    ui.close();
-                                }
-                            });
-                        });
-                    }
-                }
-            });
+            let section = ui
+                .vertical(|ui| {
+                    ui.set_min_width(row_width);
+                    ui.strong(*heading);
+                    ui.horizontal_wrapped(|ui| {
+                        for tag in *tags {
+                            tag_button(ui, prompt, tag, row_width, false);
+                        }
+                        if let Some(saved) = self.saved.get(*heading) {
+                            for (index, tag) in saved.iter().enumerate() {
+                                ui.push_id((heading, index), |ui| {
+                                    let response = tag_button(ui, prompt, tag, row_width, true);
+                                    response.dnd_set_drag_payload(UserTagDrag {
+                                        category: heading,
+                                        index,
+                                    });
+                                    response.context_menu(|ui| {
+                                        if ui.button("Remove").clicked() {
+                                            remove = Some((*heading, index));
+                                            ui.close();
+                                        }
+                                    });
+                                });
+                            }
+                        }
+                    });
+                })
+                .response;
+            if let Some(source) = section.dnd_hover_payload::<UserTagDrag>()
+                && source.category != *heading
+            {
+                ui.painter().rect_stroke(
+                    section.rect,
+                    4.0,
+                    ui.visuals().selection.stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if let Some(source) = section.dnd_release_payload::<UserTagDrag>()
+                && source.category != *heading
+            {
+                drop = Some((*source, *heading));
+            }
         }
         if let Some((heading, index)) = remove {
             let mut tags = self.saved.clone();
             if let Some(saved) = tags.get_mut(heading) {
                 saved.remove(index);
+                self.save(tags);
+            }
+        } else if let Some((source, destination)) = drop {
+            let mut tags = self.saved.clone();
+            if move_user_tag(&mut tags, source, destination) {
                 self.save(tags);
             }
         }
@@ -159,28 +215,12 @@ impl UserTags {
             ui.add(
                 egui::TextEdit::singleline(&mut self.draft)
                     .hint_text("Enter a tag")
-                    .desired_width(180.0),
+                    .desired_width(180.0_f32.min(row_width)),
             );
             if ui.button("Save tag").clicked() {
-                let (category, defaults) = COMMON_TAGS[self.category];
-                let tag = self.draft.trim();
-                if tag.is_empty() || tag.contains([',', '\r', '\n']) {
-                    self.error = "Enter one tag at a time.".into();
-                } else if defaults.iter().any(|default| same_tag(default, tag))
-                    || self
-                        .saved
-                        .get(category)
-                        .is_some_and(|saved| saved.iter().any(|saved| same_tag(saved, tag)))
-                {
-                    self.error = "That tag is already saved.".into();
-                } else {
-                    let mut tags = self.saved.clone();
-                    tags.entry(category.to_owned())
-                        .or_default()
-                        .push(tag.to_owned());
-                    if self.save(tags) {
-                        self.draft.clear();
-                    }
+                let tag = self.draft.clone();
+                if self.add(COMMON_TAGS[self.category].0, &tag) {
+                    self.draft.clear();
                 }
             }
         });
@@ -188,6 +228,32 @@ impl UserTags {
             ui.label(&self.error);
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct UserTagDrag {
+    category: &'static str,
+    index: usize,
+}
+
+fn move_user_tag(tags: &mut TagCategories, source: UserTagDrag, destination: &str) -> bool {
+    let Some(tag) = tags
+        .get(source.category)
+        .and_then(|items| items.get(source.index))
+    else {
+        return false;
+    };
+    if COMMON_TAGS.iter().any(|(name, defaults)| {
+        *name == destination && defaults.iter().any(|default| same_tag(default, tag))
+    }) || tags
+        .get(destination)
+        .is_some_and(|items| items.iter().any(|item| same_tag(item, tag)))
+    {
+        return false;
+    }
+    let tag = tags.get_mut(source.category).unwrap().remove(source.index);
+    tags.entry(destination.to_owned()).or_default().push(tag);
+    true
 }
 
 fn decode_tags(bytes: &[u8]) -> Option<TagCategories> {
@@ -204,7 +270,10 @@ fn same_tag(left: &str, right: &str) -> bool {
 }
 
 fn insert_tag(prompt: &mut String, tag: &str) {
-    if prompt.split(',').any(|part| same_tag(part, tag)) {
+    if tag_slots(prompt)
+        .into_iter()
+        .any(|slot| same_tag(&prompt[slot], tag))
+    {
         return;
     }
     let existing = prompt.trim().trim_end_matches(',').trim_end();
@@ -215,8 +284,51 @@ fn insert_tag(prompt: &mut String, tag: &str) {
     }
 }
 
-fn tag_button(ui: &mut egui::Ui, prompt: &mut String, tag: &str) -> egui::Response {
-    let response = ui.button(tag);
+fn wrap_before_chip(ui: &mut egui::Ui, label: &str, row_width: f32) {
+    let text_width = ui
+        .painter()
+        .layout_no_wrap(
+            label.to_owned(),
+            egui::TextStyle::Button.resolve(ui.style()),
+            ui.visuals().text_color(),
+        )
+        .size()
+        .x;
+    let width = (text_width + 2.0 * ui.spacing().button_padding.x)
+        .max(ui.spacing().interact_size.x)
+        .min(row_width);
+    let remaining = ui.available_size_before_wrap().x;
+    if remaining + 0.5 < width && remaining + 0.5 < row_width {
+        ui.end_row();
+    }
+}
+
+fn tag_button(
+    ui: &mut egui::Ui,
+    prompt: &mut String,
+    tag: &str,
+    row_width: f32,
+    custom: bool,
+) -> egui::Response {
+    let label = if custom {
+        format!("◆ {tag}")
+    } else {
+        tag.to_owned()
+    };
+    wrap_before_chip(ui, &label, row_width);
+    let sense = if custom {
+        egui::Sense::click_and_drag()
+    } else {
+        egui::Sense::click()
+    };
+    let response = ui.add(egui::Button::new(label).truncate().sense(sense));
+    let response = if custom {
+        response
+            .on_hover_cursor(egui::CursorIcon::Grab)
+            .on_hover_text(format!("{tag} · User tag. Drag to another category."))
+    } else {
+        response.on_hover_text(tag)
+    };
     if response.clicked() {
         insert_tag(prompt, tag);
     }
@@ -494,7 +606,7 @@ impl PromptGuide {
                     self.scratchpad.show(
                         ui,
                         prompt,
-                        guide.danbooru.then_some(&self.user_tags),
+                        guide.danbooru.then_some(&mut self.user_tags),
                         spelling,
                     );
                     if self.scratchpad.open {
@@ -942,7 +1054,7 @@ impl Scratchpad {
         &mut self,
         ui: &mut egui::Ui,
         initial_prompt: &mut String,
-        user_tags: Option<&UserTags>,
+        mut user_tags: Option<&mut UserTags>,
         spelling: &mut PromptSpelling,
     ) {
         let label = if self.open {
@@ -957,9 +1069,11 @@ impl Scratchpad {
             return;
         }
         let text_id = PromptSpelling::editor_id(ui, SCRATCHPAD_FIELD);
-        let slots = user_tags
-            .map(|tags| tag_slots(&self.draft, &tags.saved))
-            .unwrap_or_default();
+        let slots = if user_tags.is_some() {
+            tag_slots(&self.draft)
+        } else {
+            Vec::new()
+        };
         if self.edit_as_text || slots.is_empty() || ui.memory(|memory| memory.has_focus(text_id)) {
             spelling.edit(
                 ui,
@@ -969,7 +1083,7 @@ impl Scratchpad {
                 SCRATCHPAD_ROWS,
             );
         } else {
-            self.show_tag_editor(ui, &slots);
+            self.show_tag_editor(ui, &slots, user_tags.as_deref_mut());
         }
         self.show_editor_actions(ui, initial_prompt, user_tags.is_some());
         let name_width = (ui.available_width() - 255.0).clamp(96.0, 220.0);
@@ -1099,10 +1213,15 @@ impl Scratchpad {
         }
     }
 
-    fn show_tag_editor(&mut self, ui: &mut egui::Ui, slots: &[std::ops::Range<usize>]) {
+    fn show_tag_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        slots: &[std::ops::Range<usize>],
+        mut user_tags: Option<&mut UserTags>,
+    ) {
         let mut target = None;
         let mut remove = None;
-        let mut edits = Vec::new();
+        let mut save_tag = None;
         let text_style = ui
             .style()
             .override_text_style
@@ -1121,26 +1240,9 @@ impl Scratchpad {
                 ui.set_min_width(row_width);
                 let mut chips = Vec::with_capacity(slots.len());
                 ui.horizontal_wrapped(|ui| {
-                    let mut start = 0;
                     for (index, slot) in slots.iter().enumerate() {
-                        edit_fragment(ui, &self.draft, start..slot.start, index, &mut edits);
                         let tag = &self.draft[slot.clone()];
-                        let text_width = ui
-                            .painter()
-                            .layout_no_wrap(
-                                tag.to_owned(),
-                                egui::TextStyle::Button.resolve(ui.style()),
-                                ui.visuals().text_color(),
-                            )
-                            .size()
-                            .x;
-                        let chip_width = (text_width + 2.0 * ui.spacing().button_padding.x)
-                            .max(ui.spacing().interact_size.x)
-                            .min(row_width);
-                        let remaining = ui.available_size_before_wrap().x;
-                        if remaining + 0.5 < chip_width && remaining + 0.5 < row_width {
-                            ui.end_row();
-                        }
+                        wrap_before_chip(ui, tag, row_width);
                         let chip = ui
                             .push_id(("scratchpad-tag", index), |ui| {
                                 ui.add(
@@ -1154,20 +1256,22 @@ impl Scratchpad {
                         chip.dnd_set_drag_payload(TagDrag(index));
                         chips.push(chip.rect);
                         chip.context_menu(|ui| {
+                            if user_tags.as_ref().is_some_and(|tags| !tags.contains(tag)) {
+                                ui.menu_button("Add to User Tags", |ui| {
+                                    for (heading, _) in COMMON_TAGS {
+                                        if ui.button(*heading).clicked() {
+                                            save_tag = Some((*heading, tag.to_owned()));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                            }
                             if ui.button("Remove").clicked() {
                                 remove = Some(slot.clone());
                                 ui.close();
                             }
                         });
-                        start = slot.end;
                     }
-                    edit_fragment(
-                        ui,
-                        &self.draft,
-                        start..self.draft.len(),
-                        slots.len(),
-                        &mut edits,
-                    );
                 });
                 let extra_height = chips
                     .first()
@@ -1204,10 +1308,11 @@ impl Scratchpad {
             && let Some(source) = egui::DragAndDrop::take_payload::<TagDrag>(ui.ctx())
         {
             reorder_tags(&mut self.draft, slots, source.0, gap);
-        } else {
-            for (range, text) in edits.into_iter().rev() {
-                self.draft.replace_range(range, &text);
-            }
+        }
+        if let Some((category, tag)) = save_tag
+            && let Some(tags) = user_tags.as_mut()
+        {
+            tags.add(category, &tag);
         }
     }
 }
@@ -1311,47 +1416,21 @@ fn remove_tag(draft: &mut String, slot: std::ops::Range<usize>) {
     }
 }
 
-fn edit_fragment(
-    ui: &mut egui::Ui,
-    draft: &str,
-    range: std::ops::Range<usize>,
-    index: usize,
-    edits: &mut Vec<(std::ops::Range<usize>, String)>,
-) {
-    let fragment = &draft[range.clone()];
-    if fragment
-        .trim_matches(|ch: char| ch.is_whitespace() || ch == ',')
-        .is_empty()
-    {
-        return;
-    }
-    let mut text = fragment.to_owned();
-    ui.push_id(("scratchpad-prose", index), |ui| {
-        let output = egui::TextEdit::multiline(&mut text)
-            .desired_rows(1)
-            .desired_width(ui.available_width())
-            .show(ui);
-        crate::interaction::text_menu(ui, &output.response, &text, &output.state, |_| {});
-        if output.response.changed() {
-            edits.push((range, text));
-        }
-    });
-}
-
-fn tag_slots(draft: &str, saved: &TagCategories) -> Vec<std::ops::Range<usize>> {
-    let known = COMMON_TAGS
-        .iter()
-        .flat_map(|(_, tags)| tags.iter().copied())
-        .chain(saved.values().flatten().map(String::as_str));
+fn tag_slots(draft: &str) -> Vec<std::ops::Range<usize>> {
     let mut slots = Vec::new();
     let mut start = 0;
     let mut depth = 0usize;
     let mut escaped = false;
-    for (end, ch) in draft
-        .char_indices()
-        .chain(std::iter::once((draft.len(), ',')))
-    {
-        if escaped && end < draft.len() {
+    let mut push = |start, end| {
+        let fragment: &str = &draft[start..end];
+        let tag = fragment.trim();
+        if !tag.is_empty() {
+            let first = start + fragment.len() - fragment.trim_start().len();
+            slots.push(first..first + tag.len());
+        }
+    };
+    for (end, ch) in draft.char_indices() {
+        if escaped {
             escaped = false;
             continue;
         }
@@ -1360,17 +1439,13 @@ fn tag_slots(draft: &str, saved: &TagCategories) -> Vec<std::ops::Range<usize>> 
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth = depth.saturating_sub(1),
             ',' if depth == 0 => {
-                let fragment = &draft[start..end];
-                let tag = fragment.trim();
-                if known.clone().any(|candidate| same_tag(candidate, tag)) {
-                    let first = start + fragment.len() - fragment.trim_start().len();
-                    slots.push(first..first + tag.len());
-                }
+                push(start, end);
                 start = end + 1;
             }
             _ => {}
         }
     }
+    push(start, draft.len());
     slots
 }
 
@@ -1674,9 +1749,9 @@ mod tests {
             };
             let output = ctx.run(input, |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    let slots = tag_slots(&scratchpad.draft, &TagCategories::new());
+                    let slots = tag_slots(&scratchpad.draft);
                     height = ui
-                        .vertical(|ui| scratchpad.show_tag_editor(ui, &slots))
+                        .vertical(|ui| scratchpad.show_tag_editor(ui, &slots, None))
                         .response
                         .rect
                         .height();
@@ -1724,12 +1799,11 @@ mod tests {
     #[test]
     fn removing_chips_preserves_other_prompt_text_and_separators() {
         let mut draft = "solo, a rainy city, jacket, outdoors".to_owned();
-        let saved = TagCategories::new();
-        let slots = tag_slots(&draft, &saved);
-        remove_tag(&mut draft, slots[1].clone());
+        let slots = tag_slots(&draft);
+        remove_tag(&mut draft, slots[2].clone());
         assert_eq!(draft, "solo, a rainy city, outdoors");
-        let slots = tag_slots(&draft, &saved);
-        remove_tag(&mut draft, slots[1].clone());
+        let slots = tag_slots(&draft);
+        remove_tag(&mut draft, slots[2].clone());
         remove_tag(&mut draft, slots[0].clone());
         assert_eq!(draft, "a rainy city");
     }
@@ -1750,9 +1824,9 @@ mod tests {
                 },
                 |ctx| {
                     egui::CentralPanel::default().show(ctx, |ui| {
-                        let slots = tag_slots(&scratchpad.draft, &TagCategories::new());
+                        let slots = tag_slots(&scratchpad.draft);
                         height = ui
-                            .vertical(|ui| scratchpad.show_tag_editor(ui, &slots))
+                            .vertical(|ui| scratchpad.show_tag_editor(ui, &slots, None))
                             .response
                             .rect
                             .height();
@@ -1794,29 +1868,101 @@ mod tests {
     }
 
     #[test]
-    fn reordering_tags_preserves_prose_and_nested_prompt_syntax() {
-        let saved = TagCategories::from([("Clothing".into(), vec!["raincoat".into()])]);
+    fn reordering_tags_keeps_multiword_phrases_and_nested_commas_together() {
         let mut draft =
             "solo, a rainy city, (dramatic light, smile:1.2), jacket, raincoat".to_owned();
-        let slots = tag_slots(&draft, &saved);
+        let slots = tag_slots(&draft);
         assert_eq!(
             slots
                 .iter()
                 .map(|slot| &draft[slot.clone()])
                 .collect::<Vec<_>>(),
-            ["solo", "jacket", "raincoat"]
+            [
+                "solo",
+                "a rainy city",
+                "(dramatic light, smile:1.2)",
+                "jacket",
+                "raincoat"
+            ]
         );
-        reorder_tags(&mut draft, &slots, 2, 0);
+        reorder_tags(&mut draft, &slots, 4, 0);
         assert_eq!(
             draft,
-            "raincoat, a rainy city, (dramatic light, smile:1.2), solo, jacket"
+            "raincoat, solo, a rainy city, (dramatic light, smile:1.2), jacket"
         );
-        let slots = tag_slots(&draft, &saved);
+        let slots = tag_slots(&draft);
         reorder_tags(&mut draft, &slots, 0, slots.len());
         assert_eq!(
             draft,
             "solo, a rainy city, (dramatic light, smile:1.2), jacket, raincoat"
         );
+    }
+
+    #[test]
+    fn library_tags_wrap_at_the_available_width() {
+        let ctx = egui::Context::default();
+        let render = |width| {
+            let mut tags = UserTags {
+                saved: TagCategories::from([(
+                    "Subject".into(),
+                    vec!["red velvet coat".into(), "standing by a window".into()],
+                )]),
+                ..Default::default()
+            };
+            let output = ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 1400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ctx| {
+                    egui::CentralPanel::default().show(ctx, |ui| tags.show(ui, &mut String::new()));
+                },
+            );
+            let top = |label: &str| {
+                output
+                    .shapes
+                    .iter()
+                    .find_map(|shape| match &shape.shape {
+                        egui::Shape::Text(text) if text.galley.job.text == label => {
+                            Some(text.pos.y)
+                        }
+                        _ => None,
+                    })
+                    .unwrap()
+            };
+            [
+                top("solo"),
+                top("◆ red velvet coat"),
+                top("◆ standing by a window"),
+            ]
+        };
+        let [first, custom, last] = render(850.0);
+        assert_eq!(first, last);
+        assert_eq!(custom, last);
+        let [first, custom, last] = render(210.0);
+        assert!(first < custom);
+        assert!(custom < last);
+    }
+
+    #[test]
+    fn moving_user_tags_preserves_text_and_other_entries() {
+        let mut tags = TagCategories::from([
+            (
+                "Clothing".into(),
+                vec!["red velvet coat".into(), "raincoat".into()],
+            ),
+            ("Other".into(), vec!["vintage".into()]),
+        ]);
+        let source = UserTagDrag {
+            category: "Clothing",
+            index: 0,
+        };
+        assert!(move_user_tag(&mut tags, source, "Other"));
+        assert_eq!(tags["Clothing"], ["raincoat"]);
+        assert_eq!(tags["Other"], ["vintage", "red velvet coat"]);
     }
 
     #[test]
