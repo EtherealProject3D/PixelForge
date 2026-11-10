@@ -2898,14 +2898,13 @@ impl PixelForge {
     }
 
     fn fullscreen_button_rect(canvas: Rect) -> Rect {
-        let corner = canvas.right_top() + Vec2::new(-10.0, 10.0);
-        Rect::from_min_max(corner - Vec2::new(132.0_f32.min(canvas.width() - 20.0), 0.0),
-            corner + Vec2::new(0.0, 28.0))
+        let corner = canvas.right_bottom() - Vec2::splat(12.0);
+        Rect::from_min_max(corner - Vec2::new(146.0_f32.min(canvas.width() - 24.0), 34.0), corner)
     }
 
     fn image_arrow_rect(canvas: Rect, forward: bool) -> Rect {
-        let center_x = if forward { canvas.right() - 32.0 } else { canvas.left() + 32.0 };
-        Rect::from_center_size(egui::pos2(center_x, canvas.center().y), Vec2::splat(38.0))
+        let center_x = if forward { canvas.right() - 34.0 } else { canvas.left() + 34.0 };
+        Rect::from_center_size(egui::pos2(center_x, canvas.center().y), Vec2::splat(44.0))
     }
 
     fn viewer_control_at(&self, canvas: Rect, pointer: Pos2) -> bool {
@@ -2922,15 +2921,21 @@ impl PixelForge {
             return;
         }
         let label = if fullscreen { "Exit Full Screen" } else { "Full Screen Image" };
-        if ui.put(Self::fullscreen_button_rect(canvas), egui::Button::new(label))
-            .on_hover_text(if fullscreen { "Return to the editor (Esc)" } else { "View the selected image full screen" })
-            .clicked()
-        {
-            self.capture_workspace_editor();
-            if !fullscreen {
-                self.fit_fullscreen_image();
-            }
-            self.display.set_image_fullscreen(ui.ctx(), !fullscreen);
+        let rect = Self::fullscreen_button_rect(canvas);
+        let reveal = Rect::from_min_max(rect.min - Vec2::new(16.0, 18.0), canvas.max)
+            .intersect(canvas);
+        let (button, alpha) = Self::viewer_overlay_button(
+            ui, ui.id().with("image_fullscreen_toggle"), rect, reveal, label,
+            if fullscreen { "Return to the editor (Alt+Enter or Esc)" } else { "View the selected image full screen (Alt+Enter)" },
+        );
+        if alpha > 0.0 {
+            ui.painter().with_clip_rect(rect).text(
+                rect.center(), egui::Align2::CENTER_CENTER, label,
+                egui::TextStyle::Button.resolve(ui.style()), Color32::WHITE.gamma_multiply(alpha),
+            );
+        }
+        if button.clicked() {
+            self.toggle_image_fullscreen(ui.ctx());
         }
 
         if !self.generation_workspace || self.crop.is_some() {
@@ -2942,27 +2947,21 @@ impl PixelForge {
             }
             let rect = Self::image_arrow_rect(canvas, forward);
             let id = ui.id().with(("viewer_navigation", forward));
-            let response = ui.interact(rect, id, Sense::click())
-                .on_hover_cursor(egui::CursorIcon::PointingHand)
-                .on_hover_text(label);
-            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
-            let near_edge = ui.rect_contains_pointer(if forward {
+            let reveal = if forward {
                 canvas.with_min_x(canvas.right() - 76.0)
             } else {
                 canvas.with_max_x(canvas.left() + 76.0)
-            });
-            let alpha = ui.ctx().animate_bool_with_time(id, near_edge || response.has_focus(), 0.16);
+            };
+            let (response, alpha) = Self::viewer_overlay_button(ui, id, rect, reveal, label, label);
             if alpha > 0.0 {
                 let painter = ui.painter().with_clip_rect(canvas);
-                let background = Color32::from_black_alpha(if response.hovered() { 215 } else { 155 });
-                painter.rect_filled(rect, 9.0, background.gamma_multiply(alpha));
                 let center = rect.center();
                 let sign = if forward { 1.0 } else { -1.0 };
-                let tip = center + Vec2::new(4.0 * sign, 0.0);
-                for y in [-7.0, 7.0] {
+                let tip = center + Vec2::new(6.0 * sign, 0.0);
+                for y in [-9.0, 9.0] {
                     painter.line_segment(
-                        [center + Vec2::new(-3.0 * sign, y), tip],
-                        egui::Stroke::new(2.0_f32, Color32::WHITE.gamma_multiply(alpha)),
+                        [center + Vec2::new(-4.0 * sign, y), tip],
+                        egui::Stroke::new(2.5_f32, Color32::WHITE.gamma_multiply(alpha)),
                     );
                 }
             }
@@ -2972,12 +2971,71 @@ impl PixelForge {
         }
     }
 
-    fn handle_image_fullscreen_exit(&mut self, ctx: &egui::Context) {
-        if self.display.image_fullscreen()
-            && (ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
-                || ctx.input(|input| input.viewport().close_requested()))
+    fn viewer_overlay_button(
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        rect: Rect,
+        reveal: Rect,
+        label: &str,
+        tooltip: &str,
+    ) -> (egui::Response, f32) {
+        let response = ui.interact(rect, id, Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tooltip);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        if response.clicked() && ui.input(|input| input.pointer.primary_released()) {
+            response.surrender_focus();
+        }
+        let visible = ui.rect_contains_pointer(reveal) || response.has_focus();
+        let alpha = ui.ctx().animate_bool_with_time(id, visible, 0.16);
+        if alpha > 0.0 {
+            let background = Color32::from_black_alpha(if response.hovered() { 215 } else { 155 });
+            ui.painter().rect_filled(rect, 9.0, background.gamma_multiply(alpha));
+        }
+        (response, alpha)
+    }
+
+    fn toggle_image_fullscreen(&mut self, ctx: &egui::Context) {
+        let open = !self.display.image_fullscreen();
+        if open {
+            self.capture_workspace_editor();
+            self.fit_fullscreen_image();
+        }
+        self.display.set_image_fullscreen(ctx, open);
+    }
+
+    fn handle_image_fullscreen_shortcuts(&mut self, ctx: &egui::Context) {
+        let toggle = ctx.input_mut(|input| {
+            let mut toggle = false;
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key: egui::Key::Enter, pressed: true, repeat, modifiers, ..
+                } = event
+                    && modifiers.matches_exact(egui::Modifiers::ALT)
+                {
+                    toggle |= !repeat;
+                    false
+                } else {
+                    true
+                }
+            });
+            toggle
+        });
+        if self.display.image_fullscreen() {
+            if toggle
+                || ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                || ctx.input(|input| input.viewport().close_requested())
+            {
+                self.display.set_image_fullscreen(ctx, false);
+            }
+        } else if toggle && self.crop.is_none()
+            && (self.texture.is_some() || self.generation_gallery.get(self.generation_selected).is_some())
+            && self.group_dialog.is_none() && self.rename_version.is_none()
+            && self.closing_tab.is_none() && !self.exit_confirmation
+            && !egui::Popup::is_any_open(ctx)
+            && !ctx.input(|input| input.viewport().close_requested())
         {
-            self.display.set_image_fullscreen(ctx, false);
+            self.toggle_image_fullscreen(ctx);
         }
     }
 
@@ -8199,7 +8257,7 @@ impl eframe::App for PixelForge {
         startup::ready(_frame);
         for action in self.interaction.begin_frame(ctx) {self.edit_command(ctx,action);}
         self.updater.poll(ctx,self.interaction.automatic_updates);
-        self.handle_image_fullscreen_exit(ctx);
+        self.handle_image_fullscreen_shortcuts(ctx);
         self.display.update(ctx);
         self.display.resize_edges(ctx);
         // Keep native window persistence current even while the canvas is idle.
@@ -9032,7 +9090,7 @@ mod workspace_tests {
         let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
         let frame = |app: &mut PixelForge, events| {
             let _ = ctx.run(egui::RawInput { screen_rect: Some(canvas), events, ..Default::default() }, |ctx| {
-                app.handle_image_fullscreen_exit(ctx);
+                app.handle_image_fullscreen_shortcuts(ctx);
                 egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx, |ui| {
                     if app.display.image_fullscreen() {
                         app.show_fullscreen_image(ui);
@@ -9076,6 +9134,18 @@ mod workspace_tests {
         assert_eq!(app.generation_selected, 2);
         assert_eq!(app.generation_zoom, 2.0);
         assert_eq!(app.generation_pan, Vec2::new(25.0, 40.0));
+
+        let alt_enter = |pressed, repeat| egui::Event::Key {
+            key: egui::Key::Enter, physical_key: None, pressed, repeat,
+            modifiers: egui::Modifiers::ALT,
+        };
+        frame(&mut app, vec![alt_enter(true, false)]);
+        assert!(app.display.image_fullscreen());
+        frame(&mut app, vec![alt_enter(true, true)]);
+        assert!(app.display.image_fullscreen());
+        frame(&mut app, vec![alt_enter(false, false)]);
+        frame(&mut app, vec![alt_enter(true, false)]);
+        assert!(!app.display.image_fullscreen());
     }
 
     #[test]
