@@ -2882,6 +2882,115 @@ impl PixelForge {
         }
     }
 
+    fn handle_image_navigation_keys(&mut self, ctx: &egui::Context) {
+        for (key, forward) in [(egui::Key::ArrowLeft, false), (egui::Key::ArrowRight, true)] {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)) {
+                self.navigate_thumbnails(forward);
+            }
+        }
+    }
+
+    fn fullscreen_button_rect(canvas: Rect) -> Rect {
+        let corner = canvas.right_top() + Vec2::new(-10.0, 10.0);
+        Rect::from_min_max(corner - Vec2::new(132.0_f32.min(canvas.width() - 20.0), 0.0),
+            corner + Vec2::new(0.0, 28.0))
+    }
+
+    fn image_arrow_rect(canvas: Rect, forward: bool) -> Rect {
+        let center_x = if forward { canvas.right() - 32.0 } else { canvas.left() + 32.0 };
+        Rect::from_center_size(egui::pos2(center_x, canvas.center().y), Vec2::splat(38.0))
+    }
+
+    fn viewer_control_at(&self, canvas: Rect, pointer: Pos2) -> bool {
+        canvas.width() >= 100.0 && canvas.height() >= 54.0
+            && (Self::fullscreen_button_rect(canvas).contains(pointer)
+                || (self.generation_workspace && [false, true].into_iter().any(|forward| {
+                    self.adjacent_thumbnail(forward).is_some()
+                        && Self::image_arrow_rect(canvas, forward).contains(pointer)
+                })))
+    }
+
+    fn show_image_viewer_controls(&mut self, ui: &mut egui::Ui, canvas: Rect, fullscreen: bool) {
+        if canvas.width() < 100.0 || canvas.height() < 54.0 {
+            return;
+        }
+        let label = if fullscreen { "Exit Full Screen" } else { "Full Screen Image" };
+        if ui.put(Self::fullscreen_button_rect(canvas), egui::Button::new(label))
+            .on_hover_text(if fullscreen { "Return to the editor (Esc)" } else { "View the selected image full screen" })
+            .clicked()
+        {
+            self.capture_workspace_editor();
+            self.display.set_image_fullscreen(ui.ctx(), !fullscreen);
+        }
+
+        if !self.generation_workspace || self.crop.is_some() {
+            return;
+        }
+        for (forward, label) in [(false, "Previous image"), (true, "Next image")] {
+            if self.adjacent_thumbnail(forward).is_none() {
+                continue;
+            }
+            let rect = Self::image_arrow_rect(canvas, forward);
+            let id = ui.id().with(("viewer_navigation", forward));
+            let response = ui.interact(rect, id, Sense::click())
+                .on_hover_cursor(egui::CursorIcon::PointingHand)
+                .on_hover_text(label);
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+            let near_edge = ui.rect_contains_pointer(if forward {
+                canvas.with_min_x(canvas.right() - 76.0)
+            } else {
+                canvas.with_max_x(canvas.left() + 76.0)
+            });
+            let alpha = ui.ctx().animate_bool_with_time(id, near_edge || response.has_focus(), 0.16);
+            if alpha > 0.0 {
+                let painter = ui.painter().with_clip_rect(canvas);
+                let background = Color32::from_black_alpha(if response.hovered() { 215 } else { 155 });
+                painter.rect_filled(rect, 9.0, background.gamma_multiply(alpha));
+                let center = rect.center();
+                let sign = if forward { 1.0 } else { -1.0 };
+                let tip = center + Vec2::new(4.0 * sign, 0.0);
+                for y in [-7.0, 7.0] {
+                    painter.line_segment(
+                        [center + Vec2::new(-3.0 * sign, y), tip],
+                        egui::Stroke::new(2.0_f32, Color32::WHITE.gamma_multiply(alpha)),
+                    );
+                }
+            }
+            if response.clicked() {
+                self.navigate_thumbnails(forward);
+            }
+        }
+    }
+
+    fn handle_image_fullscreen_exit(&mut self, ctx: &egui::Context) {
+        if self.display.image_fullscreen()
+            && (ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                || ctx.input(|input| input.viewport().close_requested()))
+        {
+            self.display.set_image_fullscreen(ctx, false);
+        }
+    }
+
+    fn show_fullscreen_image(&mut self, ui: &mut egui::Ui) {
+        self.handle_image_navigation_keys(ui.ctx());
+        let texture = self.generation_gallery.get(self.generation_selected)
+            .map(|item| &item.texture)
+            .or(self.processed_texture.as_ref())
+            .or(self.texture.as_ref());
+        let canvas = ui.max_rect();
+        if let Some(texture) = texture {
+            let size = texture.size_vec2();
+            let scale = (canvas.width() / size.x).min(canvas.height() / size.y);
+            ui.painter().image(
+                texture.id(),
+                Rect::from_center_size(canvas.center(), size * scale),
+                Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        self.show_image_viewer_controls(ui, canvas, true);
+    }
+
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
         if self.generation_gallery.is_empty() {
             if !self.blank_project {
@@ -2904,25 +3013,11 @@ impl PixelForge {
             && self.crop.is_none() && self.group_dialog.is_none() && self.rename_version.is_none()
             && self.closing_tab.is_none() && !self.exit_confirmation
         {
-            for (key, forward) in [(egui::Key::ArrowLeft, false), (egui::Key::ArrowRight, true)] {
-                if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)) {
-                    self.navigate_thumbnails(forward);
-                }
-            }
+            self.handle_image_navigation_keys(ctx);
         }
         ui.horizontal_wrapped(|ui| {
             crate::interaction::strong(ui,"Image Studio");
             ui.separator();
-            for (symbol, description, forward) in [
-                ("<", "Previous image in this group (Left arrow)", false),
-                (">", "Next image in this group (Right arrow)", true),
-            ] {
-                if ui.add_enabled(self.crop.is_none() && self.adjacent_thumbnail(forward).is_some(),
-                    egui::Button::new(symbol).small()).on_hover_text(description).clicked()
-                {
-                    self.navigate_thumbnails(forward);
-                }
-            }
             crate::interaction::strong(ui,self.generation_gallery[self.generation_selected].version_label());
             crate::interaction::small(ui,format!("{} × {}", self.image_size[0],self.image_size[1]));
             egui::ComboBox::from_id_salt("compare_left_version")
@@ -3082,6 +3177,7 @@ impl PixelForge {
         painter.line_segment([egui::pos2(divider_x,rect.top()),egui::pos2(divider_x,rect.bottom())],egui::Stroke::new(2.0,egui::Color32::WHITE));
         painter.circle_filled(egui::pos2(divider_x,rect.center().y),12.0,egui::Color32::from_gray(45));
         painter.text(egui::pos2(divider_x,rect.center().y),egui::Align2::CENTER_CENTER,"↔",egui::FontId::proportional(16.0),egui::Color32::WHITE);
+        self.show_image_viewer_controls(ui, rect, false);
 
         self.show_workspace_filmstrip(ui);
     }
@@ -7797,9 +7893,8 @@ impl PixelForge {
                 }
             }
         }
-        let pointer_inside = pointer_position
-            .map(|pos| canvas.contains(pos))
-            .unwrap_or(false);
+        let over_control = pointer_position.is_some_and(|pos| self.viewer_control_at(canvas, pos));
+        let pointer_inside = pointer_position.is_some_and(|pos| canvas.contains(pos) && !over_control);
 
         let modifier_ok = match self.controls.pan {
             PanButton::SpaceLeft => space_down,
@@ -7852,7 +7947,8 @@ impl PixelForge {
         });
 
         let brush_active =
-            self.selection_brush_enabled && !space_down && !self.divider_dragging && !self.panning;
+            self.selection_brush_enabled && !space_down && !self.divider_dragging && !self.panning
+                && !over_control;
 
         if !brush_down || !brush_active {
             self.selection_last_point = None;
@@ -8040,6 +8136,7 @@ impl PixelForge {
         } else if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
+        self.show_image_viewer_controls(ui, canvas, false);
     }
 }
 
@@ -8064,6 +8161,7 @@ impl eframe::App for PixelForge {
         startup::ready(_frame);
         for action in self.interaction.begin_frame(ctx) {self.edit_command(ctx,action);}
         self.updater.poll(ctx,self.interaction.automatic_updates);
+        self.handle_image_fullscreen_exit(ctx);
         self.display.update(ctx);
         self.display.resize_edges(ctx);
         // Keep native window persistence current even while the canvas is idle.
@@ -8089,6 +8187,12 @@ impl eframe::App for PixelForge {
         self.ensure_workspace(ctx);
 
         self.handle_save_shortcut(ctx);
+        if self.display.image_fullscreen() {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(Color32::from_gray(10)))
+                .show(ctx, |ui| self.show_fullscreen_image(ui));
+            return;
+        }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             let bar=ui.available_rect_before_wrap();
@@ -8873,6 +8977,55 @@ mod workspace_tests {
             std::fs::remove_file(path).unwrap();
         }
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn fullscreen_edge_controls_browse_and_escape_preserves_editor_camera() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.create_thumbnail_group("Group".into(), &[]);
+        for group in [Some(0), None, Some(0)] {
+            let mut item = fixture_thumbnail(&ctx, 10, None);
+            item.group = group;
+            app.append_thumbnail(item);
+        }
+        app.generation_zoom = 2.0;
+        app.generation_pan = Vec2::new(25.0, 40.0);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let frame = |app: &mut PixelForge, events| {
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(canvas), events, ..Default::default() }, |ctx| {
+                app.handle_image_fullscreen_exit(ctx);
+                egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx, |ui| {
+                    if app.display.image_fullscreen() {
+                        app.show_fullscreen_image(ui);
+                    } else {
+                        app.show_image_viewer_controls(ui, canvas, false);
+                    }
+                });
+            });
+        };
+        let click = |app: &mut PixelForge, pos| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            };
+            frame(app, vec![egui::Event::PointerMoved(pos)]);
+            frame(app, vec![button(true)]);
+            frame(app, vec![button(false)]);
+        };
+        click(&mut app, PixelForge::fullscreen_button_rect(canvas).center());
+        assert!(app.display.image_fullscreen());
+        click(&mut app, PixelForge::image_arrow_rect(canvas, true).center());
+        assert_eq!(app.generation_selected, 2);
+        assert!(app.reveal_navigated_thumbnail);
+
+        frame(&mut app, vec![egui::Event::Key {
+            key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert!(!app.display.image_fullscreen());
+        assert_eq!(app.generation_selected, 2);
+        assert_eq!(app.generation_zoom, 2.0);
+        assert_eq!(app.generation_pan, Vec2::new(25.0, 40.0));
     }
 
     #[test]
