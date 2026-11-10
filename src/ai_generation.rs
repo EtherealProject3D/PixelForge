@@ -319,16 +319,17 @@ pub struct ModelCatalog {
 pub fn model_catalog() -> Result<ModelCatalog, String> {
     ensure_server()?;
     let http = client()?;
+    let info: Value = http.get(format!("{BASE}/object_info"))
+        .send()
+        .map_err(|error| format!("Cannot connect to local ComfyUI: {error}"))?
+        .error_for_status().map_err(|error| error.to_string())?
+        .json().map_err(|error| error.to_string())?;
+    catalog_from_info(&info)
+}
+
+fn catalog_from_info(info: &Value) -> Result<ModelCatalog, String> {
     let list = |node: &str, field: &str| -> Result<Vec<String>, String> {
-        let value: Value = http
-            .get(format!("{BASE}/object_info/{node}"))
-            .send()
-            .map_err(|e| format!("Cannot connect to local ComfyUI: {e}"))?
-            .error_for_status()
-            .map_err(|e| e.to_string())?
-            .json()
-            .map_err(|e| e.to_string())?;
-        let items = value
+        let items = info
             .pointer(&format!("/{node}/input/required/{field}/0"))
             .and_then(Value::as_array)
             .ok_or_else(|| format!("ComfyUI did not return {field} names"))?;
@@ -338,10 +339,21 @@ pub fn model_catalog() -> Result<ModelCatalog, String> {
             .map(str::to_owned)
             .collect())
     };
-    Ok(ModelCatalog {
-        checkpoints: list("CheckpointLoaderSimple", "ckpt_name")?,
-        loras: list("LoraLoader", "lora_name").unwrap_or_default(),
-    })
+    let mut checkpoints = list("CheckpointLoaderSimple", "ckpt_name")?;
+    if validate_flux_nodes(info, false).is_ok() {
+        checkpoints.push(FLUX_KLEIN.to_owned());
+    }
+    if validate_z_image_nodes(info).is_ok() {
+        checkpoints.push(Z_IMAGE.to_owned());
+    }
+    for model in [QWEN_EDIT, QWEN_EDIT_2511] {
+        if validate_qwen_nodes(info, model).is_ok() {
+            checkpoints.push(model.to_owned());
+        }
+    }
+    checkpoints.sort_unstable_by_key(|name| name.to_ascii_lowercase());
+    checkpoints.dedup();
+    Ok(ModelCatalog { checkpoints, loras: list("LoraLoader", "lora_name").unwrap_or_default() })
 }
 
 fn configure_flux1_dev(workflow: &mut Value, request: &Request) {
@@ -759,6 +771,28 @@ mod local_model_tests {
             }
         }
     }
+    #[test]
+    fn model_catalog_uses_backend_choices_and_omits_incomplete_bundles() {
+        let mut info = json!({
+            "CheckpointLoaderSimple": {"input":{"required":{"ckpt_name":[["nested/local.safetensors","nested/local.safetensors"]]}}},
+            "LoraLoader": {"input":{"required":{"lora_name":[["local-style.safetensors"]]}}},
+        });
+        let catalog = catalog_from_info(&info).unwrap();
+        assert_eq!(catalog.checkpoints, ["nested/local.safetensors"]);
+        assert_eq!(catalog.loras, ["local-style.safetensors"]);
+        for node in ["UNETLoader","CLIPLoader","VAELoader","EmptyFlux2LatentImage","Flux2Scheduler",
+            "KSamplerSelect","RandomNoise","CFGGuider","SamplerCustomAdvanced","ConditioningZeroOut"] {
+            info[node] = json!({});
+        }
+        for (node, input, file) in [("UNETLoader","unet_name",FLUX_UNET),("CLIPLoader","clip_name",FLUX_CLIP),("VAELoader","vae_name",FLUX_VAE)] {
+            info[node]["input"]["required"][input] = json!([[file]]);
+        }
+        info["CLIPLoader"]["input"]["required"]["type"] = json!([["flux2"]]);
+        let catalog = catalog_from_info(&info).unwrap();
+        assert!(catalog.checkpoints.iter().any(|model| model == FLUX_KLEIN));
+        assert!(!catalog.checkpoints.iter().any(|model| model == Z_IMAGE));
+    }
+
     #[test]
     fn setup_validation_requires_exact_bundle_and_flux2_encoder_support() {
         let graph=flux_workflow(Some("x.png"),"edit",1,4,1024,1024);

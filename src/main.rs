@@ -679,6 +679,7 @@ struct PixelForge {
     thumbnail_selection: Vec<usize>,
     thumbnail_strip_overflows: bool,
     thumbnail_strip_hidden: bool,
+    reveal_navigated_thumbnail: bool,
     tools_sidebar_hidden: bool,
     thumbnail_drop_preview: Option<(Option<usize>, usize)>,
     generation_project_path: Option<PathBuf>,
@@ -915,6 +916,7 @@ impl Default for PixelForge {
             thumbnail_selection: Vec::new(),
             thumbnail_strip_overflows: false,
             thumbnail_strip_hidden: false,
+            reveal_navigated_thumbnail: false,
             tools_sidebar_hidden: false,
             thumbnail_drop_preview: None,
             generation_project_path: None,
@@ -1481,6 +1483,8 @@ impl PixelForge {
             }
             Ok(Err(error)) => {
                 self.generation_models_rx = None;
+                self.generation_checkpoints.clear();
+                self.generation_loras.clear();
                 self.generation_models_status = error;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -1488,6 +1492,8 @@ impl PixelForge {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.generation_models_rx = None;
+                self.generation_checkpoints.clear();
+                self.generation_loras.clear();
                 self.generation_models_status = "The model discovery worker stopped. Reconnect to try again.".into();
             }
         }
@@ -1495,7 +1501,7 @@ impl PixelForge {
 
     fn select_default_checkpoint(&mut self) {
         if self.generation_checkpoint.is_empty() {
-            if let Some(checkpoint) = self.generation_checkpoints.first() {
+            if let Some(checkpoint) = self.generation_checkpoints.iter().find(|name| !ai_generation::is_qwen(name)) {
                 self.generation_checkpoint = checkpoint.clone();
                 self.reset_generation_sampling();
             }
@@ -1891,9 +1897,13 @@ impl PixelForge {
         }
         self.show_conversation(ui);
         ui.separator();
-        if self.generation_checkpoint.is_empty() {
-            crate::interaction::label(ui,"Connect a local model to begin.");
-            if ui.button("Connect Models").clicked() { self.refresh_generation_models(ui.ctx()); }
+        if !self.generation_checkpoint.is_empty()
+            && !self.generation_checkpoints.contains(&self.generation_checkpoint)
+        {
+            crate::interaction::small(ui, "The project’s selected checkpoint is unavailable on the connected backend.");
+        }
+        if ui.add_enabled(self.generation_models_rx.is_none(), egui::Button::new("Refresh Models")).clicked() {
+            self.refresh_generation_models(ui.ctx());
         }
         if self
             .generation_status
@@ -2715,15 +2725,13 @@ impl PixelForge {
         let model_row_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button)) + ui.spacing().item_spacing.y;
         let generation_menu_height = model_row_height * (self.generation_checkpoints.len() + 2) as f32 + 16.0;
         egui::ComboBox::from_id_salt("initial_generation_model").width(ui.available_width()).height(generation_menu_height).truncate()
-            .selected_text(if self.generation_checkpoint.is_empty() {
-                "Select a checkpoint"
+            .selected_text(if self.generation_checkpoints.contains(&self.generation_checkpoint) {
+                self.generation_checkpoint.as_str()
             } else {
-                &self.generation_checkpoint
+                "Select an available checkpoint"
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.generation_checkpoint,ai_generation::FLUX_KLEIN.into(),format!("{} — Fast generation, prompt-driven images, instruction-based editing",ai_generation::FLUX_KLEIN));
-                ui.selectable_value(&mut self.generation_checkpoint,ai_generation::Z_IMAGE.into(),format!("{} — Fast photographic generation, natural lighting",ai_generation::Z_IMAGE));
-                for checkpoint in &self.generation_checkpoints {
+                for checkpoint in self.generation_checkpoints.iter().filter(|name| !ai_generation::is_qwen(name)) {
                     let lower = checkpoint.to_ascii_lowercase();
                     let best_for = if lower.contains("cyberrealistic") || lower.contains("pony") {
                         "Realistic portraits, character images, detailed photography"
@@ -2754,7 +2762,8 @@ impl PixelForge {
             ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
         );
         let can_generate = !self.generation_running && !self.ai_running
-            && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty();
+            && !self.generation_prompt.trim().is_empty()
+            && self.generation_checkpoints.contains(&self.generation_checkpoint);
         let create = egui::RichText::new("Create New Image").size(ui.text_style_height(&egui::TextStyle::Button) * 1.25);
         let create_clicked = ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
             ui.add_enabled(can_generate, theme::primary_text(create).min_size(egui::vec2(width, button_height * 2.0))).clicked()
@@ -2768,7 +2777,7 @@ impl PixelForge {
                 self.generation_prompt.clear();
             }
             if ui.add(egui::Button::new("Prompt Guide").min_size(size)).clicked() {
-                self.prompt_guide.open = !self.prompt_guide.open;
+                self.prompt_guide.toggle();
             }
         });
         if self.prompt_guide.open {
@@ -2799,10 +2808,9 @@ impl PixelForge {
         let edit_menu_height = model_row_height * (self.generation_checkpoints.len() + 4) as f32 + 16.0;
         egui::ComboBox::from_id_salt("edit_model").width(ui.available_width()).height(edit_menu_height).truncate().selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
             ui.selectable_value(&mut self.edit_checkpoint, String::new(), "Use generation model");
-            for name in [ai_generation::QWEN_EDIT,ai_generation::QWEN_EDIT_2511,ai_generation::FLUX_KLEIN] {
-                ui.selectable_value(&mut self.edit_checkpoint,name.into(),name);
+            for model in self.generation_checkpoints.iter().filter(|name| name.as_str() != ai_generation::Z_IMAGE) {
+                ui.selectable_value(&mut self.edit_checkpoint, model.clone(), model);
             }
-            for model in &self.generation_checkpoints { ui.selectable_value(&mut self.edit_checkpoint, model.clone(), model); }
         });
         crate::interaction::label(ui,format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
         let edit_model=editing_checkpoint(&self.generation_checkpoint,&self.edit_checkpoint,true).to_owned();
@@ -2854,6 +2862,26 @@ impl PixelForge {
         if self.generation_checkpoints.is_empty() && ui.button("Connect / Refresh Models").clicked() { self.refresh_generation_models(ui.ctx()); }
     }
 
+    fn adjacent_thumbnail(&self, forward: bool) -> Option<usize> {
+        let current = self.generation_selected;
+        let group = self.generation_gallery.get(current)?.group;
+        if forward {
+            self.generation_gallery.iter().enumerate().skip(current + 1)
+                .find(|(_, item)| item.group == group).map(|(index, _)| index)
+        } else {
+            self.generation_gallery[..current].iter().rposition(|item| item.group == group)
+        }
+    }
+
+    fn navigate_thumbnails(&mut self, forward: bool) {
+        if self.crop.is_none()
+            && let Some(index) = self.adjacent_thumbnail(forward)
+        {
+            self.select_thumbnail(index, false);
+            self.reveal_navigated_thumbnail = true;
+        }
+    }
+
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
         if self.generation_gallery.is_empty() {
             if !self.blank_project {
@@ -2869,9 +2897,32 @@ impl PixelForge {
         let count = self.generation_gallery.len();
         self.generation_selected = self.generation_selected.min(count-1);
         self.generation_compare_index = self.generation_compare_index.min(count-1);
+        let ctx = ui.ctx();
+        let text_focused = ctx.memory(|memory| memory.focused())
+            .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+        if !text_focused && !egui::Popup::is_any_open(ctx)
+            && self.crop.is_none() && self.group_dialog.is_none() && self.rename_version.is_none()
+            && self.closing_tab.is_none() && !self.exit_confirmation
+        {
+            for (key, forward) in [(egui::Key::ArrowLeft, false), (egui::Key::ArrowRight, true)] {
+                if ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)) {
+                    self.navigate_thumbnails(forward);
+                }
+            }
+        }
         ui.horizontal_wrapped(|ui| {
             crate::interaction::strong(ui,"Image Studio");
             ui.separator();
+            for (symbol, description, forward) in [
+                ("<", "Previous image in this group (Left arrow)", false),
+                (">", "Next image in this group (Right arrow)", true),
+            ] {
+                if ui.add_enabled(self.crop.is_none() && self.adjacent_thumbnail(forward).is_some(),
+                    egui::Button::new(symbol).small()).on_hover_text(description).clicked()
+                {
+                    self.navigate_thumbnails(forward);
+                }
+            }
             crate::interaction::strong(ui,self.generation_gallery[self.generation_selected].version_label());
             crate::interaction::small(ui,format!("{} × {}", self.image_size[0],self.image_size[1]));
             egui::ComboBox::from_id_salt("compare_left_version")
@@ -3645,6 +3696,7 @@ impl PixelForge {
         let project = self.active_tab;
         let pointer = ui.input(|input| input.pointer.interact_pos());
         let preview = self.thumbnail_drop_preview;
+        let reveal = std::mem::take(&mut self.reveal_navigated_thumbnail);
         let active_drag = egui::DragAndDrop::payload::<ThumbnailDrag>(ui.ctx())
             .filter(|drag| drag.project == project && !busy);
         let dragging = active_drag.is_some();
@@ -3911,6 +3963,15 @@ impl PixelForge {
                                         )
                                         .on_hover_text(caption);
                                     });
+                                    if reveal && (index == self.generation_selected
+                                        || (visible_count == 1 && indices.contains(&self.generation_selected)))
+                                    {
+                                        ui.scroll_to_rect_animation(
+                                            tile.response.rect,
+                                            None,
+                                            egui::style::ScrollAnimation::duration(0.18),
+                                        );
+                                    }
                                     tile_centers.push((index, tile.response.rect.center().x));
                                 }
                                 if let Some(rect) = show_gap(ui, group, end) {
@@ -8226,9 +8287,7 @@ impl eframe::App for PixelForge {
                         self.generation_tools_tab = generation_clicked;
                         if generation_clicked {
                             self.generation_workspace = true;
-                            if self.generation_models_rx.is_none() && self.generation_checkpoints.is_empty() {
-                                self.refresh_generation_models(ctx);
-                            }
+                            self.refresh_generation_models(ctx);
                         }
 
 
@@ -8625,6 +8684,8 @@ fn main() -> eframe::Result {
             if let Some(storage) = cc.storage {
                 app.prompt_guide.restore_layout(storage);
             }
+            app.refresh_generation_models(&cc.egui_ctx);
+            app.prompt_guide.start_ollama(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
@@ -8812,6 +8873,39 @@ mod workspace_tests {
             std::fs::remove_file(path).unwrap();
         }
         std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn arrow_navigation_stays_in_the_selected_images_group() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.create_thumbnail_group("Group".into(), &[]);
+        for group in [Some(0), None, Some(0), None, Some(0)] {
+            let mut item = fixture_thumbnail(&ctx, 10, None);
+            item.group = group;
+            app.append_thumbnail(item);
+        }
+        let frame = |app: &mut PixelForge, key| {
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key, physical_key: None, pressed: true, repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.show_generation_workspace(ui));
+            });
+        };
+        for index in [2, 4, 4] {
+            frame(&mut app, egui::Key::ArrowRight);
+            assert_eq!(app.generation_selected, index);
+        }
+        frame(&mut app, egui::Key::ArrowLeft);
+        assert_eq!(app.generation_selected, 2);
+        app.select_thumbnail(1, false);
+        frame(&mut app, egui::Key::ArrowRight);
+        assert_eq!(app.generation_selected, 3);
     }
 
     #[test]
@@ -9054,6 +9148,7 @@ mod workspace_tests {
         app.prompt_spelling.enabled=false;
         app.generation_auto_negative=true;
         app.generation_checkpoint="Fixture generation model".into();
+        app.generation_checkpoints.push(app.generation_checkpoint.clone());
         app.generation_prompt="Fixture initial prompt".into();
         let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([40,40,40,255]));
         let texture=ctx.load_texture("caption_fixture",ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
