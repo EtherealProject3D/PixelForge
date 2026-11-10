@@ -656,6 +656,8 @@ struct PixelForge {
     generation_dimension_step: u32,
     generation_zoom: f32,
     generation_pan: Vec2,
+    fullscreen_zoom: f32,
+    fullscreen_pan: Vec2,
     generation_batch_count: usize,
     generation_batch_done: usize,
     generation_random_seeds: bool,
@@ -893,6 +895,8 @@ impl Default for PixelForge {
             generation_dimension_step: 32,
             generation_zoom: 1.0,
             generation_pan: Vec2::ZERO,
+            fullscreen_zoom: 1.0,
+            fullscreen_pan: Vec2::ZERO,
             generation_batch_count: 1,
             generation_batch_done: 0,
             generation_random_seeds: true,
@@ -2879,6 +2883,9 @@ impl PixelForge {
         {
             self.select_thumbnail(index, false);
             self.reveal_navigated_thumbnail = true;
+            if self.display.image_fullscreen() {
+                self.fit_fullscreen_image();
+            }
         }
     }
 
@@ -2920,6 +2927,9 @@ impl PixelForge {
             .clicked()
         {
             self.capture_workspace_editor();
+            if !fullscreen {
+                self.fit_fullscreen_image();
+            }
             self.display.set_image_fullscreen(ui.ctx(), !fullscreen);
         }
 
@@ -2971,6 +2981,11 @@ impl PixelForge {
         }
     }
 
+    fn fit_fullscreen_image(&mut self) {
+        self.fullscreen_zoom = 1.0;
+        self.fullscreen_pan = Vec2::ZERO;
+    }
+
     fn show_fullscreen_image(&mut self, ui: &mut egui::Ui) {
         self.handle_image_navigation_keys(ui.ctx());
         let texture = self.generation_gallery.get(self.generation_selected)
@@ -2978,12 +2993,35 @@ impl PixelForge {
             .or(self.processed_texture.as_ref())
             .or(self.texture.as_ref());
         let canvas = ui.max_rect();
-        if let Some(texture) = texture {
-            let size = texture.size_vec2();
-            let scale = (canvas.width() / size.x).min(canvas.height() / size.y);
-            ui.painter().image(
-                texture.id(),
-                Rect::from_center_size(canvas.center(), size * scale),
+        if let Some((id, size)) = texture.map(|texture| (texture.id(), texture.size_vec2())) {
+            let fit = (canvas.width() / size.x).min(canvas.height() / size.y);
+            let center = canvas.center();
+            let response = ui.interact(canvas, ui.id().with("fullscreen_image"), Sense::click_and_drag());
+            if response.double_clicked() {
+                self.fit_fullscreen_image();
+            } else if response.dragged_by(egui::PointerButton::Primary) && self.fullscreen_zoom > 1.0 {
+                self.fullscreen_pan += response.drag_delta();
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+                && canvas.contains(pointer) && !self.viewer_control_at(canvas, pointer)
+            {
+                let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+                if scroll.abs() > 0.01 {
+                    let previous = self.fullscreen_zoom;
+                    let factor = (scroll * 0.002 * self.controls.zoom_sensitivity).exp();
+                    self.fullscreen_zoom = (previous * factor).clamp(1.0, 16.0);
+                    let anchor = pointer - center;
+                    self.fullscreen_pan =
+                        anchor - (anchor - self.fullscreen_pan) * (self.fullscreen_zoom / previous);
+                }
+            }
+            let displayed = size * (fit * self.fullscreen_zoom);
+            let pan_limit = ((displayed - canvas.size()) * 0.5).max(Vec2::ZERO);
+            self.fullscreen_pan = self.fullscreen_pan.clamp(-pan_limit, pan_limit);
+            ui.painter().with_clip_rect(canvas).image(
+                id,
+                Rect::from_center_size(center + self.fullscreen_pan, displayed),
                 Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 Color32::WHITE,
             );
@@ -9014,8 +9052,20 @@ mod workspace_tests {
         };
         click(&mut app, PixelForge::fullscreen_button_rect(canvas).center());
         assert!(app.display.image_fullscreen());
+        frame(&mut app, vec![
+            egui::Event::PointerMoved(canvas.center() + Vec2::new(30.0, 40.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, 3.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        assert!(app.fullscreen_zoom > 1.0);
+        assert_ne!(app.fullscreen_pan, Vec2::ZERO);
         click(&mut app, PixelForge::image_arrow_rect(canvas, true).center());
         assert_eq!(app.generation_selected, 2);
+        assert_eq!(app.fullscreen_zoom, 1.0);
+        assert_eq!(app.fullscreen_pan, Vec2::ZERO);
         assert!(app.reveal_navigated_thumbnail);
 
         frame(&mut app, vec![egui::Event::Key {
