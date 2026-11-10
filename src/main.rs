@@ -3028,7 +3028,7 @@ impl PixelForge {
             {
                 self.display.set_image_fullscreen(ctx, false);
             }
-        } else if toggle && self.crop.is_none()
+        } else if toggle && !self.display.shows_image_view() && self.crop.is_none()
             && (self.texture.is_some() || self.generation_gallery.get(self.generation_selected).is_some())
             && self.group_dialog.is_none() && self.rename_version.is_none()
             && self.closing_tab.is_none() && !self.exit_confirmation
@@ -3045,7 +3045,10 @@ impl PixelForge {
     }
 
     fn show_fullscreen_image(&mut self, ui: &mut egui::Ui) {
-        self.handle_image_navigation_keys(ui.ctx());
+        let interactive = self.display.image_fullscreen();
+        if interactive {
+            self.handle_image_navigation_keys(ui.ctx());
+        }
         let texture = self.generation_gallery.get(self.generation_selected)
             .map(|item| &item.texture)
             .or(self.processed_texture.as_ref())
@@ -3054,14 +3057,17 @@ impl PixelForge {
         if let Some((id, size)) = texture.map(|texture| (texture.id(), texture.size_vec2())) {
             let fit = (canvas.width() / size.x).min(canvas.height() / size.y);
             let center = canvas.center();
-            let response = ui.interact(canvas, ui.id().with("fullscreen_image"), Sense::click_and_drag());
+            let response = ui.interact(
+                canvas, ui.id().with("fullscreen_image"),
+                if interactive { Sense::click_and_drag() } else { Sense::hover() },
+            );
             if response.double_clicked() {
                 self.fit_fullscreen_image();
             } else if response.dragged_by(egui::PointerButton::Primary) && self.fullscreen_zoom > 1.0 {
                 self.fullscreen_pan += response.drag_delta();
                 ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
             }
-            if let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+            if interactive && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
                 && canvas.contains(pointer) && !self.viewer_control_at(canvas, pointer)
             {
                 let scroll = ui.input(|input| input.smooth_scroll_delta.y);
@@ -3084,7 +3090,9 @@ impl PixelForge {
                 Color32::WHITE,
             );
         }
-        self.show_image_viewer_controls(ui, canvas, true);
+        if interactive {
+            self.show_image_viewer_controls(ui, canvas, true);
+        }
     }
 
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
@@ -3282,6 +3290,47 @@ impl PixelForge {
         self.selection_mask.as_ref().is_some_and(|mask| {
             mask.pixels().len()==self.image_size[0]*self.image_size[1] && mask.pixels().iter().any(|&v|v>0)
         })
+    }
+
+    fn handle_remove_version_shortcut(&mut self, ctx: &egui::Context) {
+        if !self.generation_workspace || self.generation_gallery.is_empty()
+            || self.generation_running || self.ai_running || self.crop.is_some()
+            || self.group_dialog.is_some() || self.rename_version.is_some()
+            || self.pending_open.is_some() || self.closing_tab.is_some() || self.exit_confirmation
+            || (self.display.shows_image_view() && !self.display.image_fullscreen())
+            || egui::Popup::is_any_open(ctx)
+            || ctx.memory(|memory| memory.focused())
+                .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+        {
+            return;
+        }
+        let remove = ctx.input_mut(|input| {
+            let mut remove = false;
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key: egui::Key::Delete, pressed: true, repeat, modifiers, ..
+                } = event
+                    && modifiers.matches_exact(egui::Modifiers::NONE)
+                {
+                    remove |= !repeat;
+                    false
+                } else {
+                    true
+                }
+            });
+            remove
+        });
+        if remove {
+            self.remove_workspace_version(self.generation_selected);
+            if self.display.image_fullscreen() {
+                if self.generation_gallery.is_empty() {
+                    self.display.set_image_fullscreen(ctx, false);
+                } else {
+                    self.fit_fullscreen_image();
+                    self.reveal_navigated_thumbnail = true;
+                }
+            }
+        }
     }
 
     fn remove_workspace_version(&mut self, removed:usize) {
@@ -4136,7 +4185,7 @@ impl PixelForge {
                                             if ui
                                                 .add_enabled(
                                                     !busy,
-                                                    egui::Button::new("Remove Image Version"),
+                                                    egui::Button::new("Remove Image Version").shortcut_text("Del"),
                                                 )
                                                 .clicked()
                                             {
@@ -8283,7 +8332,10 @@ impl eframe::App for PixelForge {
         self.ensure_workspace(ctx);
 
         self.handle_save_shortcut(ctx);
-        if self.display.image_fullscreen() {
+        self.handle_remove_version_shortcut(ctx);
+        if self.display.shows_image_view() && !self.exit_confirmation
+            && !(self.dependency_manager.busy() && ctx.input(|input| input.viewport().close_requested()))
+        {
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(Color32::from_gray(10)))
                 .show(ctx, |ui| self.show_fullscreen_image(ui));
@@ -9076,6 +9128,38 @@ mod workspace_tests {
     }
 
     #[test]
+    fn delete_removes_only_the_current_version_and_leaves_text_editing_alone() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        for seed in [11, 22, 33] {
+            app.append_thumbnail(fixture_thumbnail(&ctx, seed, None));
+        }
+        app.select_thumbnail(1, false);
+        app.select_thumbnail(2, true);
+        let key = |pressed, repeat| egui::Event::Key {
+            key: egui::Key::Delete, physical_key: None, pressed, repeat,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let input = |event| egui::RawInput { events: vec![event], ..Default::default() };
+        let id = egui::Id::new("delete_shortcut_text_focus");
+        let mut text = "Prompt".to_owned();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut text).id(id)).request_focus();
+            });
+        });
+        let _ = ctx.run(input(key(true, false)), |ctx| app.handle_remove_version_shortcut(ctx));
+        assert_eq!(app.generation_gallery.len(), 3);
+        ctx.memory_mut(|memory| memory.surrender_focus(id));
+        let _ = ctx.run(input(key(false, false)), |ctx| app.handle_remove_version_shortcut(ctx));
+        let _ = ctx.run(input(key(true, false)), |ctx| app.handle_remove_version_shortcut(ctx));
+        assert_eq!(app.generation_gallery.iter().map(|item| item.seed).collect::<Vec<_>>(), [11, 33]);
+        let _ = ctx.run(input(key(true, true)), |ctx| app.handle_remove_version_shortcut(ctx));
+        assert_eq!(app.generation_gallery.len(), 2);
+        assert!(app.project_dirty);
+    }
+
+    #[test]
     fn fullscreen_edge_controls_browse_and_escape_preserves_editor_camera() {
         let ctx = egui::Context::default();
         let mut app = PixelForge::default();
@@ -9091,8 +9175,9 @@ mod workspace_tests {
         let frame = |app: &mut PixelForge, events| {
             let _ = ctx.run(egui::RawInput { screen_rect: Some(canvas), events, ..Default::default() }, |ctx| {
                 app.handle_image_fullscreen_shortcuts(ctx);
+                app.display.update(ctx);
                 egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx, |ui| {
-                    if app.display.image_fullscreen() {
+                    if app.display.shows_image_view() {
                         app.show_fullscreen_image(ui);
                     } else {
                         app.show_image_viewer_controls(ui, canvas, false);
@@ -9134,6 +9219,11 @@ mod workspace_tests {
         assert_eq!(app.generation_selected, 2);
         assert_eq!(app.generation_zoom, 2.0);
         assert_eq!(app.generation_pan, Vec2::new(25.0, 40.0));
+
+        for _ in 0..4 {
+            frame(&mut app, vec![]);
+        }
+        assert!(!app.display.shows_image_view());
 
         let alt_enter = |pressed, repeat| egui::Event::Key {
             key: egui::Key::Enter, physical_key: None, pressed, repeat,

@@ -1,10 +1,12 @@
 //! Native fullscreen with a separate normal-window snapshot (physical pixels).
 use egui::{Context, ViewportCommand as Cmd};
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct Display {
     fullscreen: bool,
     image_fullscreen: bool,
+    image_fullscreen_exit: Option<Instant>,
     applied: Option<bool>,
     placement: Option<[f32; 4]>,
     last_position: Option<[f32; 2]>,
@@ -150,7 +152,7 @@ impl Display {
         }
     }
     pub fn resize_edges(&self, ctx: &Context) {
-        if self.fullscreen || self.image_fullscreen || self.dragging.is_some() || ctx.input(|i| i.viewport().maximized.unwrap_or(false)) { return; }
+        if self.fullscreen || self.shows_image_view() || self.dragging.is_some() || ctx.input(|i| i.viewport().maximized.unwrap_or(false)) { return; }
         let r = ctx.screen_rect();
         if let Some(p) = ctx.input(|i| i.pointer.hover_pos()) {
             // Native moves can deliver positions outside the client area, especially
@@ -176,14 +178,20 @@ impl Display {
         }
     }
     pub fn toggle(&mut self) {
-        if !self.image_fullscreen {
+        if !self.shows_image_view() {
             self.fullscreen = !self.fullscreen;
         }
     }
     pub fn image_fullscreen(&self) -> bool {
         self.image_fullscreen
     }
+    pub fn shows_image_view(&self) -> bool {
+        self.image_fullscreen || self.image_fullscreen_exit.is_some()
+    }
+
     pub fn set_image_fullscreen(&mut self, ctx: &Context, open: bool) {
+        self.image_fullscreen_exit = (!open && self.image_fullscreen && !self.fullscreen)
+            .then(|| Instant::now() + Duration::from_millis(350));
         self.image_fullscreen = open;
         ctx.request_repaint();
     }
@@ -244,7 +252,27 @@ impl Display {
             ctx.request_repaint();
             return;
         }
-        if !self.image_fullscreen && self.applied == Some(fullscreen) && self.restore_frames == 0 {
+        // Keep painting the image until the native window returns to its editor geometry.
+        if let Some(deadline) = self.image_fullscreen_exit {
+            let scale = ctx.pixels_per_point();
+            let size_restored = self.maximized || self.placement.is_none_or(|[_, _, w, h]| {
+                viewport.inner_rect.is_none_or(|rect| {
+                    (rect.size() * scale - egui::vec2(w, h)).length() < 4.0
+                })
+            });
+            if self.applied == Some(false) && self.restore_frames == 0
+                && viewport.fullscreen != Some(true)
+                && viewport.maximized.is_none_or(|maximized| maximized == self.maximized)
+                && size_restored
+            {
+                self.image_fullscreen_exit = None;
+            } else if Instant::now() >= deadline && self.applied == Some(false) && self.restore_frames == 0 {
+                self.image_fullscreen_exit = None;
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(16));
+            }
+        }
+        if !self.shows_image_view() && self.applied == Some(fullscreen) && self.restore_frames == 0 {
             let viewport = ctx.input(|i| i.viewport().clone());
             if viewport.minimized != Some(true) && viewport.fullscreen == Some(fullscreen) {
                 if let Some(rect) = viewport.outer_rect {
@@ -257,7 +285,7 @@ impl Display {
             }
         }
         // Observe placement only after transitions have settled. Never persist a fullscreen rectangle.
-        if self.applied == Some(false) && self.restore_frames == 0 {
+        if !self.shows_image_view() && self.applied == Some(false) && self.restore_frames == 0 {
             let viewport = ctx.input(|i| i.viewport().clone());
             if viewport.fullscreen == Some(false) && viewport.minimized != Some(true) {
                 let maximized = viewport.maximized.unwrap_or(false);
@@ -557,6 +585,35 @@ mod tests {
             assert_eq!(commands(exited).contains(&Cmd::Fullscreen(false)), !fullscreen);
             assert_eq!(display.applied, Some(fullscreen));
         }
+    }
+
+    #[test]
+    fn image_view_stays_visible_until_the_window_is_restored() {
+        let ctx = Context::default();
+        let mut display = Display {
+            image_fullscreen: true,
+            applied: Some(true),
+            placement: Some([80.0, 80.0, 1000.0, 700.0]),
+            ..Default::default()
+        };
+        let frame = |display: &mut Display, fullscreen, size| {
+            let mut input = egui::RawInput::default();
+            let viewport = input.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+            viewport.fullscreen = Some(fullscreen);
+            viewport.inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+            ctx.run(input, |ctx| display.update(ctx))
+        };
+        display.set_image_fullscreen(&ctx, false);
+        let screen = egui::vec2(1920.0, 1080.0);
+        let exit = frame(&mut display, true, screen);
+        assert!(exit.viewport_output[&egui::ViewportId::ROOT].commands.contains(&Cmd::Fullscreen(false)));
+        assert!(display.shows_image_view());
+        for _ in 0..3 {
+            let _ = frame(&mut display, false, screen);
+            assert!(display.shows_image_view());
+        }
+        let _ = frame(&mut display, false, egui::vec2(1000.0, 700.0));
+        assert!(!display.shows_image_view());
     }
 
     #[test]
