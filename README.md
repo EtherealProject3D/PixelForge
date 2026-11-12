@@ -6,20 +6,21 @@
 
 PixelForge is a Windows desktop image studio that brings local AI generation, conversational editing, photo restoration, and traditional adjustments into one workspace. Generate an image or import a photograph, make changes, and compare every result without switching between separate viewers.
 
-**Version 0.6.6 · Windows x64 · Rust + egui · Local ComfyUI**
+**Version 0.6.7 · Windows x64 · Rust + egui · Local ComfyUI**
 
-[Download v0.6.6](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.6) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
+[Download v0.6.7](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.7) · [Report an issue](https://github.com/EtherealProject3D/PixelForge/issues) · [Restoration guide](docs/PHOTO_RESTORATION.md)
 
 ## One workspace, from first image to final export
 
 **Edit**, **AI Tools**, **Generate**, and **Selection** share the same canvas and bottom version history. Switching tools keeps the working image, zoom, pan, and selection in place.
 
 - **Project tabs:** keep several projects open with separate images, version histories, and settings. Background jobs return results to the project that started them.
-- **Thumbnail groups:** Ctrl-click to select several versions, then right-click and choose **Add to New Group…**. Collapse groups to a cover thumbnail, drag versions within or between groups, and drag group headers to reorder groups. Right-click to rename or remove a version. Version names stay with their images when you reorder them.
-- **New versions:** edits join the source image's group. Imports and new generations join the selected group. Right-click a thumbnail or group to open it in an independent, unsaved project. When opening a group, choose whether to keep the group or open its images as individual thumbnails.
+- **Thumbnail groups:** Click a group header to select where new images and edits go. Press Escape to clear the group selection. Click its square to collapse or expand it, and right-click empty filmstrip space to create a blank group. Ctrl-click to select several versions, then right-click and choose **Add to New Group…**. Drag versions within or between groups, and drag group headers to reorder groups. Right-click to rename or remove a version. Version names stay with their images when you reorder them.
+- **New versions:** edits join the selected group, falling back to the source image's group when no group is selected. Imports and new generations join the selected group or Ungrouped. Right-click a thumbnail or group to open it in an independent, unsaved project. When opening a group, choose whether to keep the group or open its images as individual thumbnails.
 - **Sliding comparison:** keep a reference on the left and a working version on the right. New results update the right side while your reference stays selected.
+- **Image viewing:** Use Left / Right or hover near the viewer edges to browse the current group. Hover at the bottom right for the full-screen button, or press Alt+Enter. In full screen, scroll to zoom, drag to pan, double-click to fit, and press Esc to return. Click the divider handles to hide or restore the sidebar and thumbnails.
 - **Canvas navigation:** scroll over the canvas to zoom, or over the filmstrip to browse thumbnails. Pan and double-click to fit. Rotate a version in place by 90° to use that orientation in subsequent edits.
-- **Project saving:** save images, versions, names, settings, adjustments, and selections in a `.pxf` project. Save & Exit updates the existing file.
+- **Project saving:** save images, versions, names, settings, adjustments, and selections in a `.pxf` project. Ctrl+S saves the active project. Open Project accepts multiple project files, each in its own tab.
 - **Image export:** save a single image or use **Export → Batch Export** to save selected or all thumbnails as PNG, JPEG, or WebP.
 
 ## Local generation and conversational editing
@@ -34,7 +35,7 @@ Separate **Initial prompt**, **Negative prompt**, and **Changes prompt** areas m
 - Styles, aspect ratios, custom resolution, batches, seeds, sampling steps, and model-specific defaults.
 - Automatic SDXL negative prompts with editable additional exclusions.
 - English spell checking with red underlines and right-click suggestions. Prompt editors keep highlighted text selected when you right-click to Cut or Copy.
-- Use local AI Assist in **Prompt Guide** to revise a draft. Choose **Transfer to Initial Prompt** to use a suggestion and keep your scratchpad for further drafts.
+- Use local AI Assist in **Prompt Guide** to revise a draft. Choose **Transfer to Initial Prompt** to use a suggestion and keep your scratchpad for further drafts. The Scratchpad opens by default. Saved user tags have a ◆ mark and can be dragged between categories.
 - Bottom generation progress and cancellation, plus image settings and prompt details.
 
 FLUX Klein uses CFG 1 and ignores negative prompts. SDXL selection edits use inpainting; Qwen and FLUX edit internally and composite the selected area back into the original. Edits return to the source pixel dimensions.
@@ -81,18 +82,20 @@ Downloads are substantial: SDXL checkpoints are typically about 7 GB each, FLUX 
 
 Models and third-party engines are downloaded separately and remain subject to their publishers' licenses and terms. No cloud generation service or API key is required by the bundled workflows.
 
-## What's new in v0.6.6
+## What's new in v0.6.7
 
-- Open multiple projects with separate image histories and job results.
-- Organize the filmstrip with collapsible groups, drag and drop, and stable version names.
-- Export selected thumbnails in one batch, open groups as new projects, and resume supported model downloads.
-- Find diagnostics, dependencies, and models in separate Setup windows.
+- Browse the current image's group with Left / Right or arrows that appear near the viewer edges.
+- View an image full screen with Alt+Enter, zoom with the mouse wheel, drag to pan, and double-click to fit. Alt+Enter or Esc returns to the editor.
+- Click the divider handles to hide or restore the sidebar and thumbnail strip. Group headers select the destination for new images and edits. Escape clears that selection.
+- Open several projects at once, save the active project with Ctrl+S, and remove its selected image version with Delete.
+- Start Ollama and ComfyUI in the background when PixelForge opens, and select models discovered on the connected backend.
+- Use improved Danbooru tag wrapping and drag saved user tags between categories. Prompt Guide opens with the Scratchpad visible and restores its size and position.
 
-See the [v0.6.6 release notes](docs/RELEASE_NOTES_v0.6.6.md) for details.
+See the [v0.6.7 release notes](docs/RELEASE_NOTES_v0.6.7.md) for details.
 
 ## Getting started on Windows
 
-1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.6): **PixelForge-v0.6.6-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.6-windows-x64.zip** for portable use.
+1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.7): **PixelForge-v0.6.7-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.7-windows-x64.zip** for portable use.
 2. The installer defaults to **Program Files\Pixel Forge**, adds a Start menu entry, and offers an optional desktop shortcut. Alternatively, extract the portable ZIP into a writable folder and open **PixelForge.exe**. Neither download requires Rust.
 3. Open **Setup → Dependencies** to check and install the components needed by your tools. A count beside **Setup** shows missing required components.
 4. For generation and editing, open **Setup → Setup & Diagnostics** to connect ComfyUI, choose Auto, GPU, or CPU, and run diagnostics. You can use a compatible ComfyUI Desktop installation or PixelForge's managed portable backend.
@@ -128,7 +131,7 @@ Install Git, Rust stable, and Visual Studio C++ build tools with the Windows SDK
 ```powershell
 git clone https://github.com/EtherealProject3D/PixelForge.git
 Set-Location PixelForge
-git switch --detach v0.6.6
+git switch --detach v0.6.7
 cargo test --locked
 cargo run --locked --release
 ```
@@ -146,6 +149,6 @@ Close PixelForge before rebuilding its executable. Source checkouts include `scr
 
 ## Release notes and support
 
-Read [What's new in v0.6.6](docs/RELEASE_NOTES_v0.6.6.md) for the release overview. Windows automated tests cover processing helpers, AI workflow construction, version/selection state, comparison interactions, and project round trips. GPU speed and restoration quality vary by model and photo.
+Read [What's new in v0.6.7](docs/RELEASE_NOTES_v0.6.7.md) for the release overview. Windows automated tests cover processing helpers, AI workflow construction, version/selection state, comparison interactions, and project round trips. GPU speed and restoration quality vary by model and photo.
 
 When [reporting an issue](https://github.com/EtherealProject3D/PixelForge/issues), include the version, GPU, model, operation, image dimensions, and exact error. Only attach photos you are comfortable sharing publicly.
