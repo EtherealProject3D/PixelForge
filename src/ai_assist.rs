@@ -57,7 +57,69 @@ fn list(client: &Client) -> Result<Vec<String>, String> {
 }
 
 pub(crate) fn models() -> Result<Vec<String>, String> {
-    list(&client()?)
+    static START: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let http = client()?;
+    let _guard = START.lock().map_err(|_| "Ollama startup is unavailable.")?;
+    if let Ok(models) = list(&http) {
+        return Ok(models);
+    }
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], 11434));
+    let mut child =
+        if std::net::TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_err() {
+            Some(start_ollama()?)
+        } else {
+            None
+        };
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        if let Ok(models) = list(&http) {
+            return Ok(models);
+        }
+        if let Some(process) = child.as_mut()
+            && let Ok(Some(_)) = process.try_wait()
+        {
+            // An Ollama instance may have started independently in the meantime.
+            return list(&http);
+        }
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    Err("Ollama did not become ready. Check the installation and try again.".into())
+}
+
+fn start_ollama() -> Result<std::process::Child, String> {
+    let name = if cfg!(windows) {
+        "ollama.exe"
+    } else {
+        "ollama"
+    };
+    let local = std::env::var_os("LOCALAPPDATA").map(|root| {
+        std::path::PathBuf::from(root)
+            .join("Programs")
+            .join("Ollama")
+    });
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let executable = local
+        .into_iter()
+        .chain(std::env::split_paths(&path))
+        .filter(|directory| directory.is_absolute())
+        .map(|directory| directory.join(name))
+        .find(|candidate| candidate.is_file())
+        .ok_or("Ollama is not installed. Install it from Setup → Dependencies.")?;
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("serve")
+        .env("OLLAMA_HOST", "127.0.0.1:11434")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    command
+        .spawn()
+        .map_err(|error| format!("Could not start Ollama. {error}"))
 }
 
 #[derive(Default, Clone)]

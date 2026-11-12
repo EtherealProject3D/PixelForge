@@ -656,6 +656,8 @@ struct PixelForge {
     generation_dimension_step: u32,
     generation_zoom: f32,
     generation_pan: Vec2,
+    fullscreen_zoom: f32,
+    fullscreen_pan: Vec2,
     generation_batch_count: usize,
     generation_batch_done: usize,
     generation_random_seeds: bool,
@@ -665,6 +667,7 @@ struct PixelForge {
     edit_checkpoint: String,
     conversation_draft: String,
     workspace_ai_parent: Option<usize>,
+    workspace_ai_group: Option<Option<usize>>,
     workspace_editor: Option<usize>,
     crop: Option<crop::Crop>,
     generation_gallery: Vec<GeneratedItem>,
@@ -673,9 +676,13 @@ struct PixelForge {
     ungrouped_collapsed: bool,
     ungrouped_position: usize,
     thumbnail_destination: Option<usize>,
+    thumbnail_ungrouped_selected: bool,
     group_dialog: Option<GroupDialog>,
     thumbnail_selection: Vec<usize>,
     thumbnail_strip_overflows: bool,
+    thumbnail_strip_hidden: bool,
+    reveal_navigated_thumbnail: bool,
+    tools_sidebar_hidden: bool,
     thumbnail_drop_preview: Option<(Option<usize>, usize)>,
     generation_project_path: Option<PathBuf>,
     refinement_source: Option<usize>,
@@ -888,6 +895,8 @@ impl Default for PixelForge {
             generation_dimension_step: 32,
             generation_zoom: 1.0,
             generation_pan: Vec2::ZERO,
+            fullscreen_zoom: 1.0,
+            fullscreen_pan: Vec2::ZERO,
             generation_batch_count: 1,
             generation_batch_done: 0,
             generation_random_seeds: true,
@@ -897,6 +906,7 @@ impl Default for PixelForge {
             edit_checkpoint: String::new(),
             conversation_draft: String::new(),
             workspace_ai_parent: None,
+            workspace_ai_group: None,
             workspace_editor: None,
             crop: None,
             generation_gallery: Vec::new(),
@@ -905,9 +915,13 @@ impl Default for PixelForge {
             ungrouped_collapsed: false,
             ungrouped_position: 0,
             thumbnail_destination: None,
+            thumbnail_ungrouped_selected: false,
             group_dialog: None,
             thumbnail_selection: Vec::new(),
             thumbnail_strip_overflows: false,
+            thumbnail_strip_hidden: false,
+            reveal_navigated_thumbnail: false,
+            tools_sidebar_hidden: false,
             thumbnail_drop_preview: None,
             generation_project_path: None,
             refinement_source: None,
@@ -1213,7 +1227,7 @@ impl PixelForge {
             }
             queue.pop_front();
             if extension == "pxf" {
-                self.open_project_path(ctx, path);
+                self.open_project_path(ctx, &path);
             } else {
                 self.load_image_path(ctx, path);
             }
@@ -1349,7 +1363,7 @@ impl PixelForge {
         } else {
             format!("{}, {}", self.generation_prompt, style)
         };
-        self.generation_batch_group = self.thumbnail_destination;
+        self.generation_batch_group = self.thumbnail_group_for(self.refinement_source);
         self.generation_batch_settings = Some(GenerationSettings {
             lora: lora.clone(),
             lora_strength: self.generation_lora_strength,
@@ -1473,6 +1487,8 @@ impl PixelForge {
             }
             Ok(Err(error)) => {
                 self.generation_models_rx = None;
+                self.generation_checkpoints.clear();
+                self.generation_loras.clear();
                 self.generation_models_status = error;
             }
             Err(std::sync::mpsc::TryRecvError::Empty) => {
@@ -1480,6 +1496,8 @@ impl PixelForge {
             }
             Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                 self.generation_models_rx = None;
+                self.generation_checkpoints.clear();
+                self.generation_loras.clear();
                 self.generation_models_status = "The model discovery worker stopped. Reconnect to try again.".into();
             }
         }
@@ -1487,7 +1505,7 @@ impl PixelForge {
 
     fn select_default_checkpoint(&mut self) {
         if self.generation_checkpoint.is_empty() {
-            if let Some(checkpoint) = self.generation_checkpoints.first() {
+            if let Some(checkpoint) = self.generation_checkpoints.iter().find(|name| !ai_generation::is_qwen(name)) {
                 self.generation_checkpoint = checkpoint.clone();
                 self.reset_generation_sampling();
             }
@@ -1782,7 +1800,7 @@ impl PixelForge {
         settings.width=w;settings.height=h;settings.custom_size=true;
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("Crop at {x}, {y}: {w} × {h}"));
         let seed=item.seed;
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor,settings,pixels:Arc::new(pixels),texture,seed});
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:self.thumbnail_group_for(Some(parent)), editor,settings,pixels:Arc::new(pixels),texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.refinement_source=None;
@@ -1801,7 +1819,7 @@ impl PixelForge {
         settings.refine_prompt=Some(label.into());
         let texture=ctx.load_texture(format!("studio_snapshot_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
         let seed=item.seed;
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed});
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:self.thumbnail_group_for(settings.refine_parent), editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -1856,7 +1874,8 @@ impl PixelForge {
         settings.refine_parent=Some(parent);settings.refine_prompt=Some(format!("{label} · strength {:.0}%",self.ai_strength*100.0));
         settings.checkpoint=format!("AI Tools: {label}");settings.width=pixels.width();settings.height=pixels.height();settings.steps=0;settings.cfg=0.0;
         let texture=ctx.load_texture(format!("studio_ai_{}",self.generation_gallery.len()),ColorImage::from_rgba_unmultiplied([pixels.width() as usize,pixels.height() as usize],pixels.as_raw()),TextureOptions::LINEAR);
-        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group:None, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed:0});
+        let group = self.workspace_ai_group.unwrap_or_else(|| self.thumbnail_group_for(Some(parent)));
+        self.blank_project=false;self.append_thumbnail(GeneratedItem {version_number: 0,group, editor:studio::EditorState::default(),settings,pixels:Arc::new(pixels),texture,seed:0});
         self.generation_selected=self.generation_gallery.len()-1;
         self.project_dirty=true;
         self.bind_workspace_editor(ctx);
@@ -1882,9 +1901,13 @@ impl PixelForge {
         }
         self.show_conversation(ui);
         ui.separator();
-        if self.generation_checkpoint.is_empty() {
-            crate::interaction::label(ui,"Connect a local model to begin.");
-            if ui.button("Connect Models").clicked() { self.refresh_generation_models(ui.ctx()); }
+        if !self.generation_checkpoint.is_empty()
+            && !self.generation_checkpoints.contains(&self.generation_checkpoint)
+        {
+            crate::interaction::small(ui, "The project’s selected checkpoint is unavailable on the connected backend.");
+        }
+        if ui.add_enabled(self.generation_models_rx.is_none(), egui::Button::new("Refresh Models")).clicked() {
+            self.refresh_generation_models(ui.ctx());
         }
         if self
             .generation_status
@@ -2324,6 +2347,7 @@ impl PixelForge {
         current_json["ungrouped_collapsed"] = serde_json::json!(self.ungrouped_collapsed);
         current_json["ungrouped_position"] = serde_json::json!(self.ungrouped_position);
         current_json["thumbnail_destination"] = serde_json::json!(self.thumbnail_destination);
+        current_json["thumbnail_ungrouped_selected"] = serde_json::json!(self.thumbnail_ungrouped_selected);
         current_json["thumbnail_groups"] =
             serde_json::json!(self.thumbnail_groups.iter()
             .map(|group| serde_json::json!({"name": group.name, "collapsed": group.collapsed}))
@@ -2358,10 +2382,21 @@ impl PixelForge {
             Err(e) => self.generation_status = format!("Save failed: {e}"),
         }
     }
-    fn open_generation_project(&mut self,path:&std::path::Path,ctx:&egui::Context) {
-        let project=match generation_project::load(path) {Ok(p)=>p,Err(e)=>{self.generation_status=format!("Open failed: {e}");return}};
+    fn open_generation_project(&mut self, path: &std::path::Path, ctx: &egui::Context) -> bool {
+        let project = match generation_project::load(path) {
+            Ok(project) => project,
+            Err(error) => {
+                self.generation_status = format!("Open failed: {error}");
+                return false;
+            }
+        };
         for item in &project.items {
-            if let Err(error)=studio::EditorState::from_json(&item.settings["editor"],item.pixels.width(),item.pixels.height()) {self.generation_status=format!("Open failed: {error}");return;}
+            if let Err(error) = studio::EditorState::from_json(
+                &item.settings["editor"], item.pixels.width(), item.pixels.height(),
+            ) {
+                self.generation_status = format!("Open failed: {error}");
+                return false;
+            }
         }
         self.create_project_tab();
         self.blank_project = false;
@@ -2388,6 +2423,8 @@ impl PixelForge {
             .as_u64()
             .and_then(|index| usize::try_from(index).ok())
             .filter(|&index| index < self.thumbnail_groups.len());
+        self.thumbnail_ungrouped_selected = self.thumbnail_destination.is_none()
+            && project.current["thumbnail_ungrouped_selected"].as_bool().unwrap_or(false);
         let gallery: Vec<GeneratedItem> = project
             .items
             .into_iter()
@@ -2467,6 +2504,7 @@ impl PixelForge {
                 .unwrap_or(1),
         );
         self.generation_selected=project.selected.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare_index=project.compare_index.min(self.generation_gallery.len().saturating_sub(1));self.generation_compare=project.compare && self.generation_gallery.len()>1;self.generation_project_path=Some(path.to_path_buf());self.generation_workspace=true;self.generation_status=format!("Opened {} ({} images)",path.display(),self.generation_gallery.len());
+        true
     }
     fn import_generation_images(&mut self, ctx: &egui::Context) {
         if let Some(paths) = rfd::FileDialog::new()
@@ -2651,51 +2689,31 @@ impl PixelForge {
                 if ui.button("Cancel").clicked() { self.generation_cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
             });
         }
-        ui.horizontal(|ui| {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.small_button("+ New Group").clicked() {
-                    self.group_dialog = Some(GroupDialog::Name {
-                        group: None,
-                        name: String::new(),
-                        thumbnails: self.thumbnail_selection.clone(),
-                    });
-                }
-                self.show_thumbnail_destination(ui);
-                let status = if self.generation_status.is_empty() {
-                    &self.generation_models_status
-                } else {
-                    &self.generation_status
-                };
-                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    crate::interaction::small(ui, status);
-                });
-            });
-        });
+        let status = if self.generation_status.is_empty() {
+            &self.generation_models_status
+        } else {
+            &self.generation_status
+        };
+        crate::interaction::small(ui, status);
     }
 
-    fn show_thumbnail_destination(&mut self, ui: &mut egui::Ui) {
-        let mut destination = self.thumbnail_destination;
-        let current = destination.map_or("Ungrouped", |index| {
-            self.thumbnail_groups[index].name.as_str()
-        });
-        egui::ComboBox::from_id_salt(("thumbnail_destination", self.active_tab))
-            .width(150.0)
-            .truncate()
-            .selected_text(format!("Add to: {current}"))
-            .show_ui(ui, |ui| {
-                for group in self.thumbnail_group_order() {
-                    let name = group.map_or("Ungrouped", |index| {
-                        self.thumbnail_groups[index].name.as_str()
-                    });
-                    ui.selectable_value(&mut destination, group, name);
-                }
-            })
-            .response
-            .on_hover_text("Destination for new generations and imported images");
-        if self.thumbnail_destination != destination {
-            self.thumbnail_destination = destination;
+    fn selected_thumbnail_group(&self) -> Option<Option<usize>> {
+        self.thumbnail_destination
+            .map(Some)
+            .or_else(|| self.thumbnail_ungrouped_selected.then_some(None))
+    }
+
+    fn select_thumbnail_group(&mut self, selection: Option<Option<usize>>) {
+        if self.selected_thumbnail_group() != selection {
+            self.thumbnail_destination = selection.flatten();
+            self.thumbnail_ungrouped_selected = selection == Some(None);
             self.project_dirty = true;
         }
+    }
+
+    fn thumbnail_group_for(&self, source: Option<usize>) -> Option<usize> {
+        self.selected_thumbnail_group()
+            .unwrap_or_else(|| source.and_then(|index| self.generation_gallery.get(index)?.group))
     }
 
     fn show_conversation(&mut self, ui: &mut egui::Ui) {
@@ -2711,15 +2729,13 @@ impl PixelForge {
         let model_row_height = ui.spacing().interact_size.y.max(ui.text_style_height(&egui::TextStyle::Button)) + ui.spacing().item_spacing.y;
         let generation_menu_height = model_row_height * (self.generation_checkpoints.len() + 2) as f32 + 16.0;
         egui::ComboBox::from_id_salt("initial_generation_model").width(ui.available_width()).height(generation_menu_height).truncate()
-            .selected_text(if self.generation_checkpoint.is_empty() {
-                "Select a checkpoint"
+            .selected_text(if self.generation_checkpoints.contains(&self.generation_checkpoint) {
+                self.generation_checkpoint.as_str()
             } else {
-                &self.generation_checkpoint
+                "Select an available checkpoint"
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.generation_checkpoint,ai_generation::FLUX_KLEIN.into(),format!("{} — Fast generation, prompt-driven images, instruction-based editing",ai_generation::FLUX_KLEIN));
-                ui.selectable_value(&mut self.generation_checkpoint,ai_generation::Z_IMAGE.into(),format!("{} — Fast photographic generation, natural lighting",ai_generation::Z_IMAGE));
-                for checkpoint in &self.generation_checkpoints {
+                for checkpoint in self.generation_checkpoints.iter().filter(|name| !ai_generation::is_qwen(name)) {
                     let lower = checkpoint.to_ascii_lowercase();
                     let best_for = if lower.contains("cyberrealistic") || lower.contains("pony") {
                         "Realistic portraits, character images, detailed photography"
@@ -2750,7 +2766,8 @@ impl PixelForge {
             ui.text_style_height(&egui::TextStyle::Button) + 2.0 * ui.spacing().button_padding.y,
         );
         let can_generate = !self.generation_running && !self.ai_running
-            && !self.generation_prompt.trim().is_empty() && !self.generation_checkpoint.is_empty();
+            && !self.generation_prompt.trim().is_empty()
+            && self.generation_checkpoints.contains(&self.generation_checkpoint);
         let create = egui::RichText::new("Create New Image").size(ui.text_style_height(&egui::TextStyle::Button) * 1.25);
         let create_clicked = ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
             ui.add_enabled(can_generate, theme::primary_text(create).min_size(egui::vec2(width, button_height * 2.0))).clicked()
@@ -2764,7 +2781,7 @@ impl PixelForge {
                 self.generation_prompt.clear();
             }
             if ui.add(egui::Button::new("Prompt Guide").min_size(size)).clicked() {
-                self.prompt_guide.open = !self.prompt_guide.open;
+                self.prompt_guide.toggle();
             }
         });
         if self.prompt_guide.open {
@@ -2795,10 +2812,9 @@ impl PixelForge {
         let edit_menu_height = model_row_height * (self.generation_checkpoints.len() + 4) as f32 + 16.0;
         egui::ComboBox::from_id_salt("edit_model").width(ui.available_width()).height(edit_menu_height).truncate().selected_text(if self.edit_checkpoint.is_empty() { "Use generation model" } else { &self.edit_checkpoint }).show_ui(ui, |ui| {
             ui.selectable_value(&mut self.edit_checkpoint, String::new(), "Use generation model");
-            for name in [ai_generation::QWEN_EDIT,ai_generation::QWEN_EDIT_2511,ai_generation::FLUX_KLEIN] {
-                ui.selectable_value(&mut self.edit_checkpoint,name.into(),name);
+            for model in self.generation_checkpoints.iter().filter(|name| name.as_str() != ai_generation::Z_IMAGE) {
+                ui.selectable_value(&mut self.edit_checkpoint, model.clone(), model);
             }
-            for model in &self.generation_checkpoints { ui.selectable_value(&mut self.edit_checkpoint, model.clone(), model); }
         });
         crate::interaction::label(ui,format!("Edit model: {}", editing_checkpoint(&self.generation_checkpoint, &self.edit_checkpoint, true)));
         let edit_model=editing_checkpoint(&self.generation_checkpoint,&self.edit_checkpoint,true).to_owned();
@@ -2850,23 +2866,259 @@ impl PixelForge {
         if self.generation_checkpoints.is_empty() && ui.button("Connect / Refresh Models").clicked() { self.refresh_generation_models(ui.ctx()); }
     }
 
+    fn adjacent_thumbnail(&self, forward: bool) -> Option<usize> {
+        let current = self.generation_selected;
+        let group = self.generation_gallery.get(current)?.group;
+        if forward {
+            self.generation_gallery.iter().enumerate().skip(current + 1)
+                .find(|(_, item)| item.group == group).map(|(index, _)| index)
+        } else {
+            self.generation_gallery[..current].iter().rposition(|item| item.group == group)
+        }
+    }
+
+    fn navigate_thumbnails(&mut self, forward: bool) {
+        if self.crop.is_none()
+            && let Some(index) = self.adjacent_thumbnail(forward)
+        {
+            self.select_thumbnail(index, false);
+            self.reveal_navigated_thumbnail = true;
+            if self.display.image_fullscreen() {
+                self.fit_fullscreen_image();
+            }
+        }
+    }
+
+    fn handle_image_navigation_keys(&mut self, ctx: &egui::Context) {
+        for (key, forward) in [(egui::Key::ArrowLeft, false), (egui::Key::ArrowRight, true)] {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key)) {
+                self.navigate_thumbnails(forward);
+            }
+        }
+    }
+
+    fn fullscreen_button_rect(canvas: Rect) -> Rect {
+        let corner = canvas.right_bottom() - Vec2::splat(12.0);
+        Rect::from_min_max(corner - Vec2::new(146.0_f32.min(canvas.width() - 24.0), 34.0), corner)
+    }
+
+    fn image_arrow_rect(canvas: Rect, forward: bool) -> Rect {
+        let center_x = if forward { canvas.right() - 34.0 } else { canvas.left() + 34.0 };
+        Rect::from_center_size(egui::pos2(center_x, canvas.center().y), Vec2::splat(44.0))
+    }
+
+    fn viewer_control_at(&self, canvas: Rect, pointer: Pos2) -> bool {
+        canvas.width() >= 100.0 && canvas.height() >= 54.0
+            && (Self::fullscreen_button_rect(canvas).contains(pointer)
+                || (self.generation_workspace && [false, true].into_iter().any(|forward| {
+                    self.adjacent_thumbnail(forward).is_some()
+                        && Self::image_arrow_rect(canvas, forward).contains(pointer)
+                })))
+    }
+
+    fn show_image_viewer_controls(&mut self, ui: &mut egui::Ui, canvas: Rect, fullscreen: bool) {
+        if canvas.width() < 100.0 || canvas.height() < 54.0 {
+            return;
+        }
+        let label = if fullscreen { "Exit Full Screen" } else { "Full Screen Image" };
+        let rect = Self::fullscreen_button_rect(canvas);
+        let reveal = Rect::from_min_max(rect.min - Vec2::new(16.0, 18.0), canvas.max)
+            .intersect(canvas);
+        let (button, alpha) = Self::viewer_overlay_button(
+            ui, ui.id().with("image_fullscreen_toggle"), rect, reveal, label,
+            if fullscreen { "Return to the editor (Alt+Enter or Esc)" } else { "View the selected image full screen (Alt+Enter)" },
+        );
+        if alpha > 0.0 {
+            ui.painter().with_clip_rect(rect).text(
+                rect.center(), egui::Align2::CENTER_CENTER, label,
+                egui::TextStyle::Button.resolve(ui.style()), Color32::WHITE.gamma_multiply(alpha),
+            );
+        }
+        if button.clicked() {
+            self.toggle_image_fullscreen(ui.ctx());
+        }
+
+        if !self.generation_workspace || self.crop.is_some() {
+            return;
+        }
+        for (forward, label) in [(false, "Previous image"), (true, "Next image")] {
+            if self.adjacent_thumbnail(forward).is_none() {
+                continue;
+            }
+            let rect = Self::image_arrow_rect(canvas, forward);
+            let id = ui.id().with(("viewer_navigation", forward));
+            let reveal = if forward {
+                canvas.with_min_x(canvas.right() - 76.0)
+            } else {
+                canvas.with_max_x(canvas.left() + 76.0)
+            };
+            let (response, alpha) = Self::viewer_overlay_button(ui, id, rect, reveal, label, label);
+            if alpha > 0.0 {
+                let painter = ui.painter().with_clip_rect(canvas);
+                let center = rect.center();
+                let sign = if forward { 1.0 } else { -1.0 };
+                let tip = center + Vec2::new(6.0 * sign, 0.0);
+                for y in [-9.0, 9.0] {
+                    painter.line_segment(
+                        [center + Vec2::new(-4.0 * sign, y), tip],
+                        egui::Stroke::new(2.5_f32, Color32::WHITE.gamma_multiply(alpha)),
+                    );
+                }
+            }
+            if response.clicked() {
+                self.navigate_thumbnails(forward);
+            }
+        }
+    }
+
+    fn viewer_overlay_button(
+        ui: &mut egui::Ui,
+        id: egui::Id,
+        rect: Rect,
+        reveal: Rect,
+        label: &str,
+        tooltip: &str,
+    ) -> (egui::Response, f32) {
+        let response = ui.interact(rect, id, Sense::click())
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text(tooltip);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+        if response.clicked() && ui.input(|input| input.pointer.primary_released()) {
+            response.surrender_focus();
+        }
+        let visible = ui.rect_contains_pointer(reveal) || response.has_focus();
+        let alpha = ui.ctx().animate_bool_with_time(id, visible, 0.16);
+        if alpha > 0.0 {
+            let background = Color32::from_black_alpha(if response.hovered() { 215 } else { 155 });
+            ui.painter().rect_filled(rect, 9.0, background.gamma_multiply(alpha));
+        }
+        (response, alpha)
+    }
+
+    fn toggle_image_fullscreen(&mut self, ctx: &egui::Context) {
+        let open = !self.display.image_fullscreen();
+        if open {
+            self.capture_workspace_editor();
+            self.fit_fullscreen_image();
+        }
+        self.display.set_image_fullscreen(ctx, open);
+    }
+
+    fn handle_image_fullscreen_shortcuts(&mut self, ctx: &egui::Context) {
+        let toggle = ctx.input_mut(|input| {
+            let mut toggle = false;
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key: egui::Key::Enter, pressed: true, repeat, modifiers, ..
+                } = event
+                    && modifiers.matches_exact(egui::Modifiers::ALT)
+                {
+                    toggle |= !repeat;
+                    false
+                } else {
+                    true
+                }
+            });
+            toggle
+        });
+        if self.display.image_fullscreen() {
+            if toggle
+                || ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+                || ctx.input(|input| input.viewport().close_requested())
+            {
+                self.display.set_image_fullscreen(ctx, false);
+            }
+        } else if toggle && !self.display.shows_image_view() && self.crop.is_none()
+            && (self.texture.is_some() || self.generation_gallery.get(self.generation_selected).is_some())
+            && self.group_dialog.is_none() && self.rename_version.is_none()
+            && self.closing_tab.is_none() && !self.exit_confirmation
+            && !egui::Popup::is_any_open(ctx)
+            && !ctx.input(|input| input.viewport().close_requested())
+        {
+            self.toggle_image_fullscreen(ctx);
+        }
+    }
+
+    fn fit_fullscreen_image(&mut self) {
+        self.fullscreen_zoom = 1.0;
+        self.fullscreen_pan = Vec2::ZERO;
+    }
+
+    fn show_fullscreen_image(&mut self, ui: &mut egui::Ui) {
+        let interactive = self.display.image_fullscreen();
+        if interactive {
+            self.handle_image_navigation_keys(ui.ctx());
+        }
+        let texture = self.generation_gallery.get(self.generation_selected)
+            .map(|item| &item.texture)
+            .or(self.processed_texture.as_ref())
+            .or(self.texture.as_ref());
+        let canvas = ui.max_rect();
+        if let Some((id, size)) = texture.map(|texture| (texture.id(), texture.size_vec2())) {
+            let fit = (canvas.width() / size.x).min(canvas.height() / size.y);
+            let center = canvas.center();
+            let response = ui.interact(
+                canvas, ui.id().with("fullscreen_image"),
+                if interactive { Sense::click_and_drag() } else { Sense::hover() },
+            );
+            if response.double_clicked() {
+                self.fit_fullscreen_image();
+            } else if response.dragged_by(egui::PointerButton::Primary) && self.fullscreen_zoom > 1.0 {
+                self.fullscreen_pan += response.drag_delta();
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if interactive && let Some(pointer) = ui.input(|input| input.pointer.hover_pos())
+                && canvas.contains(pointer) && !self.viewer_control_at(canvas, pointer)
+            {
+                let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+                if scroll.abs() > 0.01 {
+                    let previous = self.fullscreen_zoom;
+                    let factor = (scroll * 0.002 * self.controls.zoom_sensitivity).exp();
+                    self.fullscreen_zoom = (previous * factor).clamp(1.0, 16.0);
+                    let anchor = pointer - center;
+                    self.fullscreen_pan =
+                        anchor - (anchor - self.fullscreen_pan) * (self.fullscreen_zoom / previous);
+                }
+            }
+            let displayed = size * (fit * self.fullscreen_zoom);
+            let pan_limit = ((displayed - canvas.size()) * 0.5).max(Vec2::ZERO);
+            self.fullscreen_pan = self.fullscreen_pan.clamp(-pan_limit, pan_limit);
+            ui.painter().with_clip_rect(canvas).image(
+                id,
+                Rect::from_center_size(center + self.fullscreen_pan, displayed),
+                Rect::from_min_max(Pos2::ZERO, egui::pos2(1.0, 1.0)),
+                Color32::WHITE,
+            );
+        }
+        if interactive {
+            self.show_image_viewer_controls(ui, canvas, true);
+        }
+    }
+
     fn show_generation_workspace(&mut self, ui: &mut egui::Ui) {
         if self.generation_gallery.is_empty() {
             if !self.blank_project {
                 crate::interaction::strong(ui, "Image Studio");
             }
             crate::interaction::label(ui, "Import an image, or choose Generate to create one.");
-            if !self.thumbnail_groups.is_empty() {
-                let spacer = (ui.available_height() - self.workspace_filmstrip_height(ui)).max(0.0);
-                ui.add_space(spacer);
-                self.show_workspace_filmstrip(ui);
-            }
+            let spacer = (ui.available_height() - self.filmstrip_reserved_height(ui)).max(0.0);
+            ui.add_space(spacer);
+            self.show_workspace_filmstrip(ui);
             return;
         }
         self.bind_workspace_editor(ui.ctx());
         let count = self.generation_gallery.len();
         self.generation_selected = self.generation_selected.min(count-1);
         self.generation_compare_index = self.generation_compare_index.min(count-1);
+        let ctx = ui.ctx();
+        let text_focused = ctx.memory(|memory| memory.focused())
+            .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some());
+        if !text_focused && !egui::Popup::is_any_open(ctx)
+            && self.crop.is_none() && self.group_dialog.is_none() && self.rename_version.is_none()
+            && self.closing_tab.is_none() && !self.exit_confirmation
+        {
+            self.handle_image_navigation_keys(ctx);
+        }
         ui.horizontal_wrapped(|ui| {
             crate::interaction::strong(ui,"Image Studio");
             ui.separator();
@@ -2926,7 +3178,7 @@ impl PixelForge {
         if self.crop.is_some() {
             let size = egui::vec2(
                 available.x,
-                (available.y - self.workspace_filmstrip_height(ui)).max(1.0),
+                (available.y - self.filmstrip_reserved_height(ui)).max(1.0),
             );
             if let Some(texture) = self.processed_texture.as_ref().or(self.texture.as_ref()) {
                 let texture = texture.id();
@@ -2946,7 +3198,7 @@ impl PixelForge {
             self.divider_dragging = false;
             let size = egui::vec2(
                 available.x,
-                (available.y - self.workspace_filmstrip_height(ui)).max(1.0),
+                (available.y - self.filmstrip_reserved_height(ui)).max(1.0),
             );
             let fit = (size.x / self.image_size[0].max(1) as f32)
                 .min(size.y / self.image_size[1].max(1) as f32);
@@ -2964,7 +3216,7 @@ impl PixelForge {
             return;
         }
         // Reserve only the filmstrip; image uses all remaining canvas space.
-        let viewer_height = (available.y - self.workspace_filmstrip_height(ui)).max(1.0);
+        let viewer_height = (available.y - self.filmstrip_reserved_height(ui)).max(1.0);
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(available.x.max(100.0), viewer_height),
             egui::Sense::click_and_drag(),
@@ -3029,6 +3281,7 @@ impl PixelForge {
         painter.line_segment([egui::pos2(divider_x,rect.top()),egui::pos2(divider_x,rect.bottom())],egui::Stroke::new(2.0,egui::Color32::WHITE));
         painter.circle_filled(egui::pos2(divider_x,rect.center().y),12.0,egui::Color32::from_gray(45));
         painter.text(egui::pos2(divider_x,rect.center().y),egui::Align2::CENTER_CENTER,"↔",egui::FontId::proportional(16.0),egui::Color32::WHITE);
+        self.show_image_viewer_controls(ui, rect, false);
 
         self.show_workspace_filmstrip(ui);
     }
@@ -3037,6 +3290,47 @@ impl PixelForge {
         self.selection_mask.as_ref().is_some_and(|mask| {
             mask.pixels().len()==self.image_size[0]*self.image_size[1] && mask.pixels().iter().any(|&v|v>0)
         })
+    }
+
+    fn handle_remove_version_shortcut(&mut self, ctx: &egui::Context) {
+        if !self.generation_workspace || self.generation_gallery.is_empty()
+            || self.generation_running || self.ai_running || self.crop.is_some()
+            || self.group_dialog.is_some() || self.rename_version.is_some()
+            || self.pending_open.is_some() || self.closing_tab.is_some() || self.exit_confirmation
+            || (self.display.shows_image_view() && !self.display.image_fullscreen())
+            || egui::Popup::is_any_open(ctx)
+            || ctx.memory(|memory| memory.focused())
+                .is_some_and(|id| egui::TextEdit::load_state(ctx, id).is_some())
+        {
+            return;
+        }
+        let remove = ctx.input_mut(|input| {
+            let mut remove = false;
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key: egui::Key::Delete, pressed: true, repeat, modifiers, ..
+                } = event
+                    && modifiers.matches_exact(egui::Modifiers::NONE)
+                {
+                    remove |= !repeat;
+                    false
+                } else {
+                    true
+                }
+            });
+            remove
+        });
+        if remove {
+            self.remove_workspace_version(self.generation_selected);
+            if self.display.image_fullscreen() {
+                if self.generation_gallery.is_empty() {
+                    self.display.set_image_fullscreen(ctx, false);
+                } else {
+                    self.fit_fullscreen_image();
+                    self.reveal_navigated_thumbnail = true;
+                }
+            }
+        }
     }
 
     fn remove_workspace_version(&mut self, removed:usize) {
@@ -3079,6 +3373,94 @@ impl PixelForge {
         size * (bounds.x / size.x).min(bounds.y / size.y)
     }
 
+    fn thumbnail_group_toggle(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
+        let height = ui.text_style_height(&egui::TextStyle::Button);
+        let action = if collapsed { "Expand group" } else { "Collapse group" };
+        let button = ui
+            .add(egui::Button::new("").small().min_size(egui::vec2(24.0, height)))
+            .on_hover_text(action);
+        button.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), action)
+        });
+        let color = ui.style().interact(&button).fg_stroke.color;
+        let square = Rect::from_center_size(button.rect.center(), Vec2::splat(9.0));
+        if collapsed {
+            ui.painter().rect_filled(square, 0.0, color);
+        } else {
+            ui.painter().rect_stroke(square, 0.0, egui::Stroke::new(1.0_f32, color), egui::StrokeKind::Inside);
+        }
+        button
+    }
+
+    const PANEL_HANDLE_SIZE: f32 = 16.0;
+
+    fn filmstrip_reserved_height(&self, ui: &egui::Ui) -> f32 {
+        Self::PANEL_HANDLE_SIZE + ui.spacing().item_spacing.y
+            + if self.thumbnail_strip_hidden {
+                0.0
+            } else {
+                self.workspace_filmstrip_height(ui)
+            }
+    }
+
+    fn panel_handle(
+        ui: &mut egui::Ui,
+        divider: Rect,
+        horizontal: bool,
+        hidden: bool,
+        action: &str,
+    ) -> egui::Response {
+        let center = divider.center();
+        let (line, size, along, outward) = if horizontal {
+            (
+                [egui::pos2(divider.left(), center.y), egui::pos2(divider.right(), center.y)],
+                egui::vec2(42.0_f32.min(divider.width()), Self::PANEL_HANDLE_SIZE),
+                Vec2::X,
+                Vec2::Y,
+            )
+        } else {
+            (
+                [egui::pos2(center.x, divider.top()), egui::pos2(center.x, divider.bottom())],
+                egui::vec2(Self::PANEL_HANDLE_SIZE, 42.0_f32.min(divider.height())),
+                Vec2::Y,
+                Vec2::X,
+            )
+        };
+        let handle = Rect::from_center_size(center, size);
+        let response = ui
+            .interact(handle, ui.id().with("panel_handle"), Sense::click())
+            .on_hover_text(action)
+            .on_hover_cursor(egui::CursorIcon::PointingHand);
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), action)
+        });
+        let painter = ui.painter();
+        let style = ui.style().interact(&response);
+        painter.line_segment(line, ui.visuals().widgets.inactive.bg_stroke);
+        painter.rect(handle, 4.0, style.bg_fill, style.bg_stroke, egui::StrokeKind::Inside);
+        let direction = if hidden { -outward } else { outward };
+        let tip = center + direction * 2.5;
+        for end in [center - direction * 2.5 - along * 4.0, center - direction * 2.5 + along * 4.0] {
+            painter.line_segment([end, tip], style.fg_stroke);
+        }
+        response
+    }
+
+    fn show_tools_sidebar_handle(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("tools_sidebar_handle")
+            .exact_width(Self::PANEL_HANDLE_SIZE)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(egui::Frame::new().fill(theme::CANVAS))
+            .show(ctx, |ui| {
+                let action = if self.tools_sidebar_hidden { "Show sidebar" } else { "Hide sidebar" };
+                if Self::panel_handle(ui, ui.max_rect(), false, self.tools_sidebar_hidden, action).clicked() {
+                    self.tools_sidebar_hidden = !self.tools_sidebar_hidden;
+                    ctx.request_repaint();
+                }
+            });
+    }
+
     fn workspace_filmstrip_height(&self, ui: &egui::Ui) -> f32 {
         let spacing = ui.spacing();
         let group_header =
@@ -3118,13 +3500,6 @@ impl PixelForge {
     }
 
     fn append_thumbnail(&mut self, mut item: GeneratedItem) {
-        if let Some(parent) = item
-            .settings
-            .refine_parent
-            .and_then(|index| self.generation_gallery.get(index))
-        {
-            item.group = parent.group;
-        }
         item.version_number = self.next_thumbnail_number;
         self.next_thumbnail_number = self.next_thumbnail_number.saturating_add(1);
         self.generation_gallery.push(item);
@@ -3251,7 +3626,6 @@ impl PixelForge {
             collapsed: false,
         });
         self.move_thumbnails(thumbnails, Some(group), self.generation_gallery.len());
-        self.thumbnail_destination = Some(group);
         self.project_dirty = true;
     }
 
@@ -3295,6 +3669,9 @@ impl PixelForge {
             item.group = item.group.map(|index| new_indices[index]);
         }
         self.thumbnail_destination = self.thumbnail_destination.map(|index| new_indices[index]);
+        self.workspace_ai_group = self
+            .workspace_ai_group
+            .map(|group| group.map(|index| new_indices[index]));
         match &mut self.group_dialog {
             Some(GroupDialog::Name {
                 group: Some(index), ..
@@ -3329,6 +3706,7 @@ impl PixelForge {
             item.group = remap(item.group);
         }
         self.thumbnail_destination = remap(self.thumbnail_destination);
+        self.workspace_ai_group = self.workspace_ai_group.map(remap);
         self.project_dirty = true;
     }
 
@@ -3372,7 +3750,6 @@ impl PixelForge {
         if let Some(mut group) = named_group {
             group.collapsed = false;
             self.thumbnail_groups.push(group);
-            self.thumbnail_destination = Some(0);
         }
         self.blank_project = false;
         self.generation_workspace = true;
@@ -3532,6 +3909,22 @@ impl PixelForge {
     }
 
     fn show_workspace_filmstrip(&mut self, ui: &mut egui::Ui) {
+        if ui.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.select_thumbnail_group(None);
+        }
+        let hidden = self.thumbnail_strip_hidden;
+        let (divider, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), Self::PANEL_HANDLE_SIZE),
+            Sense::hover(),
+        );
+        let action = if hidden { "Show thumbnails" } else { "Hide thumbnails" };
+        if Self::panel_handle(ui, divider, true, hidden, action).clicked() {
+            self.thumbnail_strip_hidden = !hidden;
+            ui.ctx().request_repaint();
+        }
+        if hidden {
+            return;
+        }
         self.capture_workspace_editor();
         let mut remove_version = None;
         let mut rename_version = None;
@@ -3544,6 +3937,7 @@ impl PixelForge {
         let project = self.active_tab;
         let pointer = ui.input(|input| input.pointer.interact_pos());
         let preview = self.thumbnail_drop_preview;
+        let reveal = std::mem::take(&mut self.reveal_navigated_thumbnail);
         let active_drag = egui::DragAndDrop::payload::<ThumbnailDrag>(ui.ctx())
             .filter(|drag| drag.project == project && !busy);
         let dragging = active_drag.is_some();
@@ -3586,6 +3980,14 @@ impl PixelForge {
             })
             .max_height(self.workspace_filmstrip_height(ui))
             .show(ui, |ui| {
+                // Register the background before the group and thumbnail controls.
+                let mut background_rect = ui.clip_rect();
+                background_rect.min.y = background_rect.top().max(ui.max_rect().top());
+                let background = ui.interact(
+                    background_rect,
+                    ui.id().with("filmstrip_background"),
+                    egui::Sense::click(),
+                );
                 ui.horizontal_top(|ui| {
                     for (position, group) in self.thumbnail_group_order().into_iter().enumerate() {
                         if position > 0 {
@@ -3604,7 +4006,7 @@ impl PixelForge {
                         let frame = {
                             let border = if preview.is_some_and(|(target, _)| target == group) {
                                 egui::Color32::LIGHT_BLUE
-                            } else if self.thumbnail_destination == group {
+                            } else if self.selected_thumbnail_group() == Some(group) {
                                 ui.visuals().selection.stroke.color
                             } else {
                                 ui.visuals().widgets.noninteractive.fg_stroke.color
@@ -3633,11 +4035,22 @@ impl PixelForge {
                                         (group.name.as_str(), group.collapsed)
                                     },
                                 );
-                                let arrow = if collapsed { "▸" } else { "▾" };
-                                let label = format!("{arrow} {name} ({})", indices.len());
-                                let sense = if busy { egui::Sense::click() } else { egui::Sense::click_and_drag() };
-                                let header = ui.add(egui::Button::new(&label).small().sense(sense))
-                                    .on_hover_text("Click to expand or collapse. Drag the header to reorder groups.");
+                                let label = format!("{name} ({})", indices.len());
+                                let sense = if busy {
+                                    egui::Sense::click()
+                                } else {
+                                    egui::Sense::click_and_drag()
+                                };
+                                let (toggle, header) = ui
+                                    .horizontal(|ui| {
+                                        let toggle = Self::thumbnail_group_toggle(ui, collapsed);
+                                        let header = ui
+                                            .add(egui::Button::new(&label).small().sense(sense)
+                                                .selected(self.selected_thumbnail_group() == Some(group)))
+                                            .on_hover_text("Click to select this group. Drag to reorder groups.");
+                                        (toggle, header)
+                                    })
+                                    .inner;
                                 if !busy && header.drag_started_by(egui::PointerButton::Primary) {
                                     let origin = ui.input(|input| input.pointer.press_origin())
                                         .unwrap_or(header.rect.center());
@@ -3649,6 +4062,9 @@ impl PixelForge {
                                     });
                                 }
                                 if header.clicked() {
+                                    self.select_thumbnail_group(Some(group));
+                                }
+                                if toggle.clicked() {
                                     if let Some(index) = group {
                                         self.thumbnail_groups[index].collapsed = !collapsed;
                                     } else {
@@ -3769,7 +4185,7 @@ impl PixelForge {
                                             if ui
                                                 .add_enabled(
                                                     !busy,
-                                                    egui::Button::new("Remove Image Version"),
+                                                    egui::Button::new("Remove Image Version").shortcut_text("Del"),
                                                 )
                                                 .clicked()
                                             {
@@ -3788,6 +4204,15 @@ impl PixelForge {
                                         )
                                         .on_hover_text(caption);
                                     });
+                                    if reveal && (index == self.generation_selected
+                                        || (visible_count == 1 && indices.contains(&self.generation_selected)))
+                                    {
+                                        ui.scroll_to_rect_animation(
+                                            tile.response.rect,
+                                            None,
+                                            egui::style::ScrollAnimation::duration(0.18),
+                                        );
+                                    }
                                     tile_centers.push((index, tile.response.rect.center().x));
                                 }
                                 if let Some(rect) = show_gap(ui, group, end) {
@@ -3811,6 +4236,16 @@ impl PixelForge {
                             };
                             hovered_drop = Some((group, before));
                         }
+                    }
+                });
+                background.context_menu(|ui| {
+                    if ui.add_enabled(!busy, egui::Button::new("New Group…")).clicked() {
+                        self.group_dialog = Some(GroupDialog::Name {
+                            group: None,
+                            name: String::new(),
+                            thumbnails: Vec::new(),
+                        });
+                        ui.close();
                     }
                 });
             });
@@ -3955,6 +4390,8 @@ impl PixelForge {
         std::mem::swap(&mut self.controls, &mut other.controls);
         std::mem::swap(&mut self.show_settings, &mut other.show_settings);
         std::mem::swap(&mut self.display, &mut other.display);
+        std::mem::swap(&mut self.thumbnail_strip_hidden, &mut other.thumbnail_strip_hidden);
+        std::mem::swap(&mut self.tools_sidebar_hidden, &mut other.tools_sidebar_hidden);
         std::mem::swap(&mut self.exit_allowed, &mut other.exit_allowed);
         std::mem::swap(&mut self.exit_confirmation, &mut other.exit_confirmation);
         std::mem::swap(&mut self.file_drops, &mut other.file_drops);
@@ -4337,6 +4774,36 @@ impl PixelForge {
             });
     }
 
+    fn can_save_project(&self) -> bool {
+        (self.generation_workspace || self.original_pixels.is_some()) && !self.exporting
+    }
+
+    fn handle_save_shortcut(&mut self, ctx: &egui::Context) {
+        let save = ctx.input_mut(|input| {
+            let mut save = false;
+            input.events.retain(|event| {
+                if let egui::Event::Key {
+                    key: egui::Key::S,
+                    pressed: true,
+                    repeat,
+                    modifiers,
+                    ..
+                } = event
+                    && modifiers.matches_exact(egui::Modifiers::CTRL)
+                {
+                    save |= !repeat;
+                    false
+                } else {
+                    true
+                }
+            });
+            save
+        });
+        if save && self.can_save_project() {
+            self.save_project(false);
+        }
+    }
+
     fn save_project(&mut self, save_as: bool) {
         // Exit confirmation must use the same project and existing path as File > Save.
         if self.generation_workspace {
@@ -4449,26 +4916,58 @@ impl PixelForge {
     }
 
     fn open_project(&mut self, ctx: &egui::Context) {
-        let Some(path) = rfd::FileDialog::new().add_filter("PixelForge Project", &["pxf"]).pick_file() else {return};
-        self.open_project_path(ctx, path);
-    }
-
-    fn open_project_path(&mut self, ctx: &egui::Context, path: PathBuf) {
-        match generation_project::is_generation(&path) {
-            Ok(true) => {self.open_generation_project(&path,ctx);return;}
-            Ok(false) => {},
-            Err(e) => {self.status=format!("Project open failed: {e}");return;}
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("PixelForge Project", &["pxf"])
+            .pick_files()
+        {
+            self.open_project_paths(ctx, paths);
         }
-        self.open_editor_project_at(ctx, path);
     }
 
-    fn open_editor_project_at(&mut self, ctx: &egui::Context, path: PathBuf) {
+    fn open_project_paths(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        let multiple = paths.len() > 1;
+        let mut opened = 0;
+        let mut failed = Vec::new();
+        for path in paths {
+            if self.open_project_path(ctx, &path) {
+                opened += 1;
+            } else if multiple {
+                failed.push(
+                    path.file_name()
+                        .unwrap_or(path.as_os_str())
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            }
+        }
+        if multiple {
+            let mut message = format!("Opened {opened} project(s)");
+            if !failed.is_empty() {
+                message.push_str(&format!(". Could not open {}", failed.join(", ")));
+            }
+            self.status = message.clone();
+            self.generation_status = message;
+        }
+    }
+
+    fn open_project_path(&mut self, ctx: &egui::Context, path: &std::path::Path) -> bool {
+        match generation_project::is_generation(path) {
+            Ok(true) => self.open_generation_project(path, ctx),
+            Ok(false) => self.open_editor_project_at(ctx, path),
+            Err(error) => {
+                self.status = format!("Project open failed: {error}");
+                false
+            }
+        }
+    }
+
+    fn open_editor_project_at(&mut self, ctx: &egui::Context, path: &std::path::Path) -> bool {
         // Load and validate before changing the current image.
-        let data = match project::load(&path) {
+        let data = match project::load(path) {
             Ok(data) => data,
             Err(err) => {
                 self.status = format!("Project open failed: {err}");
-                return;
+                return false;
             }
         };
 
@@ -4572,9 +5071,9 @@ impl PixelForge {
         self.selection_stroke_active = false;
         self.image_size = size;
         self.image_path = Some(PathBuf::from(data.image_name));
-        self.file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        self.file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-        self.project_path = Some(path.clone());
+        self.project_path = Some(path.to_path_buf());
         self.project_dirty = false;
 
         self.fit_pending = true;
@@ -4590,6 +5089,7 @@ impl PixelForge {
         self.refresh_selection_overlay(ctx);
 
         self.status = format!("Project opened: {}", path.display());
+        true
     }
     fn fit_image(&mut self, available: Vec2) {
         let w = self.image_size[0] as f32;
@@ -5331,6 +5831,7 @@ impl PixelForge {
         self.ai_cancel = cancel.clone();
         self.ai_rx = Some(rx);
         self.workspace_ai_parent=self.workspace_editor;
+        self.workspace_ai_group = Some(self.thumbnail_group_for(self.workspace_ai_parent));
         self.ai_running = true;
         self.ai_is_denoise = denoise;
         self.ai_restoration = restoration;
@@ -5675,6 +6176,20 @@ impl PixelForge {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }
+    fn show_ai_result_strength(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        crate::interaction::label(ui, "AI Result Strength");
+        ui.scope(|ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 80.0).max(60.0);
+            if ui
+                .add_enabled(!self.ai_running, numeric::Slider::new(&mut self.ai_strength, 0.0..=1.0))
+                .changed()
+            {
+                self.refresh_ai_preview(ctx);
+            }
+        });
+        crate::interaction::label(ui, "Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
+    }
+
     fn show_ai_result(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         if !self.ai_show_result {
             return;
@@ -7523,9 +8038,8 @@ impl PixelForge {
                 }
             }
         }
-        let pointer_inside = pointer_position
-            .map(|pos| canvas.contains(pos))
-            .unwrap_or(false);
+        let over_control = pointer_position.is_some_and(|pos| self.viewer_control_at(canvas, pos));
+        let pointer_inside = pointer_position.is_some_and(|pos| canvas.contains(pos) && !over_control);
 
         let modifier_ok = match self.controls.pan {
             PanButton::SpaceLeft => space_down,
@@ -7578,7 +8092,8 @@ impl PixelForge {
         });
 
         let brush_active =
-            self.selection_brush_enabled && !space_down && !self.divider_dragging && !self.panning;
+            self.selection_brush_enabled && !space_down && !self.divider_dragging && !self.panning
+                && !over_control;
 
         if !brush_down || !brush_active {
             self.selection_last_point = None;
@@ -7766,6 +8281,7 @@ impl PixelForge {
         } else if response.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
         }
+        self.show_image_viewer_controls(ui, canvas, false);
     }
 }
 
@@ -7790,6 +8306,7 @@ impl eframe::App for PixelForge {
         startup::ready(_frame);
         for action in self.interaction.begin_frame(ctx) {self.edit_command(ctx,action);}
         self.updater.poll(ctx,self.interaction.automatic_updates);
+        self.handle_image_fullscreen_shortcuts(ctx);
         self.display.update(ctx);
         self.display.resize_edges(ctx);
         // Keep native window persistence current even while the canvas is idle.
@@ -7813,6 +8330,17 @@ impl eframe::App for PixelForge {
 
         self.dependency_manager.poll(ctx,self.install_folder.clone(),self.generation_checkpoints.clone());
         self.ensure_workspace(ctx);
+
+        self.handle_save_shortcut(ctx);
+        self.handle_remove_version_shortcut(ctx);
+        if self.display.shows_image_view() && !self.exit_confirmation
+            && !(self.dependency_manager.busy() && ctx.input(|input| input.viewport().close_requested()))
+        {
+            egui::CentralPanel::default()
+                .frame(egui::Frame::new().fill(Color32::from_gray(10)))
+                .show(ctx, |ui| self.show_fullscreen_image(ui));
+            return;
+        }
 
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             let bar=ui.available_rect_before_wrap();
@@ -7840,14 +8368,14 @@ impl eframe::App for PixelForge {
 
                     ui.separator();
 
-                    let can_save = (self.generation_workspace || self.original_pixels.is_some()) && !self.exporting;
+                    let can_save = self.can_save_project();
 
                     if ui
-                        .add_enabled(can_save, egui::Button::new("Save Project"))
+                        .add_enabled(can_save, egui::Button::new("Save Project").shortcut_text("Ctrl+S"))
                         .clicked()
                     {
                         ui.close();
-                        if self.generation_workspace {self.save_generation_project(false);} else {self.save_project(false);}
+                        self.save_project(false);
                     }
 
                     if ui
@@ -7855,7 +8383,7 @@ impl eframe::App for PixelForge {
                         .clicked()
                     {
                         ui.close();
-                        if self.generation_workspace {self.save_generation_project(true);} else {self.save_project(true);}
+                        self.save_project(true);
                     }
 
                     ui.separator();
@@ -7969,10 +8497,12 @@ impl eframe::App for PixelForge {
             ui.painter().with_clip_rect(egui::Rect::from_min_max(egui::pos2(title_right+8.0,bar.top()),egui::pos2(controls_left,bar.top()+28.0))).text(egui::pos2(title_right+8.0,title_pos.y),egui::Align2::LEFT_TOP,version,egui::TextStyle::Small.resolve(ui.style()),ui.visuals().weak_text_color());
         });
         self.show_project_tabs(ctx);
-        egui::SidePanel::right(egui::Id::new(("tools", self.active_tab)))
+        let sidebar_hidden = self.tools_sidebar_hidden;
+        let sidebar = egui::SidePanel::right(egui::Id::new(("tools", self.active_tab)))
             .exact_width(360.0)
             .resizable(false)
-            .show(ctx, |ui| {
+            .show_separator_line(false);
+        let tools = |ui: &mut egui::Ui| {
                 // Sidebar sections and model controls are larger than canvas/status text.
                 for text in [egui::TextStyle::Body,egui::TextStyle::Button,egui::TextStyle::Small,egui::TextStyle::Monospace] {
                     if let Some(font)=ui.style_mut().text_styles.get_mut(&text) {font.size=16.0;}
@@ -8009,9 +8539,7 @@ impl eframe::App for PixelForge {
                         self.generation_tools_tab = generation_clicked;
                         if generation_clicked {
                             self.generation_workspace = true;
-                            if self.generation_models_rx.is_none() && self.generation_checkpoints.is_empty() {
-                                self.refresh_generation_models(ctx);
-                            }
+                            self.refresh_generation_models(ctx);
                         }
 
 
@@ -8086,38 +8614,7 @@ impl eframe::App for PixelForge {
 
                         } else {
                             self.show_photo_restoration(ui, ctx);
-                            ui.horizontal(|ui| {
-                                                            crate::interaction::label(ui,"AI Result Strength");
-
-                                                            ui.with_layout(
-                                                                egui::Layout::right_to_left(egui::Align::Center),
-                                                                |ui| {
-                                                                    crate::interaction::label(ui,format!("{:.1}%", self.ai_strength * 100.0));
-                                                                },
-                                                            );
-                                                        });
-
-                                                        // egui Slider has its own internal width.
-                                                        // Set that width explicitly rather than
-                                                        // just enlarging its allocated rectangle.
-                                                        let old_slider_width = ui.spacing().slider_width;
-
-                                                        ui.spacing_mut().slider_width = (ui.available_width() - 20.0).max(80.0);
-
-                                                        if ui
-                                                            .add_enabled(!self.ai_running,
-                                                                numeric::Slider::new(&mut self.ai_strength, 0.0..=1.0)
-                                                                    .step_by(0.05)
-                                                                    .show_value(false),
-                                                            )
-                                                            .changed()
-                                                        {
-                                                            self.refresh_ai_preview(ctx);
-                                                        }
-
-                                                        ui.spacing_mut().slider_width = old_slider_width;
-
-                                                        crate::interaction::label(ui,"Controls the blend for the selected AI result (Upscale, Denoise, Sharpen, or Deblur). 0% = baseline; 100% = full AI result.");
+                            self.show_ai_result_strength(ui, ctx);
                             ui.separator();
                             theme::section(ui, "AI Upscaling");
                             ui.separator();
@@ -8254,7 +8751,11 @@ impl eframe::App for PixelForge {
                         egui::pos2(sidebar_right, sidebar_scroll.inner_rect.bottom()));
                     ui.painter().rect_filled(track, 5, ui.visuals().extreme_bg_color);
                 }
-            });
+            };
+        if !sidebar_hidden {
+            sidebar.show(ctx, tools);
+        }
+        self.show_tools_sidebar_handle(ctx);
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             if self.generation_workspace {
                 ui.set_min_height(60.0);
@@ -8435,6 +8936,8 @@ fn main() -> eframe::Result {
             if let Some(storage) = cc.storage {
                 app.prompt_guide.restore_layout(storage);
             }
+            app.refresh_generation_models(&cc.egui_ctx);
+            app.prompt_guide.start_ollama(&cc.egui_ctx);
             Ok(Box::new(app))
         }),
     )
@@ -8586,6 +9089,252 @@ mod workspace_tests {
         assert_eq!(app.original_pixels.as_ref().unwrap().get_pixel(0,0)[0],100);
         std::fs::remove_file(path).unwrap();
     }
+    #[test]
+    fn opening_multiple_projects_keeps_each_in_its_own_tab_and_reports_bad_files() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let original = app.active_tab;
+        app.project_dirty = true;
+        let root = std::env::temp_dir().join(format!("pixelforge-open-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = ["first.pxf", "unreadable.pxf", "last.pxf"].map(|name| root.join(name));
+        for (index, seed) in [(0, 12), (2, 34)] {
+            generation_project::save(&paths[index], &generation_project::GalleryProject {
+                items: vec![generation_project::GalleryImage {
+                    pixels: image::RgbaImage::from_pixel(2, 1, image::Rgba([seed, 0, 0, 255])),
+                    settings: serde_json::json!({}),
+                    seed: u64::from(seed),
+                }],
+                selected: 0, compare_index: 0, compare: false, current: serde_json::json!({}),
+            }).unwrap();
+        }
+        std::fs::write(&paths[1], b"invalid project").unwrap();
+
+        app.open_project_paths(&ctx, paths.to_vec());
+        assert_eq!(app.inactive_tabs.len(), 2);
+        assert_eq!(app.inactive_tabs[0].0, original);
+        assert!(app.inactive_tabs[0].1.project_dirty);
+        assert_eq!(app.inactive_tabs[1].1.generation_project_path.as_ref(), Some(&paths[0]));
+        assert_eq!(app.inactive_tabs[1].1.generation_gallery[0].seed, 12);
+        assert_eq!(app.generation_project_path.as_ref(), Some(&paths[2]));
+        assert_eq!(app.generation_gallery[0].seed, 34);
+        assert!(app.generation_status.contains("Opened 2 project(s)"));
+        assert!(app.generation_status.contains("unreadable.pxf"));
+
+        for path in paths {
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(root).unwrap();
+    }
+
+    #[test]
+    fn delete_removes_only_the_current_version_and_leaves_text_editing_alone() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        for seed in [11, 22, 33] {
+            app.append_thumbnail(fixture_thumbnail(&ctx, seed, None));
+        }
+        app.select_thumbnail(1, false);
+        app.select_thumbnail(2, true);
+        let key = |pressed, repeat| egui::Event::Key {
+            key: egui::Key::Delete, physical_key: None, pressed, repeat,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let input = |event| egui::RawInput { events: vec![event], ..Default::default() };
+        let id = egui::Id::new("delete_shortcut_text_focus");
+        let mut text = "Prompt".to_owned();
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut text).id(id)).request_focus();
+            });
+        });
+        let _ = ctx.run(input(key(true, false)), |ctx| app.handle_remove_version_shortcut(ctx));
+        assert_eq!(app.generation_gallery.len(), 3);
+        ctx.memory_mut(|memory| memory.surrender_focus(id));
+        let _ = ctx.run(input(key(false, false)), |ctx| app.handle_remove_version_shortcut(ctx));
+        let _ = ctx.run(input(key(true, false)), |ctx| app.handle_remove_version_shortcut(ctx));
+        assert_eq!(app.generation_gallery.iter().map(|item| item.seed).collect::<Vec<_>>(), [11, 33]);
+        let _ = ctx.run(input(key(true, true)), |ctx| app.handle_remove_version_shortcut(ctx));
+        assert_eq!(app.generation_gallery.len(), 2);
+        assert!(app.project_dirty);
+    }
+
+    #[test]
+    fn fullscreen_edge_controls_browse_and_escape_preserves_editor_camera() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.create_thumbnail_group("Group".into(), &[]);
+        for group in [Some(0), None, Some(0)] {
+            let mut item = fixture_thumbnail(&ctx, 10, None);
+            item.group = group;
+            app.append_thumbnail(item);
+        }
+        app.generation_zoom = 2.0;
+        app.generation_pan = Vec2::new(25.0, 40.0);
+        let canvas = Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 600.0));
+        let frame = |app: &mut PixelForge, events| {
+            let _ = ctx.run(egui::RawInput { screen_rect: Some(canvas), events, ..Default::default() }, |ctx| {
+                app.handle_image_fullscreen_shortcuts(ctx);
+                app.display.update(ctx);
+                egui::CentralPanel::default().frame(egui::Frame::new()).show(ctx, |ui| {
+                    if app.display.shows_image_view() {
+                        app.show_fullscreen_image(ui);
+                    } else {
+                        app.show_image_viewer_controls(ui, canvas, false);
+                    }
+                });
+            });
+        };
+        let click = |app: &mut PixelForge, pos| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE,
+            };
+            frame(app, vec![egui::Event::PointerMoved(pos)]);
+            frame(app, vec![button(true)]);
+            frame(app, vec![button(false)]);
+        };
+        click(&mut app, PixelForge::fullscreen_button_rect(canvas).center());
+        assert!(app.display.image_fullscreen());
+        frame(&mut app, vec![
+            egui::Event::PointerMoved(canvas.center() + Vec2::new(30.0, 40.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, 3.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        assert!(app.fullscreen_zoom > 1.0);
+        assert_ne!(app.fullscreen_pan, Vec2::ZERO);
+        click(&mut app, PixelForge::image_arrow_rect(canvas, true).center());
+        assert_eq!(app.generation_selected, 2);
+        assert_eq!(app.fullscreen_zoom, 1.0);
+        assert_eq!(app.fullscreen_pan, Vec2::ZERO);
+        assert!(app.reveal_navigated_thumbnail);
+
+        frame(&mut app, vec![egui::Event::Key {
+            key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert!(!app.display.image_fullscreen());
+        assert_eq!(app.generation_selected, 2);
+        assert_eq!(app.generation_zoom, 2.0);
+        assert_eq!(app.generation_pan, Vec2::new(25.0, 40.0));
+
+        for _ in 0..4 {
+            frame(&mut app, vec![]);
+        }
+        assert!(!app.display.shows_image_view());
+
+        let alt_enter = |pressed, repeat| egui::Event::Key {
+            key: egui::Key::Enter, physical_key: None, pressed, repeat,
+            modifiers: egui::Modifiers::ALT,
+        };
+        frame(&mut app, vec![alt_enter(true, false)]);
+        assert!(app.display.image_fullscreen());
+        frame(&mut app, vec![alt_enter(true, true)]);
+        assert!(app.display.image_fullscreen());
+        frame(&mut app, vec![alt_enter(false, false)]);
+        frame(&mut app, vec![alt_enter(true, false)]);
+        assert!(!app.display.image_fullscreen());
+    }
+
+    #[test]
+    fn arrow_navigation_stays_in_the_selected_images_group() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.create_thumbnail_group("Group".into(), &[]);
+        for group in [Some(0), None, Some(0), None, Some(0)] {
+            let mut item = fixture_thumbnail(&ctx, 10, None);
+            item.group = group;
+            app.append_thumbnail(item);
+        }
+        let frame = |app: &mut PixelForge, key| {
+            let input = egui::RawInput {
+                events: vec![egui::Event::Key {
+                    key, physical_key: None, pressed: true, repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.show_generation_workspace(ui));
+            });
+        };
+        for index in [2, 4, 4] {
+            frame(&mut app, egui::Key::ArrowRight);
+            assert_eq!(app.generation_selected, index);
+        }
+        frame(&mut app, egui::Key::ArrowLeft);
+        assert_eq!(app.generation_selected, 2);
+        app.select_thumbnail(1, false);
+        frame(&mut app, egui::Key::ArrowRight);
+        assert_eq!(app.generation_selected, 3);
+    }
+
+    #[test]
+    fn ctrl_s_saves_only_the_active_project() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.project_dirty = true;
+        app.create_blank_project_tab();
+        app.generation_gallery.push(fixture_thumbnail(&ctx, 42, None));
+        let path = std::env::temp_dir().join(format!("pixelforge-ctrl-s-{}.pxf", std::process::id()));
+        app.generation_project_path = Some(path.clone());
+        app.project_dirty = true;
+
+        let input = egui::RawInput {
+            events: vec![egui::Event::Key {
+                key: egui::Key::S,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::CTRL | egui::Modifiers::COMMAND,
+            }],
+            ..Default::default()
+        };
+        let _ = ctx.run(input, |ctx| {
+            assert!(app.interaction.begin_frame(ctx).is_empty());
+            app.handle_save_shortcut(ctx);
+        });
+
+        assert!(!app.project_dirty);
+        assert!(app.inactive_tabs[0].1.project_dirty);
+        assert_eq!(generation_project::load(&path).unwrap().items[0].seed, 42);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn ai_result_strength_value_responds_to_mouse_wheel() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        app.ai_strength = 0.5;
+        let render = |app: &mut PixelForge, events| {
+            ctx.run(egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(300.0, 400.0))),
+                events,
+                ..Default::default()
+            }, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.show_ai_result_strength(ui, ctx));
+            })
+        };
+        let output = render(&mut app, vec![]);
+        let value = output.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::Shape::Text(text) if text.galley.job.text == "50.0%" => {
+                Some(text.pos + text.galley.size() * 0.5)
+            }
+            _ => None,
+        }).expect("editable percentage");
+        render(&mut app, vec![
+            egui::Event::PointerMoved(value),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: Vec2::new(0.0, 1.0),
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        assert!((app.ai_strength - 0.51).abs() < 0.001, "{}", app.ai_strength);
+    }
+
     #[test]
     fn restoration_panel_renders_with_independent_prompt_and_model() {
         let ctx = egui::Context::default();
@@ -8762,6 +9511,7 @@ mod workspace_tests {
         app.prompt_spelling.enabled=false;
         app.generation_auto_negative=true;
         app.generation_checkpoint="Fixture generation model".into();
+        app.generation_checkpoints.push(app.generation_checkpoint.clone());
         app.generation_prompt="Fixture initial prompt".into();
         let pixels=image::RgbaImage::from_pixel(32,32,image::Rgba([40,40,40,255]));
         let texture=ctx.load_texture("caption_fixture",ColorImage::from_rgba_unmultiplied([32,32],pixels.as_raw()),TextureOptions::LINEAR);
@@ -9057,6 +9807,10 @@ mod workspace_tests {
             .push(fixture_thumbnail(&ctx, 12, None));
         app.bind_workspace_editor(&ctx);
         app.workspace_ai_parent = Some(0);
+        app.create_thumbnail_group("Photo results".into(), &[]);
+        app.select_thumbnail_group(Some(Some(0)));
+        app.workspace_ai_group = Some(app.thumbnail_group_for(app.workspace_ai_parent));
+        app.select_thumbnail_group(None);
         app.ai_running = true;
         app.ai_strength = 1.0;
         let (tx, rx) = std::sync::mpsc::channel();
@@ -9084,6 +9838,7 @@ mod workspace_tests {
         app.switch_project_tab(origin);
         assert_eq!(app.generation_gallery.len(), 2);
         assert_eq!(app.generation_gallery[1].pixels.get_pixel(0, 0)[0], 91);
+        assert_eq!(app.generation_gallery[1].group, Some(0));
         assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(0));
         assert_eq!(app.ai_variations.len(), 1);
     }
@@ -9100,16 +9855,75 @@ mod workspace_tests {
     }
 
     #[test]
-    fn new_group_stays_in_the_footer_and_grouped_captions_fit_near_it() {
+    fn workspace_handles_hide_and_restore_panels_and_follow_the_window_across_tabs() {
         let ctx = egui::Context::default();
         let mut app = PixelForge::default();
-        let frame = |app: &mut PixelForge| {
+        let frame = |app: &mut PixelForge, events| {
             ctx.run(
                 egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(800.0, 640.0),
-                    )),
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 640.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ctx| {
+                    app.show_tools_sidebar_handle(ctx);
+                    egui::CentralPanel::default().show(ctx, |ui| app.show_generation_workspace(ui));
+                },
+            )
+        };
+        let handle = |output: &egui::FullOutput, size| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if (rect.rect.size() - size).length() < 0.1 => {
+                    Some(rect.rect.center())
+                }
+                _ => None,
+            }).expect("panel handle")
+        };
+        let has_ungrouped = |output: &egui::FullOutput| {
+            output.shapes.iter().any(|shape| matches!(&shape.shape,
+                egui::Shape::Text(text) if text.galley.job.text == "Ungrouped (0)"))
+        };
+        let click = |app: &mut PixelForge, pos| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos, pressed, button: egui::PointerButton::Primary, modifiers: egui::Modifiers::NONE,
+            };
+            frame(app, vec![egui::Event::PointerMoved(pos), button(true)]);
+            frame(app, vec![button(false)]);
+            frame(app, vec![])
+        };
+        let output = frame(&mut app, vec![]);
+        assert!(has_ungrouped(&output));
+        let thumb_size = Vec2::new(42.0, PixelForge::PANEL_HANDLE_SIZE);
+        let open_handle = handle(&output, thumb_size);
+        let output = click(&mut app, open_handle);
+        assert!(app.thumbnail_strip_hidden);
+        assert!(!has_ungrouped(&output));
+        let restore_handle = handle(&output, thumb_size);
+        assert!(restore_handle.y > open_handle.y);
+
+        let side_size = Vec2::new(PixelForge::PANEL_HANDLE_SIZE, 42.0);
+        click(&mut app, handle(&output, side_size));
+        assert!(app.tools_sidebar_hidden);
+        app.create_blank_project_tab();
+        assert!(app.thumbnail_strip_hidden && app.tools_sidebar_hidden);
+
+        let output = frame(&mut app, vec![]);
+        let output = click(&mut app, handle(&output, thumb_size));
+        assert!(!app.thumbnail_strip_hidden);
+        assert!(has_ungrouped(&output));
+        click(&mut app, handle(&output, side_size));
+        assert!(!app.tools_sidebar_hidden);
+    }
+
+    #[test]
+    fn blank_filmstrip_menu_creates_an_empty_group_and_footer_buttons_are_absent() {
+        let ctx = egui::Context::default();
+        let mut app = PixelForge::default();
+        let frame = |app: &mut PixelForge, events| {
+            ctx.run(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 640.0))),
+                    events,
                     ..Default::default()
                 },
                 |ctx| {
@@ -9121,51 +9935,37 @@ mod workspace_tests {
                 },
             )
         };
-        let label = |output: &egui::FullOutput, value: &str| {
-            output
-                .shapes
-                .iter()
-                .rev()
-                .find_map(|shape| match &shape.shape {
-                    egui::Shape::Text(text) if text.galley.job.text == value => Some((
-                        text.pos,
-                        text.pos.y + text.galley.size().y,
-                        shape.clip_rect.bottom(),
-                    )),
-                    _ => None,
-                })
-                .unwrap_or_else(|| {
-                    let painted: Vec<_> = output
-                        .shapes
-                        .iter()
-                        .filter_map(|shape| match &shape.shape {
-                            egui::Shape::Text(text) => Some(text.galley.job.text.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    panic!("Expected {value:?} in {painted:?}");
-                })
+        let button = |pos, pressed, button| egui::Event::PointerButton {
+            pos, pressed, button, modifiers: egui::Modifiers::NONE,
         };
-        frame(&mut app); // Let the bottom panel settle to its minimum height.
-        let empty = frame(&mut app);
-        let (empty_button, _, _) = label(&empty, "+ New Group");
-        app.thumbnail_groups.push(ThumbnailGroup {
-            name: "Drafts".into(),
-            collapsed: false,
-        });
-        let mut thumbnail = fixture_thumbnail(&ctx, 1, None);
-        thumbnail.group = Some(0);
-        app.generation_gallery.push(thumbnail);
-        let populated = frame(&mut app);
-        let (populated_button, _, _) = label(&populated, "+ New Group");
-        assert_eq!(empty_button, populated_button);
-        let (_, caption_bottom, clip_bottom) = label(&populated, "Version 1");
-        assert!(caption_bottom <= clip_bottom + 1.0);
-        let gap = populated_button.y - caption_bottom;
-        assert!(
-            gap < 25.0,
-            "Unexpected {gap:.1}-point gap after the caption"
-        );
+        let text = |output: &egui::FullOutput, value: &str| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == value => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+        };
+        frame(&mut app, vec![]);
+        let output = frame(&mut app, vec![]);
+        assert!(text(&output, "+ New Group").is_none());
+        assert!(text(&output, "No group selected").is_none());
+        let blank = Pos2::new(500.0, text(&output, "Ungrouped (0)").unwrap().y + 25.0);
+        frame(&mut app, vec![
+            egui::Event::PointerMoved(blank),
+            button(blank, true, egui::PointerButton::Secondary),
+        ]);
+        frame(&mut app, vec![button(blank, false, egui::PointerButton::Secondary)]);
+        let output = frame(&mut app, vec![]);
+        let item = text(&output, "New Group…").expect("blank filmstrip menu");
+        frame(&mut app, vec![
+            egui::Event::PointerMoved(item),
+            button(item, true, egui::PointerButton::Primary),
+        ]);
+        frame(&mut app, vec![button(item, false, egui::PointerButton::Primary)]);
+        assert!(matches!(app.group_dialog, Some(GroupDialog::Name {
+            group: None, ref name, ref thumbnails,
+        }) if name.is_empty() && thumbnails.is_empty()));
     }
 
     #[test]
@@ -9446,17 +10246,19 @@ mod workspace_tests {
     }
 
     #[test]
-    fn imports_and_new_batches_use_the_destination_but_edits_follow_their_source() {
+    fn new_images_and_edits_use_the_selected_group_with_distinct_fallbacks() {
         let ctx = egui::Context::default();
         let mut app = PixelForge::default();
         app.create_thumbnail_group("Originals".into(), &[]);
+        app.select_thumbnail_group(Some(Some(0)));
         app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 10, None).pixels.as_ref().clone());
         assert_eq!(app.generation_gallery[0].group, Some(0));
 
         app.create_thumbnail_group("New work".into(), &[]);
+        app.select_thumbnail_group(Some(Some(1)));
         app.bind_workspace_editor(&ctx);
         app.keep_workspace_version(&ctx, "Manual edits");
-        assert_eq!(app.generation_gallery[1].group, Some(0));
+        assert_eq!(app.generation_gallery[1].group, Some(1));
         assert_eq!(app.generation_gallery[1].settings.refine_parent, Some(0));
 
         app.generation_batch_group = app.thumbnail_destination;
@@ -9471,11 +10273,9 @@ mod workspace_tests {
         assert_eq!(app.generation_gallery[2].group, Some(1));
 
         app.append_imported_thumbnail(&ctx, fixture_thumbnail(&ctx, 30, None).pixels.as_ref().clone());
-        app.thumbnail_destination = Some(1);
-        let mut edit = fixture_thumbnail(&ctx, 31, Some(3));
-        edit.group = app.thumbnail_destination;
-        app.append_thumbnail(edit);
-        assert_eq!(app.generation_gallery[4].group, None);
+        assert_eq!(app.thumbnail_group_for(Some(0)), Some(0));
+        app.select_thumbnail_group(Some(None));
+        assert_eq!(app.thumbnail_group_for(Some(0)), None);
     }
 
     #[test]
@@ -9484,6 +10284,7 @@ mod workspace_tests {
         let mut app = PixelForge::default();
         app.create_thumbnail_group("Drafts".into(), &[]);
         app.create_thumbnail_group("Finals".into(), &[]);
+        app.select_thumbnail_group(Some(Some(1)));
         app.move_thumbnail_group(Some(1), 0);
         assert_eq!(app.thumbnail_destination, Some(0));
         assert_eq!(app.thumbnail_groups[0].name, "Finals");
@@ -9539,18 +10340,44 @@ mod workspace_tests {
             modifiers: egui::Modifiers::NONE,
         };
         let output = frame(&mut app, vec![]);
-        let ungrouped = label(&output, "Ungrouped").unwrap();
+        let indicator = |output: &egui::FullOutput, filled: bool| {
+            output.shapes.iter().find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect)
+                    if rect.rect.size() == Vec2::splat(9.0)
+                        && (rect.fill != egui::Color32::TRANSPARENT) == filled =>
+                {
+                    Some(rect.rect.center())
+                }
+                _ => None,
+            })
+        };
+        let ungrouped = indicator(&output, false).unwrap();
         frame(
             &mut app,
             vec![egui::Event::PointerMoved(ungrouped), click(ungrouped, true)],
         );
         let output = frame(&mut app, vec![click(ungrouped, false)]);
         assert!(app.ungrouped_collapsed);
+        let output = frame(&mut app, vec![]);
+        assert_eq!(indicator(&output, true), Some(ungrouped));
+        assert!(label(&output, "Ungrouped (2)").is_some());
         assert!(label(&output, "Version 1").is_some());
         assert!(label(&output, "Version 2").is_none());
 
         let drafts = label(&output, "Drafts").unwrap();
-        let target = ungrouped - egui::vec2(15.0, 0.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(drafts), click(drafts, true)]);
+        frame(&mut app, vec![click(drafts, false)]);
+        assert_eq!(app.selected_thumbnail_group(), Some(Some(0)));
+        assert!(!app.thumbnail_groups[0].collapsed);
+        frame(&mut app, vec![egui::Event::Key {
+            key: egui::Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        assert_eq!(app.selected_thumbnail_group(), None);
+        let target = ungrouped;
         frame(
             &mut app,
             vec![egui::Event::PointerMoved(drafts), click(drafts, true)],
