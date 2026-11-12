@@ -14,24 +14,27 @@ PixelForge is a Windows desktop image studio that brings local AI generation, co
 
 **Edit**, **AI Tools**, **Generate**, and **Selection** share the same canvas and bottom version history. Switching tools keeps the working image, zoom, pan, and selection in place.
 
-- **Version history:** generated images, AI edits, and cleanup results appear as thumbnails. Right-click to rename or remove a version; save manual adjustments as a new version when needed.
+- **Project tabs:** keep several projects open with separate images, version histories, and settings. Background jobs return results to the project that started them.
+- **Thumbnail groups:** Ctrl-click to select several versions, then right-click and choose **Add to New Group…**. Collapse groups to a cover thumbnail, drag versions within or between groups, and drag group headers to reorder groups. Right-click to rename or remove a version. Version names stay with their images when you reorder them.
+- **New versions:** edits join the source image's group. Imports and new generations join the selected group. Right-click a thumbnail or group to open it in an independent, unsaved project. When opening a group, choose whether to keep the group or open its images as individual thumbnails.
 - **Sliding comparison:** keep a reference on the left and a working version on the right. New results update the right side while your reference stays selected.
-- **Canvas navigation:** scroll to zoom, pan, and double-click to fit. Rotate a version in place by 90°; subsequent edits use its orientation.
+- **Canvas navigation:** scroll over the canvas to zoom, or over the filmstrip to browse thumbnails. Pan and double-click to fit. Rotate a version in place by 90° to use that orientation in subsequent edits.
 - **Project saving:** save images, versions, names, settings, adjustments, and selections in a `.pxf` project. Save & Exit updates the existing file.
-- **Image export:** export PNG, JPEG, or WebP independently of the project.
+- **Image export:** save a single image or use **Export → Batch Export** to save selected or all thumbnails as PNG, JPEG, or WebP.
 
 ## Local generation and conversational editing
 
 Separate **Initial prompt**, **Negative prompt**, and **Changes prompt** areas make creation and refinement easy to follow.
 
 - Independent generation and edit model selection.
-- SDXL generation, image-to-image refinement, and masked inpainting.
+- SDXL generation, image-to-image refinement, and masked inpainting that preserves pixels outside the mask.
 - FLUX.2 Klein generation and instruction-based editing.
 - Qwen-Image-Edit 2509 and 2511 instruction-based editing.
 - Whole-image edits or **Apply Edit to Selection**, with feathered blending at the boundary.
 - Styles, aspect ratios, custom resolution, batches, seeds, sampling steps, and model-specific defaults.
 - Automatic SDXL negative prompts with editable additional exclusions.
-- English spell checking with red underlines and right-click suggestions.
+- English spell checking with red underlines and right-click suggestions. Prompt editors keep highlighted text selected when you right-click to Cut or Copy.
+- Use local AI Assist in **Prompt Guide** to revise a draft. Choose **Transfer to Initial Prompt** to use a suggestion and keep your scratchpad for further drafts.
 - Bottom generation progress and cancellation, plus image settings and prompt details.
 
 FLUX Klein uses CFG 1 and ignores negative prompts. SDXL selection edits use inpainting; Qwen and FLUX edit internally and composite the selected area back into the original. Edits return to the source pixel dimensions.
@@ -58,7 +61,7 @@ Selection painting, undo/redo, and named saved selections are integrated into th
 
 ## Models in one library
 
-The in-app **Model Library** provides installation status, downloads, progress, cancellation, and file-removal previews.
+Open **Setup → Model Library** to see installed models, manage downloads, and preview files before removal. Choose **Continue Download** when a supported download has saved progress. PixelForge suggests a model folder on first setup and remembers any custom folder you choose.
 
 | Model | Supported workflows |
 | --- | --- |
@@ -66,6 +69,8 @@ The in-app **Model Library** provides installation status, downloads, progress, 
 | RealVisXL V5 | Generation, refinement, inpainting |
 | Juggernaut XL v9 | Generation, refinement, inpainting |
 | CyberRealisticPony v18 | Generation, refinement, inpainting |
+| Pony Diffusion V6 XL | Generation |
+| FLUX.1 Dev (FP8) | Generation with optional local LoRA support |
 | CyberRealistic XL v10 FP16 | Generation, refinement, inpainting |
 | CyberRealistic Z-Image Turbo v4 | Generation; 9 steps, CFG 1 |
 | FLUX.2 Klein 4B FP8 | Generation, instruction editing, AI Restore |
@@ -80,7 +85,7 @@ Models and third-party engines are downloaded separately and remain subject to t
 
 - Open multiple projects with separate image histories and job results.
 - Organize the filmstrip with collapsible groups, drag and drop, and stable version names.
-- Batch export thumbnails, export JPEGs, and continue interrupted model downloads.
+- Export selected thumbnails in one batch, open groups as new projects, and resume supported model downloads.
 - Find diagnostics, dependencies, and models in separate Setup windows.
 
 See the [v0.6.6 release notes](docs/RELEASE_NOTES_v0.6.6.md) for details.
@@ -89,8 +94,8 @@ See the [v0.6.6 release notes](docs/RELEASE_NOTES_v0.6.6.md) for details.
 
 1. Choose a download from [Releases](https://github.com/EtherealProject3D/PixelForge/releases/tag/v0.6.6): **PixelForge-v0.6.6-windows-x64-setup.exe** for installation, or **PixelForge-v0.6.6-windows-x64.zip** for portable use.
 2. The installer defaults to **Program Files\Pixel Forge**, adds a Start menu entry, and offers an optional desktop shortcut. Alternatively, extract the portable ZIP into a writable folder and open **PixelForge.exe**. Neither download requires Rust.
-3. Open **Setup → Dependencies** to check and install the components needed by your tools. Missing required components highlight that menu item.
-4. For generation/editing, connect a compatible local ComfyUI Desktop installation or install PixelForge's managed portable backend.
+3. Open **Setup → Dependencies** to check and install the components needed by your tools. A count beside **Setup** shows missing required components.
+4. For generation and editing, open **Setup → Setup & Diagnostics** to connect ComfyUI, choose Auto, GPU, or CPU, and run diagnostics. You can use a compatible ComfyUI Desktop installation or PixelForge's managed portable backend.
 5. In **Setup → Model Library**, use the recommended folder or choose a custom one, install a model, and refresh installed models.
 6. Generate or import an image. Use **AI Tools** for restoration, **Changes prompt** for edits, and **Compare** to evaluate results.
 7. Save a `.pxf` project to retain history, or export a finished image.
@@ -104,7 +109,7 @@ See the [v0.6.6 release notes](docs/RELEASE_NOTES_v0.6.6.md) for details.
 
 ### Dependency management
 
-The **Dependencies** window reports status and offers supported install, update, and rollback actions for managed ComfyUI, Waifu2x, Real-ESRGAN, the NAFNet model, and its Python runtime. Managed updates use separate versions and activate after validation. GPU drivers remain vendor-managed; existing external installations are not replaced.
+The **Dependencies** window reports status and offers supported install, update, and rollback actions for managed components. It includes ComfyUI, Ollama, Waifu2x, Real-ESRGAN, NAFNet, and Python. Managed updates use separate versions and activate after validation. GPU drivers remain vendor-managed; existing external installations are not replaced.
 
 ### App updates (v0.6.1 onward)
 
@@ -141,6 +146,6 @@ Close PixelForge before rebuilding its executable. Source checkouts include `scr
 
 ## Release notes and support
 
-Read [What's new in v0.6.6](docs/RELEASE_NOTES_v0.6.6.md) for the release overview and validation limits. Windows automated tests cover processing helpers, AI workflow construction, version/selection state, comparison interactions, and project round trips. GPU speed and restoration quality vary by model and photo.
+Read [What's new in v0.6.6](docs/RELEASE_NOTES_v0.6.6.md) for the release overview. Windows automated tests cover processing helpers, AI workflow construction, version/selection state, comparison interactions, and project round trips. GPU speed and restoration quality vary by model and photo.
 
 When [reporting an issue](https://github.com/EtherealProject3D/PixelForge/issues), include the version, GPU, model, operation, image dimensions, and exact error. Only attach photos you are comfortable sharing publicly.
